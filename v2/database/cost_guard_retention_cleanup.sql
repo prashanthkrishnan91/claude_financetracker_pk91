@@ -30,6 +30,11 @@
 --   intel_run_sessions.pre_session_snapshot_id → intel_v3_snapshots(id) ON DELETE SET NULL
 --   intel_run_sessions.completed_snapshot_id   → intel_v3_snapshots(id) ON DELETE SET NULL
 --   (the four session FKs are added by migration 026_intel_run_sessions.sql)
+--   intel_run_tickers.run_session_id            → intel_run_sessions(id) ON DELETE CASCADE  ⚠
+--   intel_run_tasks.run_session_id              → intel_run_sessions(id) ON DELETE CASCADE  ⚠
+--   intel_run_specialist_outputs.run_session_id → intel_run_sessions(id) ON DELETE CASCADE  ⚠
+--   (the three distributed-workflow FKs are added by migration
+--    027_intel_run_distributed_tasks.sql)
 --
 -- ⚠ = CASCADE: if parent is deleted, child is deleted automatically.
 --     Explicit child deletion below prevents CASCADE from removing rows
@@ -121,6 +126,38 @@ WHERE created_at < NOW() - INTERVAL '7 days';
 DELETE FROM public.research_artifacts
 WHERE created_at < NOW() - INTERVAL '7 days';
 
+-- ── 9a. Distributed-workflow children (before intel_run_sessions) ─────────────
+-- FKs (migration 027): all three are ON DELETE CASCADE children of
+-- intel_run_sessions ⚠. Deleting them explicitly first keeps the retention
+-- boundary honest for both tables and prevents the session CASCADE in step 10
+-- from silently removing younger-than-window rows that belong to an
+-- older-than-window terminal session. Rows of preserved (active) sessions are
+-- untouched: the parent filter matches only terminal old sessions.
+-- NOTE: NO age-only branch here — rows of a still-active session are always
+-- preserved regardless of age (a long-running/stuck session must never lose
+-- its durable task state to retention). Rows can only age out with their
+-- terminal parent session.
+DELETE FROM public.intel_run_specialist_outputs
+WHERE run_session_id IN (
+       SELECT id FROM public.intel_run_sessions
+       WHERE status IN ('completed', 'completed_with_gaps', 'failed', 'superseded')
+         AND created_at < NOW() - INTERVAL '7 days'
+   );
+
+DELETE FROM public.intel_run_tasks
+WHERE run_session_id IN (
+       SELECT id FROM public.intel_run_sessions
+       WHERE status IN ('completed', 'completed_with_gaps', 'failed', 'superseded')
+         AND created_at < NOW() - INTERVAL '7 days'
+   );
+
+DELETE FROM public.intel_run_tickers
+WHERE run_session_id IN (
+       SELECT id FROM public.intel_run_sessions
+       WHERE status IN ('completed', 'completed_with_gaps', 'failed', 'superseded')
+         AND created_at < NOW() - INTERVAL '7 days'
+   );
+
 -- ── 10. intel_run_sessions (terminal sessions only; before intel_v3_snapshots) ─
 -- FKs (migration 026):
 --   analyst_refresh_jobs.run_session_id → intel_run_sessions(id) ON DELETE CASCADE  ⚠
@@ -138,7 +175,7 @@ WHERE created_at < NOW() - INTERVAL '7 days';
 -- Deleting a session SET-NULLs intel_v3_snapshots.run_session_id, so the
 -- snapshot cleanup in step 11 can never fail on a session reference.
 DELETE FROM public.intel_run_sessions
-WHERE status IN ('completed', 'failed')
+WHERE status IN ('completed', 'failed', 'completed_with_gaps', 'superseded')
   AND created_at < NOW() - INTERVAL '7 days';
 
 -- ── 11. intel_v3_snapshots (after intel_run_sessions) ─────────────────────────

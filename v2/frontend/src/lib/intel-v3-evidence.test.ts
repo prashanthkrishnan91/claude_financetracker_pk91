@@ -236,6 +236,17 @@ describe("buildDataHealthRows", () => {
     expect(intelRow.status).toBe("blocked");
   });
 
+  it("worker_certified_with_gaps snapshot source → amber pending, plain English, never blocked", () => {
+    const rows = buildDataHealthRows({ intelSnapshotSource: "worker_certified_with_gaps" });
+    const intelRow = rows.find((r) => r.label === "Intel snapshot")!;
+    expect(intelRow.status).toBe("pending");
+    expect(intelRow.status).not.toBe("blocked");
+    expect(intelRow.detail).toContain("couldn't be analyzed");
+    // The raw enum (with or without underscores) must never render.
+    expect(intelRow.detail).not.toContain("worker_certified_with_gaps");
+    expect(intelRow.detail.toLowerCase()).not.toContain("worker certified with gaps");
+  });
+
   it("certified_current freshness → ok status", () => {
     const rows = buildDataHealthRows({ intelFreshnessState: "certified_current" });
     const row = rows.find((r) => r.label === "Evidence freshness")!;

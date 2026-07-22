@@ -2,25 +2,29 @@
  * Advisor readiness model — pure helpers (no React).
  *
  * Derives the Section A readiness model for the unified Advisor view from
- * (a) the Intel v3 snapshot query state and (b) the last POST /intel/v3/run
- * mutation result. Reuses the certified-status derivation from
- * `intel-v3-banner.ts` — it never invents a new "Ready" definition.
+ * (a) the Intel v3 snapshot query state and (b) the latest distributed
+ * run-session status payload (POST /intel/v3/run create response or a
+ * GET /sessions/{id}/status poll). Reuses the certified-status derivation
+ * from `intel-v3-banner.ts` — it never invents a new "Ready" definition.
  *
  * Hard invariant: NEVER report "Ready" unless a certified snapshot actually
  * exists (worker_certified, full coverage, not stale, evidence current).
  *
- * Run state machine:
- *   idle → running → partial (another bounded batch required)
- *        → complete (snapshot_available_after_run)
- *        → failed (jobs failed and none succeeded, the request errored,
- *                  enqueue or deterministic recertification failed, or
- *                  snapshot writes are disabled by the cost guard)
- *        → queue_only (on-demand processing disabled on the server)
+ * Run state machine (distributed workflow — the backend executes the run;
+ * the browser only observes):
+ *   idle → running (session created/running; browser polls)
+ *        → complete (completed | completed_with_gaps)
+ *        → failed (request error, session failed, create failed, not found)
+ *
+ * There is no "partial" state (no browser-driven continuation batches) and
+ * no "queue_only" state (the backend worker always executes the session).
+ * Progress copy comes from the backend's pre-sanitized `plain_status`
+ * sentence — never from task tables, queue metrics, or internal codes.
  */
 
 import type {
   IntelV3Action,
-  IntelV3RunResult,
+  IntelV3SessionStatus,
   IntelV3Snapshot,
 } from "@/lib/api";
 import type { AdvisorTruthContract } from "@/lib/advisor-truth";
@@ -28,66 +32,40 @@ import { buildStatusPillState } from "@/lib/intel-v3-banner";
 
 // ── Run state machine types ───────────────────────────────────────────────────
 
-export type AdvisorRunState =
-  | "idle"
-  | "running"
-  | "partial"
-  | "complete"
-  | "failed"
-  | "queue_only";
+export type AdvisorRunState = "idle" | "running" | "complete" | "failed";
 
 export type AdvisorRunButtonLabel =
   | "Run Intel"
-  | "Continue Intel run"
+  | "Running…"
   | "Retry Intel run";
 
-export interface AdvisorRunJobs {
-  queued: number;
-  attempted: number;
-  succeeded: number;
-  failed: number;
-  /** Jobs still waiting after this bounded batch: queued − succeeded − failed (never negative). */
-  remaining: number;
+/** Plain-English-safe ticker progress (holdings, not tasks or queue jobs). */
+export interface AdvisorRunProgress {
+  totalTickers: number;
+  /** Holdings whose decision work is finished (including degraded ones). */
+  decidedTickers: number;
+  /** Holdings that could not be fully analyzed this run. */
+  failedOrDegradedTickers: number;
 }
 
 export interface AdvisorRunModel {
   state: AdvisorRunState;
   buttonLabel: AdvisorRunButtonLabel;
-  /** True while the run request is in flight — button disabled + spinner. */
+  /** True while the session is being created or is still executing — button disabled + spinner. */
   buttonBusy: boolean;
-  /** Truthful plain-English next step for the user. Never a raw backend code. */
+  /** Truthful plain-English status for the user. Never a raw backend code. */
   nextActionSentence: string;
-  jobs: AdvisorRunJobs;
-  /** True when the run reported snapshot_available_after_run — the UI should
+  progress: AdvisorRunProgress;
+  /** True when the run finished and published a snapshot — the UI should
    *  invalidate ["intel_v3","snapshot"] so the fresh snapshot loads. */
   shouldRefetchSnapshot: boolean;
-  /** Why the bounded batch stopped where it did (partial/queue_only), else null. */
-  boundedStopReason: string | null;
+  /** True when the run completed but some holdings had limited evidence. */
+  completedWithGaps: boolean;
 }
 
 // ── Plain-English sentences (exported for tests and UI reuse) ─────────────────
 
-export const QUEUE_ONLY_SENTENCE =
-  "Analysis is paused on the server right now. Your holdings were queued, but nothing " +
-  "will process them until on-demand processing is switched back on.";
-
-/** Operator detail for QUEUE_ONLY (server flag name) — technical-detail only. */
-export const QUEUE_ONLY_TECHNICAL_DETAIL =
-  "Server flag INTEL_V3_ON_DEMAND_REFRESH_ENABLED is off; enable it or run the analyst " +
-  "refresh worker entrypoint separately.";
-
-export const SNAPSHOT_WRITES_DISABLED_SENTENCE =
-  "Analysis finished, but the result could not be saved because snapshot updates are " +
-  "temporarily paused on the server.";
-
-/** Operator detail for the writes-paused state (server flag name) — technical-detail only. */
-export const SNAPSHOT_WRITES_DISABLED_TECHNICAL_DETAIL =
-  "Cost-guard flag INTEL_V3_SNAPSHOT_WRITES_ENABLED is off; new snapshots are not persisted.";
-
 export const CERTIFIED_CURRENT_SENTENCE = "Certified snapshot is current.";
-
-export const NO_STALE_EVIDENCE_SENTENCE =
-  "All analyst evidence is already current — nothing needed refreshing.";
 
 export const ADD_POSITIONS_SENTENCE =
   "There are no active holdings to analyze. Add positions before running Intel.";
@@ -104,152 +82,88 @@ export const RUN_IDLE_CERTIFIED_SENTENCE =
   "Certified snapshot is current. Run Intel again to refresh evidence when needed.";
 
 export const RUN_IN_PROGRESS_SENTENCE =
-  "Intel run in progress — refreshing analyst evidence for your holdings.";
+  "Intel run in progress — analyzing your holdings.";
 
-export function continueSentence(succeeded: number, queued: number): string {
-  return `This run refreshed ${succeeded} of ${queued} holdings. Continue to process the rest.`;
-}
+export const RUN_COMPLETED_SENTENCE =
+  "Intel run finished — your recommendations are up to date.";
 
-export function jobsFailedSentence(failed: number): string {
-  return `${failed} job${failed === 1 ? "" : "s"} failed and none succeeded this run. Retry the Intel run.`;
-}
+/** Caveat sentence for completed_with_gaps — complete, but honestly qualified. */
+export const RUN_COMPLETED_WITH_GAPS_SENTENCE =
+  "Intel run finished, but some holdings had limited evidence this run — results may have gaps.";
 
-// ── Durable-job state actions (product-recovery Blocker 3) ────────────────────
-// Backend next_required_action values for the two new durable-job states plus
-// the active-ticker lookup failure. Deliberately NOT "reclick_"-prefixed —
-// they must read as a stopped "failed" state (Retry control), never the
-// generic "reclick_" -> partial/auto-continue bucket below.
+export const RUN_FAILED_SENTENCE =
+  "This run could not finish. Retry when you're ready.";
 
-export const ANALYST_JOBS_BACKOFF_ACTION = "analyst_jobs_in_backoff_retry_after_window";
-export const ANALYST_JOBS_TERMINAL_ACTION = "analyst_jobs_retry_budget_exhausted";
-export const ACTIVE_TICKERS_LOOKUP_FAILED_ACTION = "active_tickers_lookup_failed_retry";
-
-export const ANALYST_JOBS_TERMINAL_SENTENCE =
-  "Some holdings exhausted their analyst-refresh retry budget. Retry the Intel run to try again.";
-
-export function analystJobsBackoffSentence(earliestRetryAt: string | null | undefined): string {
-  if (!earliestRetryAt) {
-    return "Some holdings are waiting on a retry cooldown before they can refresh again. Retry shortly.";
-  }
-  const ts = new Date(earliestRetryAt).getTime();
-  if (Number.isNaN(ts)) {
-    return "Some holdings are waiting on a retry cooldown before they can refresh again. Retry shortly.";
-  }
-  const minutes = Math.max(1, Math.ceil((ts - Date.now()) / 60_000));
-  return `Some holdings are waiting on a retry cooldown (about ${minutes} minute${minutes === 1 ? "" : "s"}) before they can refresh again.`;
-}
+export const RUN_NOT_FOUND_SENTENCE =
+  "That run could no longer be found. Start a new Intel run.";
 
 // ── Run model derivation ──────────────────────────────────────────────────────
 
 export interface AdvisorRunInput {
-  /** True while the POST /intel/v3/run request is in flight. */
+  /** True from the Run Intel click until the session reaches a terminal state. */
   isRunPending: boolean;
-  /** True when the last run request itself errored (network/HTTP). */
+  /** True when the run request or polling irrecoverably errored (network/HTTP). */
   isRunError: boolean;
-  /** Last successful 202 result from POST /intel/v3/run, if any. */
-  lastRunResult: IntelV3RunResult | null | undefined;
+  /** Latest session-status payload (create response or poll), if any. */
+  lastRunResult: IntelV3SessionStatus | null | undefined;
 }
 
-export function deriveRunJobs(result: IntelV3RunResult | null | undefined): AdvisorRunJobs {
-  const attempted = result?.on_demand_jobs_attempted ?? 0;
-  const failed = result?.on_demand_jobs_failed ?? 0;
+/** Session statuses that mean the run reached its end state. */
+export function isTerminalSessionStatus(
+  result: IntelV3SessionStatus | null | undefined,
+): boolean {
+  if (!result) return false;
+  if (result.terminal === true) return true;
+  const status = result.session_status;
+  return (
+    status === "completed" ||
+    status === "completed_with_gaps" ||
+    status === "failed" ||
+    status === "not_created" ||
+    status === "not_found"
+  );
+}
 
-  // Durable-session responses carry explicit cumulative session state — use
-  // it directly instead of reconstructing progress from one request's batch
-  // counts. Legacy responses (no session fields) keep the old derivation.
-  if (typeof result?.session_remaining_ticker_count === "number") {
-    const queued = result.expected_ticker_count ?? result.queued_ticker_count ?? 0;
-    const succeeded =
-      result.session_succeeded_ticker_count ?? result.on_demand_jobs_succeeded ?? 0;
-    return {
-      queued,
-      attempted,
-      succeeded,
-      failed,
-      remaining: Math.max(0, result.session_remaining_ticker_count),
-    };
-  }
-
-  const queued = result?.queued_ticker_count ?? 0;
-  const succeeded = result?.on_demand_jobs_succeeded ?? 0;
+export function deriveRunProgress(
+  result: IntelV3SessionStatus | null | undefined,
+): AdvisorRunProgress {
   return {
-    queued,
-    attempted,
-    succeeded,
-    failed,
-    remaining: Math.max(0, queued - succeeded - failed),
+    totalTickers: result?.total_tickers ?? 0,
+    decidedTickers: result?.decision_complete_tickers ?? 0,
+    failedOrDegradedTickers: result?.failed_or_degraded_tickers ?? 0,
   };
 }
 
-// ── Bounded automatic continuation (Part A3) ──────────────────────────────────
-//
-// One Run Intel click may need several bounded server-side quanta to drain a
-// full portfolio (each POST /intel/v3/run request is capped to a small,
-// production-safe wall-clock bound — see analyst_refresh_on_demand_drain_v1).
-// Rather than requiring the user to repeatedly click "Continue Intel run",
-// the Run Intel hook in hooks.ts calls the endpoint again automatically
-// while `shouldAutoContinueRun` says so. This function is pure/no-timers so
-// the cap logic is unit-testable without mounting React or faking timers.
-
-/** Hard ceiling on automatic continuation requests for one Run Intel click. */
-export const RUN_INTEL_MAX_CONTINUATIONS = 20;
-
-/**
- * Hard ceiling on total elapsed wall-clock time for one Run Intel click.
- *
- * Sized to honestly accommodate the largest supported run under the server's
- * per-request bounds: each bounded request drains at most 3 tickers in ≤ 20s
- * (analyst_refresh_on_demand_drain_v1), so a 32-holding portfolio needs up to
- * ceil(32/3) = 11 analyst batches plus a final publication request — 12
- * requests ≈ 240s in the worst case where every batch runs to its 20s bound.
- * 300s covers that with headroom while still being a real ceiling; the
- * request-count cap (20) and the per-request 20s server bound are unchanged.
- */
-export const RUN_INTEL_MAX_ELAPSED_MS = 300_000;
-
-/**
- * Whether the hook should automatically fire another continuation request
- * without the user clicking again. True only while the run state machine
- * reads "partial" (a bounded batch stopped short with resumable work) and
- * neither the attempt cap nor the elapsed-time cap has been reached.
- */
-export function shouldAutoContinueRun(
-  result: IntelV3RunResult | null | undefined,
-  attemptsSoFar: number,
-  elapsedMs: number,
-): boolean {
-  if (attemptsSoFar >= RUN_INTEL_MAX_CONTINUATIONS) return false;
-  if (elapsedMs >= RUN_INTEL_MAX_ELAPSED_MS) return false;
-  const { state } = deriveRunModel({
-    isRunPending: false,
-    isRunError: false,
-    lastRunResult: result,
-  });
-  return state === "partial";
+/** The backend's pre-sanitized plain-English sentence, if it sent one. */
+function plainStatusSentence(
+  result: IntelV3SessionStatus | null | undefined,
+): string | null {
+  const sentence = result?.plain_status?.trim();
+  return sentence ? sentence : null;
 }
 
 export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
   const { isRunPending, isRunError, lastRunResult } = input;
-  const jobs = deriveRunJobs(lastRunResult);
+  const progress = deriveRunProgress(lastRunResult);
   const base = {
-    jobs,
-    shouldRefetchSnapshot: lastRunResult?.snapshot_available_after_run === true,
-    boundedStopReason: null as string | null,
+    progress,
+    shouldRefetchSnapshot: false,
+    completedWithGaps: false,
   };
 
-  // 1. A request in flight always reads as running.
+  // 1. Session creating or executing — the browser is polling; button busy.
   if (isRunPending) {
     return {
       ...base,
       state: "running",
-      buttonLabel: "Run Intel",
+      buttonLabel: "Running…",
       buttonBusy: true,
-      nextActionSentence: RUN_IN_PROGRESS_SENTENCE,
-      shouldRefetchSnapshot: false,
+      nextActionSentence:
+        plainStatusSentence(lastRunResult) ?? RUN_IN_PROGRESS_SENTENCE,
     };
   }
 
-  // 2. Request-level failure.
+  // 2. Request-level failure (network/HTTP/auth).
   if (isRunError) {
     return {
       ...base,
@@ -257,7 +171,6 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
       buttonLabel: "Retry Intel run",
       buttonBusy: false,
       nextActionSentence: RUN_REQUEST_FAILED_SENTENCE,
-      shouldRefetchSnapshot: false,
     };
   }
 
@@ -269,162 +182,89 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
       buttonLabel: "Run Intel",
       buttonBusy: false,
       nextActionSentence: RUN_IDLE_SENTENCE,
-      shouldRefetchSnapshot: false,
     };
   }
 
-  const next = lastRunResult.next_required_action ?? "";
-  const status = lastRunResult.status;
+  const status = lastRunResult.session_status;
+  const plain = plainStatusSentence(lastRunResult);
 
-  // 4. Backend-reported enqueue/run failure, including a deterministic
-  //    recertification failure (mapping/Stage 7/8E/8F prewarm attempted and
-  //    failed) — no existing status/action value truthfully means "retry"
-  //    for these, so match the suffix rather than inventing a new one.
-  if (
-    status === "enqueue_failed" ||
-    status === "failed" ||
-    status.endsWith("_recertification_failed")
-  ) {
+  // 4. Completed — snapshot published; caveat sentence when gaps remain.
+  if (status === "completed" || status === "completed_with_gaps") {
+    const withGaps = status === "completed_with_gaps";
     return {
       ...base,
-      state: "failed",
-      buttonLabel: "Retry Intel run",
+      state: "complete",
+      buttonLabel: "Run Intel",
       buttonBusy: false,
       nextActionSentence:
-        lastRunResult.message?.trim() || RUN_REQUEST_FAILED_SENTENCE,
+        plain ??
+        (withGaps ? RUN_COMPLETED_WITH_GAPS_SENTENCE : RUN_COMPLETED_SENTENCE),
+      shouldRefetchSnapshot: Boolean(lastRunResult.completed_snapshot_id),
+      completedWithGaps: withGaps,
     };
   }
 
-  // 5. Queue-only: on-demand processing disabled — jobs queued but nothing drains them.
-  if (next.startsWith("queue_only")) {
-    return {
-      ...base,
-      state: "queue_only",
-      buttonLabel: "Run Intel",
-      buttonBusy: false,
-      nextActionSentence: QUEUE_ONLY_SENTENCE,
-      boundedStopReason:
-        "Jobs were queued but on-demand processing is disabled — this batch did not process anything.",
-    };
-  }
-
-  // 5.5. Durable-job backoff/terminal/lookup-failure — must read as a
-  //      stopped "failed" state (Retry control usable again), never as
-  //      "partial" (which would auto-continue), and must outrank the
-  //      "complete" check below so a historical snapshot can never mask a
-  //      backlog of durable work still waiting on backoff or permanently
-  //      blocked by an exhausted retry budget.
-  if (next === ANALYST_JOBS_BACKOFF_ACTION) {
+  // 5. Session failed on the backend.
+  if (status === "failed") {
     return {
       ...base,
       state: "failed",
       buttonLabel: "Retry Intel run",
       buttonBusy: false,
-      nextActionSentence: analystJobsBackoffSentence(lastRunResult.earliest_retry_at),
-      boundedStopReason: "Durable analyst-refresh jobs remain but are in backoff — none are due to retry yet.",
+      nextActionSentence: plain ?? RUN_FAILED_SENTENCE,
     };
   }
-  if (next === ANALYST_JOBS_TERMINAL_ACTION) {
+
+  // 6. Session could not be created.
+  if (status === "not_created") {
+    if (lastRunResult.reason === "no_active_holdings") {
+      return {
+        ...base,
+        state: "idle",
+        buttonLabel: "Run Intel",
+        buttonBusy: false,
+        nextActionSentence: ADD_POSITIONS_SENTENCE,
+      };
+    }
     return {
       ...base,
       state: "failed",
       buttonLabel: "Retry Intel run",
       buttonBusy: false,
-      nextActionSentence: ANALYST_JOBS_TERMINAL_SENTENCE,
-      boundedStopReason: "At least one durable analyst-refresh job exhausted its retry budget.",
+      nextActionSentence: plain ?? RUN_REQUEST_FAILED_SENTENCE,
     };
   }
-  if (next === ACTIVE_TICKERS_LOOKUP_FAILED_ACTION) {
+
+  // 7. Session vanished (deleted/expired server-side).
+  if (status === "not_found") {
     return {
       ...base,
       state: "failed",
       buttonLabel: "Retry Intel run",
       buttonBusy: false,
-      nextActionSentence: RUN_REQUEST_FAILED_SENTENCE,
+      nextActionSentence: RUN_NOT_FOUND_SENTENCE,
     };
   }
 
-  // 6. Certified snapshot available after this run — complete.
-  if (lastRunResult.snapshot_available_after_run === true) {
+  // 8. Non-terminal status without an in-flight poll (transient render gap) —
+  //    still honestly "running"; the backend keeps working regardless.
+  if (status === "created" || status === "running") {
     return {
       ...base,
-      state: "complete",
-      buttonLabel: "Run Intel",
-      buttonBusy: false,
-      nextActionSentence: CERTIFIED_CURRENT_SENTENCE,
+      state: "running",
+      buttonLabel: "Running…",
+      buttonBusy: true,
+      nextActionSentence: plain ?? RUN_IN_PROGRESS_SENTENCE,
     };
   }
 
-  // 7. Cost guard: analysis ran but snapshot writes are disabled — nothing usable produced.
-  if (next.endsWith("snapshot_writes_enabled_is_false")) {
-    return {
-      ...base,
-      state: "failed",
-      buttonLabel: "Retry Intel run",
-      buttonBusy: false,
-      nextActionSentence: SNAPSHOT_WRITES_DISABLED_SENTENCE,
-      boundedStopReason:
-        "The bounded batch finished, but the snapshot could not be written (cost guard).",
-    };
-  }
-
-  // 8. All attempted jobs failed and none succeeded — failed, retry.
-  if (jobs.failed > 0 && jobs.succeeded === 0) {
-    return {
-      ...base,
-      state: "failed",
-      buttonLabel: "Retry Intel run",
-      buttonBusy: false,
-      nextActionSentence: jobsFailedSentence(jobs.failed),
-    };
-  }
-
-  // 9. Bounded batch made progress but another batch is required — partial.
-  if (next.startsWith("reclick_") || jobs.remaining > 0) {
-    return {
-      ...base,
-      state: "partial",
-      buttonLabel: "Continue Intel run",
-      buttonBusy: false,
-      nextActionSentence: continueSentence(jobs.succeeded, jobs.queued),
-      boundedStopReason: `Bounded batch stopped after ${jobs.attempted} job${
-        jobs.attempted === 1 ? "" : "s"
-      } — ${jobs.remaining} holding${jobs.remaining === 1 ? "" : "s"} still waiting.`,
-    };
-  }
-
-  // 10. Nothing was stale to refresh.
-  if (
-    next === "none_no_stale_evidence_to_refresh" ||
-    status === "analyst_evidence_current"
-  ) {
-    return {
-      ...base,
-      state: "complete",
-      buttonLabel: "Run Intel",
-      buttonBusy: false,
-      nextActionSentence: NO_STALE_EVIDENCE_SENTENCE,
-    };
-  }
-
-  // 11. No holdings.
-  if (next === "add_positions_before_running_intel" || status === "no_active_holdings") {
-    return {
-      ...base,
-      state: "idle",
-      buttonLabel: "Run Intel",
-      buttonBusy: false,
-      nextActionSentence: ADD_POSITIONS_SENTENCE,
-    };
-  }
-
-  // 12. Honest fallback — a run happened, its outcome vocabulary is unknown.
+  // 9. Honest fallback — a run happened, its outcome vocabulary is unknown.
   return {
     ...base,
     state: "idle",
     buttonLabel: "Run Intel",
     buttonBusy: false,
-    nextActionSentence: RUN_IDLE_SENTENCE,
+    nextActionSentence: plain ?? RUN_IDLE_SENTENCE,
   };
 }
 
@@ -458,6 +298,9 @@ export type AdvisorSnapshotState =
   | "error"
   | "stale"
   | "uncertified"
+  /** Valid-but-caveated: certified over the decided subset, some holdings
+   *  couldn't be analyzed in the last run. Amber, never blocked/unavailable. */
+  | "certified_with_gaps"
   | "certified";
 
 export interface AdvisorReadinessModel {
@@ -552,6 +395,20 @@ function isCertifiedSnapshot(snapshot: IntelV3Snapshot): boolean {
     typeof snapshot.total_holding_count === "number" &&
     snapshot.total_holding_count > 0 &&
     snapshot.certified_holding_count === snapshot.total_holding_count
+  );
+}
+
+/**
+ * Distributed publication with gaps — certified over the decided subset; some
+ * holdings could not be analyzed in the last run. A valid-but-caveated state:
+ * NOT certification_failed, NOT blocked, NOT unavailable — but never "Ready".
+ */
+function isCertifiedWithGapsSnapshot(snapshot: IntelV3Snapshot): boolean {
+  return (
+    snapshot.snapshot_source === "worker_certified_with_gaps" &&
+    typeof snapshot.certified_holding_count === "number" &&
+    typeof snapshot.total_holding_count === "number" &&
+    snapshot.total_holding_count > 0
   );
 }
 
@@ -751,6 +608,16 @@ export function deriveTruthRows(
         ? `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings but is marked stale.`
         : `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings.`,
     };
+  } else if (isCertifiedWithGapsSnapshot(snapshot)) {
+    // Valid-but-caveated — NOT certification_failed, NOT blocked.
+    const analyzed = snapshot.certified_holding_count!;
+    const total = snapshot.total_holding_count!;
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
+      status: "pending",
+      detail: `Recommendations are current for ${analyzed} of ${total} holdings — the rest couldn't be analyzed in the last run.`,
+    };
   } else if (snapshot.snapshot_source === "certification_failed") {
     intelCertification = {
       key: "intel_certification",
@@ -795,7 +662,7 @@ export function deriveAdvisorReadiness(
     snapshotState = isSnapshotMissingError(query.errorMessage) ? "missing" : "error";
   } else if (!snapshot) {
     snapshotState = "missing";
-  } else if (!isCertifiedSnapshot(snapshot)) {
+  } else if (!isCertifiedSnapshot(snapshot) && !isCertifiedWithGapsSnapshot(snapshot)) {
     snapshotState = "uncertified";
   } else if (
     snapshot.is_stale ||
@@ -803,6 +670,8 @@ export function deriveAdvisorReadiness(
     snapshot.evidence_freshness_state === "certification_blocked"
   ) {
     snapshotState = "stale";
+  } else if (isCertifiedWithGapsSnapshot(snapshot)) {
+    snapshotState = "certified_with_gaps";
   } else {
     snapshotState = "certified";
   }

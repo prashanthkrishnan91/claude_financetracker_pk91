@@ -45,11 +45,12 @@ function deriveRepairAction(
 ): CashPlanRepairAction {
   // Run-side repairs take precedence — nothing downstream can be trusted
   // until a certified snapshot exists.
-  if (model.run.state === "partial") return "another bounded batch required";
   if (model.snapshotState === "missing" || model.snapshotState === "uncertified") {
     return "Run Intel required";
   }
   if (model.snapshotState === "stale") return "Run Intel required";
+  // Completed with gaps — running Intel again is how the missing holdings get analyzed.
+  if (model.snapshotState === "certified_with_gaps") return "Run Intel required";
   // Plan-side repairs from the exact backend fix.
   const fromFix = repairActionFromFix(plan?.next_required_fix ?? null);
   if (fromFix) return fromFix;
@@ -72,6 +73,7 @@ export function AdvisorTrustPanel({
   const planBlocked = plan ? plan.status !== "ready" || plan.trusted !== true : null;
   const snapshotExists =
     model.snapshotState === "certified" ||
+    model.snapshotState === "certified_with_gaps" ||
     model.snapshotState === "stale" ||
     model.snapshotState === "uncertified";
   const reconcileSuspected =
@@ -100,10 +102,12 @@ export function AdvisorTrustPanel({
   if (model.snapshotState === "uncertified") {
     problems.push("A snapshot exists but is not fully certified.");
   }
-  if (model.run.state === "partial") {
-    problems.push(model.run.nextActionSentence);
+  if (model.snapshotState === "certified_with_gaps") {
+    problems.push(
+      "Some holdings couldn't be analyzed in the last Intel run — recommendations are current for the rest.",
+    );
   }
-  if (model.run.state === "queue_only" || model.run.state === "failed") {
+  if (model.run.state === "failed") {
     problems.push(model.run.nextActionSentence);
   }
   // Financial-truth problems (degraded/blocked dimensions from the endpoint).
@@ -269,7 +273,6 @@ export function AdvisorTrustPanel({
                 {repairAction === "new portfolio snapshot required" && "New portfolio snapshot required."}
                 {repairAction === "current-price repair required" && "Current-price repair required."}
                 {repairAction === "Run Intel required" && "Run Intel required."}
-                {repairAction === "another bounded batch required" && "Another bounded Intel batch required — use Continue Intel run above."}
               </p>
             ) : (
               <DataUnavailableCallout label="No specific repair action reported yet." />

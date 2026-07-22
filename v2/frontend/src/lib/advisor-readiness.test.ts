@@ -1,35 +1,38 @@
 /**
  * Tests for the Advisor readiness model (Section A state machine).
  * Node environment — pure helpers only, no React.
+ *
+ * Run model contract (distributed workflow): the run state machine derives
+ * from the durable session-status payload (session_status / plain_status /
+ * completed_snapshot_id) — never from batch/job counts. There are no
+ * "partial" or "queue_only" states and no browser-driven continuation.
  */
 
-import type { IntelV3HeldCard, IntelV3RunResult, IntelV3Snapshot } from "@/lib/api";
+import type {
+  IntelV3HeldCard,
+  IntelV3SessionStatus,
+  IntelV3Snapshot,
+} from "@/lib/api";
 import type { AdvisorTruthContract } from "@/lib/advisor-truth";
 import {
-  ACTIVE_TICKERS_LOOKUP_FAILED_ACTION,
   ADD_POSITIONS_SENTENCE,
-  ANALYST_JOBS_BACKOFF_ACTION,
-  ANALYST_JOBS_TERMINAL_ACTION,
-  ANALYST_JOBS_TERMINAL_SENTENCE,
-  CERTIFIED_CURRENT_SENTENCE,
-  NO_STALE_EVIDENCE_SENTENCE,
-  QUEUE_ONLY_SENTENCE,
+  RUN_COMPLETED_SENTENCE,
+  RUN_COMPLETED_WITH_GAPS_SENTENCE,
+  RUN_FAILED_SENTENCE,
   RUN_IDLE_CERTIFIED_SENTENCE,
   RUN_IDLE_SENTENCE,
-  RUN_INTEL_MAX_CONTINUATIONS,
-  RUN_INTEL_MAX_ELAPSED_MS,
+  RUN_IN_PROGRESS_SENTENCE,
+  RUN_NOT_FOUND_SENTENCE,
   RUN_REQUEST_FAILED_SENTENCE,
-  SNAPSHOT_WRITES_DISABLED_SENTENCE,
-  continueSentence,
   deriveActionCounts,
   deriveAdvisorReadiness,
-  deriveRunJobs,
   deriveRunModel,
+  deriveRunProgress,
   deriveTruthRows,
   evidenceFreshnessLabel,
   formatSnapshotAge,
   isSnapshotMissingError,
-  shouldAutoContinueRun,
+  isTerminalSessionStatus,
 } from "@/lib/advisor-readiness";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -79,16 +82,25 @@ function makeSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot
   return { ...base, ...overrides } as IntelV3Snapshot;
 }
 
-function makeRunResult(overrides: Partial<IntelV3RunResult> = {}): IntelV3RunResult {
+function makeSessionStatus(
+  overrides: Partial<IntelV3SessionStatus> = {},
+): IntelV3SessionStatus {
   return {
-    status: "refresh_requested",
-    queued_ticker_count: 0,
-    on_demand_processing_enabled: true,
-    on_demand_jobs_attempted: 0,
-    on_demand_jobs_succeeded: 0,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action: "reclick_run_intel_to_retry",
+    run_session_id: "3f0a26aa-8f5c-4a2e-9d7b-2f8f0a1b2c3d",
+    session_status: "running",
+    workflow_version: 2,
+    current_stage: "collecting_evidence",
+    total_tickers: 4,
+    evidence_complete_tickers: 2,
+    analysis_complete_tickers: 1,
+    decision_complete_tickers: 0,
+    decided_tickers: 0,
+    failed_or_degraded_tickers: 0,
+    task_counts: { pending: 6, running: 1, succeeded: 3 },
+    completed_snapshot_id: null,
+    plain_status: "Gathering evidence — 2 of 4 holdings",
+    retryable: true,
+    terminal: false,
     ...overrides,
   };
 }
@@ -115,129 +127,262 @@ function makeTruth(overrides: Partial<AdvisorTruthContract> = {}): AdvisorTruthC
 
 // ── Run state machine ─────────────────────────────────────────────────────────
 
-describe("deriveRunModel — state machine", () => {
+describe("deriveRunModel — distributed session state machine", () => {
   it("idle before any run", () => {
     const run = deriveRunModel(NO_RUN);
     expect(run.state).toBe("idle");
     expect(run.buttonLabel).toBe("Run Intel");
     expect(run.buttonBusy).toBe(false);
+    expect(run.nextActionSentence).toBe(RUN_IDLE_SENTENCE);
     expect(run.shouldRefetchSnapshot).toBe(false);
   });
 
-  it("running while the request is in flight (disabled button)", () => {
+  it("running while pending with no status yet (create request in flight)", () => {
     const run = deriveRunModel({
       isRunPending: true,
       isRunError: false,
       lastRunResult: null,
     });
     expect(run.state).toBe("running");
+    expect(run.buttonLabel).toBe("Running…");
     expect(run.buttonBusy).toBe(true);
+    expect(run.nextActionSentence).toBe(RUN_IN_PROGRESS_SENTENCE);
     expect(run.shouldRefetchSnapshot).toBe(false);
   });
 
-  it("first bounded batch: partial progress with continue label and honest sentence", () => {
+  it("running renders the backend's pre-sanitized plain_status sentence", () => {
     const run = deriveRunModel({
-      isRunPending: false,
+      isRunPending: true,
       isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 10,
-        on_demand_jobs_attempted: 5,
-        on_demand_jobs_succeeded: 5,
-        on_demand_jobs_failed: 0,
-        snapshot_available_after_run: false,
-        next_required_action:
-          "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
+      lastRunResult: makeSessionStatus({
+        plain_status: "Specialist analysis — 3 of 4 holdings",
+        current_stage: "specialist_analysis",
       }),
     });
-    expect(run.state).toBe("partial");
-    expect(run.buttonLabel).toBe("Continue Intel run");
-    expect(run.nextActionSentence).toBe(continueSentence(5, 10));
-    expect(run.nextActionSentence).toBe(
-      "This run refreshed 5 of 10 holdings. Continue to process the rest.",
-    );
-    expect(run.jobs).toEqual({
-      queued: 10,
-      attempted: 5,
-      succeeded: 5,
-      failed: 0,
-      remaining: 5,
-    });
-    expect(run.boundedStopReason).toContain("5 holdings still waiting");
-    expect(run.shouldRefetchSnapshot).toBe(false);
+    expect(run.state).toBe("running");
+    expect(run.buttonBusy).toBe(true);
+    expect(run.nextActionSentence).toBe("Specialist analysis — 3 of 4 holdings");
   });
 
-  it("continuation batch completes: snapshot available, refetch requested", () => {
+  it("a non-terminal status still reads running even if pending flag lags", () => {
     const run = deriveRunModel({
       isRunPending: false,
       isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 5,
-        on_demand_jobs_attempted: 5,
-        on_demand_jobs_succeeded: 5,
-        snapshot_available_after_run: true,
-        next_required_action: "none_certified_snapshot_current",
+      lastRunResult: makeSessionStatus({ session_status: "created" }),
+    });
+    expect(run.state).toBe("running");
+    expect(run.buttonBusy).toBe(true);
+  });
+
+  it("completed → complete, refetch requested when a snapshot was published", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        current_stage: "done",
+        decision_complete_tickers: 4,
+        decided_tickers: 4,
+        completed_snapshot_id: "snap-42",
+        plain_status: "Completed — your recommendations are up to date.",
+        terminal: true,
+        retryable: false,
       }),
     });
     expect(run.state).toBe("complete");
     expect(run.buttonLabel).toBe("Run Intel");
-    expect(run.nextActionSentence).toBe(CERTIFIED_CURRENT_SENTENCE);
+    expect(run.buttonBusy).toBe(false);
     expect(run.shouldRefetchSnapshot).toBe(true);
+    expect(run.completedWithGaps).toBe(false);
+    expect(run.nextActionSentence).toBe(
+      "Completed — your recommendations are up to date.",
+    );
   });
 
-  it("complete-with-refresh wins even when a reclick action string is present", () => {
+  it("completed without a published snapshot id does not request a refetch", () => {
     const run = deriveRunModel({
       isRunPending: false,
       isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 6,
-        on_demand_jobs_succeeded: 6,
-        snapshot_available_after_run: true,
-        next_required_action: "reclick_run_intel_to_retry",
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        completed_snapshot_id: null,
+        plain_status: undefined,
+        terminal: true,
       }),
     });
     expect(run.state).toBe("complete");
-    expect(run.shouldRefetchSnapshot).toBe(true);
+    expect(run.shouldRefetchSnapshot).toBe(false);
+    expect(run.nextActionSentence).toBe(RUN_COMPLETED_SENTENCE);
   });
 
-  it("all jobs failed and none succeeded → failed with retry label", () => {
+  it("completed_with_gaps → complete with a caveat sentence, never failed", () => {
     const run = deriveRunModel({
       isRunPending: false,
       isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 3,
-        on_demand_jobs_attempted: 3,
-        on_demand_jobs_succeeded: 0,
-        on_demand_jobs_failed: 3,
-        next_required_action: "reclick_run_intel_to_retry",
+      lastRunResult: makeSessionStatus({
+        session_status: "completed_with_gaps",
+        decision_complete_tickers: 4,
+        decided_tickers: 3,
+        failed_or_degraded_tickers: 1,
+        completed_snapshot_id: "snap-43",
+        plain_status:
+          "Completed with gaps — some holdings had limited evidence this run.",
+        terminal: true,
+      }),
+    });
+    expect(run.state).toBe("complete");
+    expect(run.state).not.toBe("failed");
+    expect(run.completedWithGaps).toBe(true);
+    expect(run.buttonLabel).toBe("Run Intel");
+    expect(run.shouldRefetchSnapshot).toBe(true);
+    expect(run.nextActionSentence).toContain("gaps");
+  });
+
+  it("completed_with_gaps without plain_status falls back to the caveat constant", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed_with_gaps",
+        completed_snapshot_id: "snap-44",
+        plain_status: undefined,
+        terminal: true,
+      }),
+    });
+    expect(run.state).toBe("complete");
+    expect(run.nextActionSentence).toBe(RUN_COMPLETED_WITH_GAPS_SENTENCE);
+  });
+
+  it("REGRESSION KILLED: zero decided holdings never reads as terminal failure while the run executes", () => {
+    // The retired drain-era rule treated a zero-success batch as failed.
+    // There are no batches anymore: a running session with nothing decided
+    // yet (and even some degraded holdings) is simply still running.
+    const run = deriveRunModel({
+      isRunPending: true,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "running",
+        decision_complete_tickers: 0,
+        decided_tickers: 0,
+        failed_or_degraded_tickers: 2,
+      }),
+    });
+    expect(run.state).toBe("running");
+    expect(run.state).not.toBe("failed");
+    expect(run.buttonBusy).toBe(true);
+  });
+
+  it("REGRESSION KILLED: a fully-degraded completed_with_gaps run is complete-with-caveat, not failed", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed_with_gaps",
+        decision_complete_tickers: 4,
+        decided_tickers: 0,
+        failed_or_degraded_tickers: 4,
+        completed_snapshot_id: "snap-45",
+        terminal: true,
+      }),
+    });
+    expect(run.state).toBe("complete");
+    expect(run.completedWithGaps).toBe(true);
+    expect(run.buttonLabel).not.toBe("Retry Intel run");
+  });
+
+  it("session failed → failed with Retry label and the backend sentence", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "failed",
+        plain_status: "This run could not finish. You can start a new run.",
+        terminal: true,
+        retryable: false,
       }),
     });
     expect(run.state).toBe("failed");
     expect(run.buttonLabel).toBe("Retry Intel run");
-    expect(run.nextActionSentence).toContain("3 jobs failed");
+    expect(run.buttonBusy).toBe(false);
+    expect(run.nextActionSentence).toBe(
+      "This run could not finish. You can start a new run.",
+    );
+    expect(run.shouldRefetchSnapshot).toBe(false);
   });
 
-  it("some jobs failed but some succeeded → partial, not failed", () => {
+  it("session failed without plain_status falls back to the failed constant", () => {
     const run = deriveRunModel({
       isRunPending: false,
       isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 4,
-        on_demand_jobs_attempted: 4,
-        on_demand_jobs_succeeded: 2,
-        on_demand_jobs_failed: 2,
-        next_required_action:
-          "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
+      lastRunResult: makeSessionStatus({
+        session_status: "failed",
+        plain_status: undefined,
+        terminal: true,
       }),
     });
-    expect(run.state).toBe("partial");
-    expect(run.buttonLabel).toBe("Continue Intel run");
+    expect(run.state).toBe("failed");
+    expect(run.nextActionSentence).toBe(RUN_FAILED_SENTENCE);
   });
 
-  it("failure→retry: request error yields failed regardless of prior result", () => {
+  it("not_created / no_active_holdings → idle with the add-positions sentence", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_created",
+        reason: "no_active_holdings",
+        plain_status: "Add positions before running Intel.",
+        created: false,
+        retryable: false,
+      }),
+    });
+    expect(run.state).toBe("idle");
+    expect(run.buttonLabel).toBe("Run Intel");
+    expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
+  });
+
+  it("not_created / run_session_create_failed → failed with the backend sentence", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_created",
+        reason: "run_session_create_failed",
+        plain_status:
+          "Could not start the run. If this persists, verify migration " +
+          "027_intel_run_distributed_tasks.sql has been applied, then retry.",
+        retryable: true,
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.nextActionSentence).toContain("Could not start the run");
+  });
+
+  it("not_found → failed with an honest restart sentence", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_found",
+        plain_status: undefined,
+        retryable: false,
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.nextActionSentence).toBe(RUN_NOT_FOUND_SENTENCE);
+  });
+
+  it("request-level error yields failed regardless of any prior result", () => {
     const run = deriveRunModel({
       isRunPending: false,
       isRunError: true,
-      lastRunResult: makeRunResult({ snapshot_available_after_run: true }),
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        completed_snapshot_id: "snap-46",
+        terminal: true,
+      }),
     });
     expect(run.state).toBe("failed");
     expect(run.buttonLabel).toBe("Retry Intel run");
@@ -245,374 +390,99 @@ describe("deriveRunModel — state machine", () => {
     expect(run.shouldRefetchSnapshot).toBe(false);
   });
 
-  it("enqueue_failed status → failed", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({ status: "enqueue_failed" }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.buttonLabel).toBe("Retry Intel run");
-  });
-
-  it("queue-only: on-demand disabled → queue_only with the exact honest sentence", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 8,
-        on_demand_processing_enabled: false,
-        next_required_action:
-          "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_analyst_refresh_worker_entrypoint_separately",
-      }),
-    });
-    expect(run.state).toBe("queue_only");
-    expect(run.nextActionSentence).toBe(QUEUE_ONLY_SENTENCE);
-    expect(run.nextActionSentence).toContain("paused on the server");
-    expect(run.nextActionSentence).not.toMatch(/[A-Z0-9_]{10,}/); // no env-var names in visible copy
-    expect(run.boundedStopReason).toContain("on-demand processing is disabled");
-  });
-
-  it("durable jobs in backoff → failed with the backoff sentence, never partial/auto-continuing", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 0,
-        snapshot_available_after_run: false,
-        next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
-        earliest_retry_at: new Date(Date.now() + 5 * 60_000).toISOString(),
-      }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.buttonLabel).toBe("Retry Intel run");
-    expect(run.buttonBusy).toBe(false);
-    expect(run.nextActionSentence).toContain("cooldown");
-  });
-
-  it("durable job retry budget exhausted → failed, never complete or no-op", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 0,
-        snapshot_available_after_run: false,
-        next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
-      }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.buttonLabel).toBe("Retry Intel run");
-    expect(run.nextActionSentence).toBe(ANALYST_JOBS_TERMINAL_SENTENCE);
-  });
-
-  it("a historical certified-current snapshot cannot mask a backoff or terminal job state", () => {
-    const backoff = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 0,
-        snapshot_available_after_run: false, // backend already forces this false
-        next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
-      }),
-    });
-    expect(backoff.state).not.toBe("complete");
-
-    const terminal = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 0,
-        snapshot_available_after_run: false,
-        next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
-      }),
-    });
-    expect(terminal.state).not.toBe("complete");
-  });
-
-  it("active-ticker lookup failure → failed, not misread as partial via the reclick_/jobs.remaining path", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        // A click that DID queue new work but whose active-ticker lookup
-        // failed before any drain ran — jobs.remaining would be > 0, which
-        // must not fall through to "partial" for this action.
-        queued_ticker_count: 12,
-        on_demand_jobs_attempted: 0,
-        on_demand_jobs_succeeded: 0,
-        on_demand_jobs_failed: 0,
-        snapshot_available_after_run: false,
-        next_required_action: ACTIVE_TICKERS_LOOKUP_FAILED_ACTION,
-      }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.buttonLabel).toBe("Retry Intel run");
-    expect(run.buttonBusy).toBe(false);
-  });
-
-  it("snapshot writes disabled by cost guard → failed with the cost-guard sentence", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        queued_ticker_count: 4,
-        on_demand_jobs_attempted: 4,
-        on_demand_jobs_succeeded: 4,
-        next_required_action:
-          "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false",
-      }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.nextActionSentence).toBe(SNAPSHOT_WRITES_DISABLED_SENTENCE);
-    expect(run.nextActionSentence).toContain("temporarily paused on the server");
-    expect(run.nextActionSentence).not.toMatch(/INTEL_V3_[A-Z_]+/); // env-var name stays in technical detail only
-  });
-
-  it("no stale evidence to refresh → complete with honest no-op sentence", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        status: "analyst_evidence_current",
-        queued_ticker_count: 0,
-        next_required_action: "none_no_stale_evidence_to_refresh",
-      }),
-    });
-    expect(run.state).toBe("complete");
-    expect(run.nextActionSentence).toBe(NO_STALE_EVIDENCE_SENTENCE);
-  });
-
-  it("no active holdings → idle with add-positions sentence", () => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        status: "no_active_holdings",
-        next_required_action: "add_positions_before_running_intel",
-      }),
-    });
-    expect(run.state).toBe("idle");
-    expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
-  });
-
-  it("no active holdings with a historical certified-current snapshot: backend now reports incomplete, so the run model stays idle, not complete", () => {
-    // Proven contradiction (pre-fix): the backend used to report
-    // snapshot_available_after_run=true from an old worker_certified +
-    // certified_current snapshot even when status=no_active_holdings. The
-    // backend fix (see test_stage13b_run_intel_on_demand_status.py
-    // ::TestZeroQueuedStatusClassification) guarantees this response shape
-    // is what a no_active_holdings request now actually produces —
-    // this test proves the frontend renders it correctly.
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        status: "no_active_holdings",
-        next_required_action: "add_positions_before_running_intel",
-        snapshot_available_after_run: false,
-      }),
-    });
-    expect(run.state).toBe("idle");
-    expect(run.state).not.toBe("complete");
-    expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
-  });
-
-  // Actual backend messages from IntelV3Service.enqueue_run_v3()
-  // (_RECERTIFICATION_FAILURE_MESSAGES in intel_v3_service.py) — kept in
-  // sync manually since the frontend has no shared source with the backend
-  // string literals. Stage 8E/8F previously had NO entry in that backend
-  // mapping and silently fell through to the success sentence
-  // ("Analyst evidence is current — no refresh needed."); this regression
-  // test proves the frontend renders the failed/Retry state using the
-  // *actual* backend message, not a synthetic placeholder.
-  it.each([
-    [
-      "mapping_version_recertification_failed",
-      "Deterministic recertification failed — evidence mapping version mismatch. Retry Run Intel to recertify.",
-    ],
-    [
-      "stage7_contract_recertification_failed",
-      "Deterministic recertification failed — Stage 7 explanation contract missing. Retry Run Intel to recertify.",
-    ],
-    [
-      "stage8e_contract_recertification_failed",
-      "Deterministic recertification failed — Stage 8E catalyst explanation contract missing. Retry Run Intel to recertify.",
-    ],
-    [
-      "stage8f_contract_recertification_failed",
-      "Deterministic recertification failed — Stage 8F filing-type contract missing. Retry Run Intel to recertify.",
-    ],
-  ])("%s status with the real backend message → failed, Retry label, honest sentence", (failureStatus, backendMessage) => {
-    const run = deriveRunModel({
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeRunResult({
-        status: failureStatus as IntelV3RunResult["status"],
-        next_required_action: "reclick_run_intel_to_retry",
-        message: backendMessage,
-      }),
-    });
-    expect(run.state).toBe("failed");
-    expect(run.buttonLabel).toBe("Retry Intel run");
-    expect(run.nextActionSentence.toLowerCase()).toMatch(/failed|retry/);
-    expect(run.nextActionSentence).not.toContain("evidence is current");
-    expect(run.nextActionSentence).not.toContain("no refresh needed");
-  });
-
-  it("never leaks raw next_required_action codes into visible sentences", () => {
-    const rawActions = [
-      "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_analyst_refresh_worker_entrypoint_separately",
-      "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
-      "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false",
-      "none_certified_snapshot_current",
-      "reclick_run_intel_to_retry",
+  it("never leaks raw session/stage enum values into visible sentences", () => {
+    const rawValues = [
+      "completed_with_gaps",
+      "not_created",
+      "not_found",
+      "collecting_evidence",
+      "specialist_analysis",
+      "run_session_create_failed",
+      "no_active_holdings",
     ];
-    for (const action of rawActions) {
+    const inputs = [
+      makeSessionStatus({ session_status: "running", plain_status: undefined }),
+      makeSessionStatus({
+        session_status: "completed_with_gaps",
+        plain_status: undefined,
+        terminal: true,
+      }),
+      makeSessionStatus({
+        session_status: "failed",
+        plain_status: undefined,
+        terminal: true,
+      }),
+      makeSessionStatus({
+        session_status: "not_created",
+        reason: "run_session_create_failed",
+        plain_status: undefined,
+      }),
+      makeSessionStatus({
+        session_status: "not_created",
+        reason: "no_active_holdings",
+        plain_status: undefined,
+      }),
+      makeSessionStatus({ session_status: "not_found", plain_status: undefined }),
+    ];
+    for (const lastRunResult of inputs) {
       const run = deriveRunModel({
         isRunPending: false,
         isRunError: false,
-        lastRunResult: makeRunResult({
-          queued_ticker_count: 2,
-          on_demand_jobs_succeeded: 1,
-          next_required_action: action,
-        }),
+        lastRunResult,
       });
-      expect(run.nextActionSentence).not.toContain(action);
-      expect(run.nextActionSentence).not.toMatch(/reclick_|queue_only_/);
+      for (const raw of rawValues) {
+        expect(run.nextActionSentence).not.toContain(raw);
+      }
     }
   });
 });
 
-describe("deriveRunJobs", () => {
-  it("computes remaining and never goes negative", () => {
+describe("isTerminalSessionStatus", () => {
+  it("true for the terminal flag and every terminal session_status", () => {
     expect(
-      deriveRunJobs(
-        makeRunResult({
-          queued_ticker_count: 3,
-          on_demand_jobs_succeeded: 5,
-          on_demand_jobs_failed: 1,
+      isTerminalSessionStatus(makeSessionStatus({ terminal: true })),
+    ).toBe(true);
+    for (const status of [
+      "completed",
+      "completed_with_gaps",
+      "failed",
+      "not_created",
+      "not_found",
+    ]) {
+      expect(
+        isTerminalSessionStatus(
+          makeSessionStatus({ session_status: status, terminal: undefined }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("false for live sessions and missing results", () => {
+    expect(isTerminalSessionStatus(makeSessionStatus())).toBe(false);
+    expect(
+      isTerminalSessionStatus(makeSessionStatus({ session_status: "created" })),
+    ).toBe(false);
+    expect(isTerminalSessionStatus(null)).toBe(false);
+    expect(isTerminalSessionStatus(undefined)).toBe(false);
+  });
+});
+
+describe("deriveRunProgress", () => {
+  it("maps ticker progress fields and defaults to zero", () => {
+    expect(
+      deriveRunProgress(
+        makeSessionStatus({
+          total_tickers: 6,
+          decision_complete_tickers: 4,
+          failed_or_degraded_tickers: 1,
         }),
-      ).remaining,
-    ).toBe(0);
-    expect(deriveRunJobs(null)).toEqual({
-      queued: 0,
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-      remaining: 0,
+      ),
+    ).toEqual({ totalTickers: 6, decidedTickers: 4, failedOrDegradedTickers: 1 });
+    expect(deriveRunProgress(null)).toEqual({
+      totalTickers: 0,
+      decidedTickers: 0,
+      failedOrDegradedTickers: 0,
     });
-  });
-});
-
-describe("shouldAutoContinueRun — bounded automatic continuation (Part A3)", () => {
-  const PARTIAL_RESULT = makeRunResult({
-    queued_ticker_count: 6,
-    on_demand_jobs_attempted: 3,
-    on_demand_jobs_succeeded: 3,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action:
-      "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
-  });
-  const COMPLETE_RESULT = makeRunResult({
-    queued_ticker_count: 3,
-    on_demand_jobs_attempted: 3,
-    on_demand_jobs_succeeded: 3,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: true,
-    next_required_action: "none_certified_snapshot_current",
-  });
-  const FAILED_RESULT = makeRunResult({
-    status: "enqueue_failed",
-    queued_ticker_count: 0,
-    next_required_action: "reclick_run_intel_to_retry",
-  });
-  const BACKOFF_RESULT = makeRunResult({
-    queued_ticker_count: 0,
-    on_demand_jobs_attempted: 0,
-    on_demand_jobs_succeeded: 0,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
-    earliest_retry_at: new Date(Date.now() + 10 * 60_000).toISOString(),
-  });
-  const TERMINAL_RESULT = makeRunResult({
-    queued_ticker_count: 0,
-    on_demand_jobs_attempted: 0,
-    on_demand_jobs_succeeded: 0,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
-  });
-
-  it("continues while the run state machine reads partial and under both caps", () => {
-    expect(shouldAutoContinueRun(PARTIAL_RESULT, 1, 1_000)).toBe(true);
-  });
-
-  it("never continues once complete", () => {
-    expect(shouldAutoContinueRun(COMPLETE_RESULT, 1, 1_000)).toBe(false);
-  });
-
-  it("never continues after a terminal failure", () => {
-    expect(shouldAutoContinueRun(FAILED_RESULT, 1, 1_000)).toBe(false);
-  });
-
-  it("never continues while durable jobs are in backoff", () => {
-    expect(shouldAutoContinueRun(BACKOFF_RESULT, 1, 1_000)).toBe(false);
-  });
-
-  it("never continues once a durable job's retry budget is exhausted", () => {
-    expect(shouldAutoContinueRun(TERMINAL_RESULT, 1, 1_000)).toBe(false);
-  });
-
-  it("stops at the attempt cap even while still partial", () => {
-    expect(
-      shouldAutoContinueRun(PARTIAL_RESULT, RUN_INTEL_MAX_CONTINUATIONS, 1_000),
-    ).toBe(false);
-    expect(
-      shouldAutoContinueRun(PARTIAL_RESULT, RUN_INTEL_MAX_CONTINUATIONS - 1, 1_000),
-    ).toBe(true);
-  });
-
-  it("stops at the elapsed-time cap even while still partial", () => {
-    expect(
-      shouldAutoContinueRun(PARTIAL_RESULT, 1, RUN_INTEL_MAX_ELAPSED_MS),
-    ).toBe(false);
-    expect(
-      shouldAutoContinueRun(PARTIAL_RESULT, 1, RUN_INTEL_MAX_ELAPSED_MS - 1),
-    ).toBe(true);
-  });
-
-  it("never continues for a null result (nothing to continue from)", () => {
-    expect(shouldAutoContinueRun(null, 0, 0)).toBe(false);
-  });
-
-  it("a legitimate 32-ticker run (12 requests near the 20s server bound) is never stopped by the elapsed cap", () => {
-    // Fake-clock simulation of the worst legitimate case: 32 stale tickers,
-    // batches of 3, each request completing just under the server's 20s
-    // per-request bound. 11 analyst batches drain the queue; publication
-    // rides the 12th request. The elapsed cap must allow every continuation
-    // decision along the way — a valid run may never be abandoned mid-flight.
-    const REQUEST_MS = 19_900; // just under the 20s server-side request bound
-    const TOTAL_REQUESTS = 12; // ceil(32/3) analyst batches + publication
-    let clockMs = 0;
-    for (let attempt = 1; attempt < TOTAL_REQUESTS; attempt++) {
-      clockMs += REQUEST_MS; // request `attempt` just finished
-      // The hook decides whether to fire request `attempt + 1`.
-      expect(shouldAutoContinueRun(PARTIAL_RESULT, attempt, clockMs)).toBe(true);
-    }
-    // Sanity: the final (12th) request fits inside both caps too.
-    clockMs += REQUEST_MS;
-    expect(TOTAL_REQUESTS).toBeLessThanOrEqual(RUN_INTEL_MAX_CONTINUATIONS);
-    expect(clockMs).toBeLessThanOrEqual(RUN_INTEL_MAX_ELAPSED_MS);
-  });
-
-  it("the elapsed cap still stops a run that exceeds the legitimate worst case", () => {
-    // 300s is a real ceiling, not an unbounded loop: at ~20s per request the
-    // cap halts continuation shortly after the worst legitimate sequence.
-    expect(
-      shouldAutoContinueRun(PARTIAL_RESULT, 16, RUN_INTEL_MAX_ELAPSED_MS),
-    ).toBe(false);
   });
 });
 
@@ -720,7 +590,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     expect(model.statusPillLabel).not.toBe("Ready");
   });
 
-  it("a complete run without a certified snapshot still never reports Ready", () => {
+  it("a completed run without a certified snapshot still never reports Ready", () => {
     const model = deriveAdvisorReadiness(
       {
         snapshot: null,
@@ -731,10 +601,11 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
       {
         isRunPending: false,
         isRunError: false,
-        // Run claims completion, but the snapshot query says nothing exists.
-        lastRunResult: makeRunResult({
-          snapshot_available_after_run: true,
-          next_required_action: "none_certified_snapshot_current",
+        // Session claims completion, but the snapshot query says nothing exists.
+        lastRunResult: makeSessionStatus({
+          session_status: "completed",
+          completed_snapshot_id: "snap-42",
+          terminal: true,
         }),
       },
       null,
@@ -775,9 +646,10 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
       {
         isRunPending: false,
         isRunError: false,
-        lastRunResult: makeRunResult({
-          status: "no_active_holdings",
-          next_required_action: "add_positions_before_running_intel",
+        lastRunResult: makeSessionStatus({
+          session_status: "not_created",
+          reason: "no_active_holdings",
+          plain_status: "Add positions before running Intel.",
         }),
       },
       null,
@@ -785,6 +657,21 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     );
     expect(model.run.state).toBe("idle");
     expect(model.run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
+  });
+
+  it("a running session keeps the pill in Updating, never green", () => {
+    const model = deriveAdvisorReadiness(
+      queryWith(makeSnapshot()),
+      {
+        isRunPending: true,
+        isRunError: false,
+        lastRunResult: makeSessionStatus({ session_status: "running" }),
+      },
+      null,
+      NOW,
+    );
+    expect(model.run.state).toBe("running");
+    expect(model.statusPillLabel).toBe("Updating");
   });
 
   it("loading state", () => {
@@ -795,6 +682,98 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
       NOW,
     );
     expect(model.snapshotState).toBe("loading");
+    expect(model.ready).toBe(false);
+  });
+});
+
+// ── worker_certified_with_gaps — valid-but-caveated (amber), never blocked ────
+
+function makeWithGapsSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot {
+  return makeSnapshot({
+    snapshot_source: "worker_certified_with_gaps",
+    certified_holding_count: 3,
+    total_holding_count: 4,
+    session_status: "completed_with_gaps",
+    session_coverage: {
+      frozen_holding_count: 4,
+      decided_count: 3,
+      no_call_count: 1,
+      failed_count: 0,
+      no_call_tickers: ["NVDA"],
+      failed_tickers: [],
+      gaps: [
+        {
+          ticker: "NVDA",
+          state: "no_call",
+          reason: "Not enough fresh evidence to make a call for NVDA.",
+        },
+      ],
+    },
+    ...overrides,
+  } as Partial<IntelV3Snapshot>);
+}
+
+describe("deriveAdvisorReadiness — completed-with-gaps snapshot", () => {
+  const NOW = new Date("2026-07-18T12:00:00Z");
+
+  it("classifies as certified_with_gaps — never uncertified, never error, never Ready", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeWithGapsSnapshot()), NO_RUN, null, NOW);
+    expect(model.snapshotState).toBe("certified_with_gaps");
+    expect(model.ready).toBe(false);
+    expect(model.statusPillLabel).toBe("Partly Ready");
+    expect(model.statusPillLabel).not.toBe("Ready");
+    expect(model.statusPillLabel).not.toBe("Blocked");
+    expect(model.statusLine).toContain("current for 3 of 4 holdings");
+  });
+
+  it("intel certification row is amber pending — NOT the certification_failed blocked branch", () => {
+    const rows = deriveTruthRows(makeWithGapsSnapshot(), "certified_with_gaps", null);
+    const certRow = rows.find((r) => r.key === "intel_certification");
+    expect(certRow?.status).toBe("pending");
+    expect(certRow?.status).not.toBe("blocked");
+    expect(certRow?.detail).toContain("3 of 4 holdings");
+    expect(certRow?.detail).not.toContain("failed certification");
+  });
+
+  it("with-gaps is distinct from certification_failed (which stays blocked)", () => {
+    const failedRows = deriveTruthRows(
+      makeSnapshot({ snapshot_source: "certification_failed" } as Partial<IntelV3Snapshot>),
+      "uncertified",
+      null,
+    );
+    expect(failedRows.find((r) => r.key === "intel_certification")?.status).toBe("blocked");
+  });
+
+  it("never renders the raw worker_certified_with_gaps enum anywhere user-visible", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeWithGapsSnapshot()), NO_RUN, null, NOW);
+    const visible = [
+      model.statusPillLabel,
+      model.statusLine,
+      model.run.nextActionSentence,
+      model.evidenceFreshnessLabel ?? "",
+      ...model.truthRows.flatMap((r) => [r.label, r.detail]),
+    ];
+    for (const text of visible) {
+      expect(text).not.toContain("worker_certified_with_gaps");
+      expect(text.toLowerCase()).not.toContain("worker certified with gaps");
+    }
+  });
+
+  it("clean certified snapshot behavior is unchanged (green Ready)", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, null, NOW);
+    expect(model.snapshotState).toBe("certified");
+    expect(model.ready).toBe(true);
+    expect(model.statusPillLabel).toBe("Ready");
+  });
+
+  it("a stale with-gaps snapshot still reads stale, not certified_with_gaps", () => {
+    const model = deriveAdvisorReadiness(
+      queryWith(makeWithGapsSnapshot({ is_stale: true })),
+      NO_RUN,
+      null,
+      NOW,
+    );
+    expect(model.snapshotState).toBe("stale");
     expect(model.ready).toBe(false);
   });
 });

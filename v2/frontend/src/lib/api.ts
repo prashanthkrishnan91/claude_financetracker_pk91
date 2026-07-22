@@ -131,24 +131,32 @@ export const api = {
       }),
   },
 
-  // Intel v3 snapshot path.
+  // Intel v3 snapshot + distributed run-session path.
   intelV3: {
     getSnapshot: () =>
       fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
     /**
-     * One bounded request of a durable Run Intel session. The browser mints
-     * `runSessionId` (crypto.randomUUID()) once per manual click; every
-     * automatic continuation of that click sends the SAME id so the backend
-     * resumes the exact session instead of guessing from queue state.
+     * Create ONE durable distributed Run Intel session and return fast.
+     * The browser mints `runSessionId` (crypto.randomUUID()) once per manual
+     * click. The backend executes the run on its own; the browser only polls
+     * getSessionStatus afterwards — this endpoint is never re-POSTed
+     * automatically. Clicking while a session is already active adopts that
+     * session (response carries adopted_active_session=true).
      */
     runV3: (runSessionId: string, signal?: AbortSignal) =>
-      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", {
+      fetchApi<IntelV3SessionStatus>("/api/v1/intel/v3/run", {
         method: "POST",
         body: JSON.stringify({ run_session_id: runSessionId }),
         signal,
       }),
-    getRunStatus: (runId: string) =>
-      fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
+    /** Read-only status poll for one run session. Never advances work. */
+    getSessionStatus: (sessionId: string) =>
+      fetchApi<IntelV3SessionStatus>(
+        `/api/v1/intel/v3/sessions/${sessionId}/status`
+      ),
+    /** The user's active (non-terminal) run session, if any — page-return recovery. */
+    getActiveSession: () =>
+      fetchApi<IntelV3ActiveSessionResult>("/api/v1/intel/v3/sessions/active"),
   },
 };
 
@@ -489,6 +497,29 @@ export interface IntelV3HeldCard {
   };
 }
 
+/** One holding the distributed run could not analyze (per-session gap). */
+export interface IntelV3SessionCoverageGap {
+  ticker: string;
+  state: string;
+  /** Plain-English reason — pre-sanitized by the backend, safe to render. */
+  reason: string;
+}
+
+/**
+ * Distributed Run Intel publication — per-session coverage of the FULL frozen
+ * holding scope. Present on snapshots published by the distributed workflow;
+ * for a with-gaps snapshot decided_count < frozen_holding_count.
+ */
+export interface IntelV3SessionCoverage {
+  frozen_holding_count: number;
+  decided_count: number;
+  no_call_count: number;
+  failed_count: number;
+  no_call_tickers: string[];
+  failed_tickers: string[];
+  gaps: IntelV3SessionCoverageGap[];
+}
+
 export interface IntelV3Snapshot {
   schema_version: string;
   snapshot_id: string;
@@ -520,7 +551,14 @@ export interface IntelV3Snapshot {
   legacy_path_used: false;
   diagnostics?: IntelV3SnapshotDiagnostics;
   // Stage 3.3 — provenance fields (set by worker prewarm, absent on HTTP-built snapshots)
-  snapshot_source?: "worker_certified" | "http_request" | "certification_failed" | "prewarm";
+  // "worker_certified_with_gaps": certified over the decided subset — some
+  // holdings could not be analyzed this run (certified < total).
+  snapshot_source?:
+    | "worker_certified"
+    | "worker_certified_with_gaps"
+    | "http_request"
+    | "certification_failed"
+    | "prewarm";
   agents_ran_via_worker?: boolean;
   agents_ran_for_this_click?: string;
   this_click_used_llm?: boolean;
@@ -537,6 +575,10 @@ export interface IntelV3Snapshot {
     agent_run_ids_used: string[];
     certification_errors: string[];
   };
+  // Distributed Run Intel publication — session outcome that published this
+  // snapshot ("completed" | "completed_with_gaps") plus per-holding coverage.
+  session_status?: "completed" | "completed_with_gaps" | string;
+  session_coverage?: IntelV3SessionCoverage;
   // Build 2 — evidence freshness state from watchtower republisher
   evidence_freshness_state?:
     | "certified_current"
@@ -628,76 +670,67 @@ export interface IntelV3SnapshotDiagnostics {
 }
 
 /**
- * Stage 3.3 — Run Intel v3 enqueue result.
- * POST /intel/v3/run now returns a refresh-enqueue status, NOT a snapshot.
- * The UI should poll GET /intel/v3/snapshot until snapshot_source=worker_certified.
+ * Distributed Run Intel session status payload.
+ *
+ * Returned by POST /intel/v3/run (session create/adopt), by
+ * GET /intel/v3/sessions/{id}/status (polling), and — with an extra `active`
+ * flag — by GET /intel/v3/sessions/active. The backend executes the run
+ * durably on its own; this payload is purely observational. `plain_status`
+ * is a pre-sanitized plain-English sentence and is the ONLY progress text
+ * the UI should render.
  */
-export interface IntelV3RunResult {
-  status:
-    | "refresh_requested"
-    | "refresh_in_progress"
-    | "analyst_evidence_current"  // backend: evidence fresh, no jobs queued
-    | "mapping_version_recertified"  // stale mapping version recertified via zero-LLM prewarm
-    | "mapping_version_recertification_failed"  // prewarm failed during mapping recertification
-    | "stage7_contract_recertified"  // Stage 7 explanation contract recertified via zero-LLM prewarm
-    | "stage7_contract_recertification_failed"
-    | "stage8e_contract_recertified"  // Stage 8E catalyst explanation contract recertified via zero-LLM prewarm
-    | "stage8e_contract_recertification_failed"
-    | "stage8f_contract_recertified"  // Stage 8F filing-type contract recertified via zero-LLM prewarm
-    | "stage8f_contract_recertification_failed"
-    | "no_active_holdings"
-    | "enqueue_failed"
-    | "completed"   // legacy — may appear if backend version mismatch
-    | "running"
-    | "failed";
-  queued_ticker_count?: number;
-  stale_analyst_count?: number;
-  total_holding_count?: number;
-  existing_certified_snapshot_id?: string | null;
-  existing_certified_snapshot?: boolean;
-  message?: string;
-  // Stage 13B — bounded on-demand evidence drain operational-truth fields.
-  // Present on every /intel/v3/run response so the UI never implies a
-  // snapshot is being built when the queue is only queued, not draining.
-  on_demand_processing_enabled?: boolean;
-  on_demand_jobs_attempted?: number;
-  on_demand_jobs_succeeded?: number;
-  on_demand_jobs_failed?: number;
-  snapshot_available_after_run?: boolean;
-  next_required_action?: string;
-  // Additive — only present when next_required_action reports the durable-job
-  // "backoff" state (a failed-but-retryable job's next_retry_at hasn't
-  // arrived yet). The earliest retry time among such jobs, if known.
-  earliest_retry_at?: string | null;
-  // ── Durable Run Intel session state (authoritative; explicit, no
-  //    client-side inference from batch counts) ──
-  run_session_id?: string;
-  session_status?: string;
-  expected_ticker_count?: number;
-  session_succeeded_ticker_count?: number;
-  session_remaining_ticker_count?: number;
-  publication_status?:
-    | "not_started"
-    | "pending"
-    | "retryable_failed"
-    | "completed";
+export type IntelV3SessionStatusValue =
+  | "created"
+  | "running"
+  | "completed"
+  | "completed_with_gaps"
+  | "failed"
+  | "not_created"
+  | "not_found";
+
+export type IntelV3RunStage =
+  | "preparing"
+  | "collecting_evidence"
+  | "specialist_analysis"
+  | "deciding"
+  | "publishing"
+  | "done";
+
+export interface IntelV3SessionStatus {
+  run_session_id: string;
+  session_status: IntelV3SessionStatusValue | string;
+  workflow_version?: number;
+  current_stage?: IntelV3RunStage | string | null;
+  total_tickers?: number;
+  evidence_complete_tickers?: number;
+  analysis_complete_tickers?: number;
+  decision_complete_tickers?: number;
+  decided_tickers?: number;
+  failed_or_degraded_tickers?: number;
+  /** Internal task-state accounting — never rendered to users. */
+  task_counts?: Record<string, number>;
+  /** Set when the run published a snapshot (completed / completed_with_gaps). */
   completed_snapshot_id?: string | null;
+  /** Pre-sanitized plain-English progress sentence — safe to render. */
+  plain_status?: string;
   retryable?: boolean;
-  // Legacy fields — kept for back-compat if old backend serves them
-  snapshot_id?: string;
-  run_id?: string;
-  total_cards?: number;
-  action_counts?: Record<IntelV3Action, number>;
+  /** True when the session reached a terminal state — stop polling. */
+  terminal?: boolean;
+  /** POST /run only: true when this request created the session. */
+  created?: boolean;
+  /** Present when session_status is "not_created". */
+  reason?: "no_active_holdings" | "run_session_create_failed" | string;
+  /** POST /run only: true when a click adopted an already-active session. */
+  adopted_active_session?: boolean;
 }
 
-export interface IntelV3RunStatus {
-  run_id: string;
-  status: "completed" | "running" | "failed";
-  snapshot_id?: string;
-  action_counts?: Record<IntelV3Action, number>;
-  total_cards?: number;
-  generated_at?: string;
-}
+/** Kept as an alias so existing imports keep compiling. */
+export type IntelV3RunResult = IntelV3SessionStatus;
+
+/** GET /intel/v3/sessions/active response. */
+export type IntelV3ActiveSessionResult =
+  | { active: false }
+  | ({ active: true } & IntelV3SessionStatus);
 
 // ── Deploy v3 types (read-only plan contract) ────────────────────────────────────────────────────────────────────────────
 

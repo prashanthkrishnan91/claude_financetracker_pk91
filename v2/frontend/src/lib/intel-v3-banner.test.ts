@@ -4,8 +4,21 @@
  * Covers deriveIntelV3UIStatus and buildBannerState (all-or-nothing certified
  * intelligence run contract), plus legacy analystRefreshRequestNote tests.
  */
-import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState, buildStatusPillState, onDemandDrainNote } from "@/lib/intel-v3-banner";
-import type { IntelV3Snapshot, IntelV3SnapshotDiagnostics } from "@/lib/api";
+import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
+import type { IntelV3SessionStatus, IntelV3Snapshot, IntelV3SnapshotDiagnostics } from "@/lib/api";
+
+function makeSessionStatus(
+  overrides: Partial<IntelV3SessionStatus> = {},
+): IntelV3SessionStatus {
+  return {
+    run_session_id: "3f0a26aa-8f5c-4a2e-9d7b-2f8f0a1b2c3d",
+    session_status: "running",
+    plain_status: "Gathering evidence — 1 of 3 holdings",
+    terminal: false,
+    retryable: true,
+    ...overrides,
+  };
+}
 
 function makeDiag(
   overrides: Partial<IntelV3SnapshotDiagnostics> = {},
@@ -351,49 +364,55 @@ describe("buildBannerState — tone and copy", () => {
   });
 });
 
-// ── analyst_evidence_current no-op run contract ───────────────────────────────
-// When backend returns analyst_evidence_current (evidence fresh, zero queued
-// jobs), the component skips polling and calls refetchSnapshot() once.
-// These tests cover the state-machine half: with isRefreshing=false and a
-// certified snapshot, the UI must show Ready — never Updating.
+// ── Terminal run-session contract ─────────────────────────────────────────────
+// A terminal session status must never keep the UI in Updating; a live
+// (created/running) session keeps the refresh state visible even when the
+// isRefreshing flag has not caught up yet.
 
-describe("analyst_evidence_current — no-op run state machine", () => {
-  it("certified snapshot + isRefreshing=false shows Ready even when lastRunResult is analyst_evidence_current", () => {
+describe("run session status — banner state machine contract", () => {
+  it("certified snapshot + isRefreshing=false shows Ready even when the last session completed", () => {
     const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "analyst_evidence_current" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
+    const runResult = makeSessionStatus({
+      session_status: "completed",
+      completed_snapshot_id: "snap-42",
+      terminal: true,
+      retryable: false,
+    });
     expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
     expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
   });
 
-  it("analyst_evidence_current does not put the UI in Updating state", () => {
+  it("a terminal completed session does not put the UI in Updating state", () => {
     const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "analyst_evidence_current" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
+    const runResult = makeSessionStatus({
+      session_status: "completed",
+      completed_snapshot_id: "snap-42",
+      terminal: true,
+    });
     const pill = buildStatusPillState(snap, false, runResult);
     expect(pill.pill).not.toBe("Updating");
     expect(pill.tone).toBe("green");
   });
 
-  it("refresh_requested with isRefreshing=true still shows Updating (existing queued behavior preserved)", () => {
+  it("a running session with isRefreshing=true still shows Updating", () => {
     const snap = makeCertifiedSnapshot();
-    const runResult = { status: "refresh_requested" as const, queued_ticker_count: 5 };
+    const runResult = makeSessionStatus({ session_status: "running" });
     expect(deriveIntelV3UIStatus(snap, true, runResult)).toBe("latest_certified_new_refresh_running");
     expect(buildStatusPillState(snap, true, runResult).pill).toBe("Updating");
   });
 
-  it("no snapshot + analyst_evidence_current + isRefreshing=false => Needs Research (no snapshot to show)", () => {
-    const runResult = {
-      status: "analyst_evidence_current" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
+  it("an uncertified snapshot with a live session shows refreshing even when isRefreshing lags", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    const runResult = makeSessionStatus({ session_status: "running" });
+    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("refreshing_analyst_intelligence");
+  });
+
+  it("no snapshot + terminal completed session + isRefreshing=false => Needs Research (no snapshot to show)", () => {
+    const runResult = makeSessionStatus({
+      session_status: "completed",
+      completed_snapshot_id: "snap-42",
+      terminal: true,
+    });
     expect(deriveIntelV3UIStatus(null, false, runResult)).toBe("unavailable_evidence_incomplete");
   });
 });
@@ -475,123 +494,138 @@ describe("Build 2 — evidence_freshness_state status mapping", () => {
   });
 });
 
-// ── mapping_version_recertified / mapping_version_recertification_failed ───────
-// These statuses must not put the UI in Updating/spinning state when a
-// certified snapshot is present and isRefreshing=false.
+// ── Terminal failed / not_created sessions never read as Updating ─────────────
 
-describe("mapping version guard — banner state machine contract", () => {
-  it("mapping_version_recertified + certified snapshot + isRefreshing=false => Ready pill", () => {
-    const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "mapping_version_recertified" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
-    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
-    expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
-    expect(buildStatusPillState(snap, false, runResult).tone).toBe("green");
-  });
+describe("terminal session statuses — no fake Updating state", () => {
+  it.each(["failed", "not_created", "not_found"])(
+    "a terminal %s session with a certified snapshot and isRefreshing=false shows Ready (snapshot truth wins)",
+    (sessionStatus) => {
+      const snap = makeCertifiedSnapshot();
+      const runResult = makeSessionStatus({
+        session_status: sessionStatus,
+        terminal: true,
+        retryable: false,
+      });
+      expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
+      expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
+    },
+  );
 
-  it("mapping_version_recertified does not put the UI in Updating state", () => {
-    const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "mapping_version_recertified" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
-    expect(buildStatusPillState(snap, false, runResult).pill).not.toBe("Updating");
-  });
-
-  it("mapping_version_recertification_failed + certified snapshot + isRefreshing=false => Ready pill", () => {
-    const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "mapping_version_recertification_failed" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
-    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
-    expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
-  });
-
-  it("mapping_version_recertification_failed does not put the UI in Updating state", () => {
-    const snap = makeCertifiedSnapshot();
-    const runResult = {
-      status: "mapping_version_recertification_failed" as const,
-      queued_ticker_count: 0,
-      existing_certified_snapshot: true,
-    };
-    expect(buildStatusPillState(snap, false, runResult).pill).not.toBe("Updating");
+  it("a terminal failed session with an uncertified snapshot does not claim refreshing", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    const runResult = makeSessionStatus({
+      session_status: "failed",
+      terminal: true,
+    });
+    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe(
+      "unavailable_evidence_incomplete",
+    );
   });
 });
 
-describe("Stage 13B — onDemandDrainNote", () => {
-  it("returns null when there is no run result", () => {
-    expect(onDemandDrainNote(null)).toBeNull();
-    expect(onDemandDrainNote(undefined)).toBeNull();
+// ── Distributed publication: worker_certified_with_gaps ───────────────────────
+// Honest completed-with-gaps rendering: visibly NON-GREEN but NOT an error.
+
+function makeWithGapsSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot {
+  return makeCertifiedSnapshot({
+    snapshot_source: "worker_certified_with_gaps",
+    certified_holding_count: 3,
+    total_holding_count: 5,
+    session_status: "completed_with_gaps",
+    evidence_freshness_state: "certified_current",
+    session_coverage: {
+      frozen_holding_count: 5,
+      decided_count: 3,
+      no_call_count: 1,
+      failed_count: 1,
+      no_call_tickers: ["AAPL"],
+      failed_tickers: ["NVDA"],
+      gaps: [
+        {
+          ticker: "AAPL",
+          state: "no_call",
+          reason: "Not enough fresh evidence to make a call for AAPL.",
+        },
+        {
+          ticker: "NVDA",
+          state: "failed",
+          reason: "Analysis for NVDA didn't finish this run.",
+        },
+      ],
+    },
+    ...overrides,
+  } as Partial<IntelV3Snapshot>);
+}
+
+describe("worker_certified_with_gaps — amber caveated state", () => {
+  it("derives the distinct certified_with_gaps status (not green, not blocked, not unavailable)", () => {
+    const status = deriveIntelV3UIStatus(makeWithGapsSnapshot(), false);
+    expect(status).toBe("certified_with_gaps");
+    expect(status).not.toBe("certified_current");
+    expect(status).not.toBe("unavailable_evidence_incomplete");
+    expect(status).not.toBe("blocked_certification_failed");
   });
 
-  it("returns null once a certified snapshot is available after the run", () => {
-    const runResult = {
-      status: "refresh_requested" as const,
-      queued_ticker_count: 5,
-      on_demand_processing_enabled: true,
-      snapshot_available_after_run: true,
-    };
-    expect(onDemandDrainNote(runResult)).toBeNull();
+  it("banner is amber — NOT green and NOT red", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.status).toBe("certified_with_gaps");
+    expect(banner.tone).toBe("amber");
+    expect(banner.tone).not.toBe("green");
+    expect(banner.tone).not.toBe("red");
   });
 
-  it("returns null when nothing was queued (no stale evidence)", () => {
-    const runResult = {
-      status: "analyst_evidence_current" as const,
-      queued_ticker_count: 0,
-      on_demand_processing_enabled: false,
-      snapshot_available_after_run: false,
-    };
-    expect(onDemandDrainNote(runResult)).toBeNull();
+  it("banner copy is plain English N of M with the couldn't-be-analyzed caveat", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.detail).toContain(
+      "Recommendations are current for 3 of 5 holdings — the rest couldn't be analyzed this run.",
+    );
   });
 
-  it("explains queue-only state when on-demand processing is disabled", () => {
-    const runResult = {
-      status: "refresh_requested" as const,
-      queued_ticker_count: 34,
-      on_demand_processing_enabled: false,
-      snapshot_available_after_run: false,
-    };
-    const note = onDemandDrainNote(runResult);
-    expect(note).toContain("queued only");
-    expect(note).toContain("on-demand processing is");
+  it("banner may include the backend's plain-English gap reasons", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.detail).toContain("Not enough fresh evidence to make a call for AAPL.");
   });
 
-  it("reports drain progress when on-demand processing ran but snapshot is not yet available", () => {
-    const runResult = {
-      status: "refresh_requested" as const,
-      queued_ticker_count: 34,
-      on_demand_processing_enabled: true,
-      on_demand_jobs_attempted: 10,
-      on_demand_jobs_succeeded: 8,
-      on_demand_jobs_failed: 2,
-      snapshot_available_after_run: false,
-      next_required_action:
-        "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
-    };
-    const note = onDemandDrainNote(runResult);
-    expect(note).toContain("8/10");
-    expect(note).toContain("Click Run Intel again");
+  it("pill is amber Partly Ready — never Ready, never Blocked", () => {
+    const pill = buildStatusPillState(makeWithGapsSnapshot(), false);
+    expect(pill.pill).toBe("Partly Ready");
+    expect(pill.tone).toBe("amber");
+    expect(pill.pill).not.toBe("Ready");
+    expect(pill.pill).not.toBe("Blocked");
+    expect(pill.line).toContain("current for 3 of 5 holdings");
   });
 
-  it("does not prompt re-click when the drain has nothing left to resume", () => {
-    const runResult = {
-      status: "refresh_requested" as const,
-      queued_ticker_count: 3,
-      on_demand_processing_enabled: true,
-      on_demand_jobs_attempted: 3,
-      on_demand_jobs_succeeded: 0,
-      on_demand_jobs_failed: 3,
-      snapshot_available_after_run: false,
-      next_required_action: "reclick_run_intel_to_retry",
-    };
-    const note = onDemandDrainNote(runResult);
-    expect(note).toContain("0/3");
-    expect(note).not.toContain("Click Run Intel again");
+  it("never leaks the raw snapshot_source enum into any user-visible text", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    const pill = buildStatusPillState(makeWithGapsSnapshot(), false);
+    for (const text of [banner.headline, banner.detail ?? "", pill.pill, pill.line]) {
+      expect(text).not.toContain("worker_certified_with_gaps");
+      expect(text.toLowerCase()).not.toContain("worker certified with gaps");
+    }
+  });
+
+  it("while refreshing, a with-gaps snapshot shows the amber refresh state (not green)", () => {
+    expect(deriveIntelV3UIStatus(makeWithGapsSnapshot(), true)).toBe(
+      "latest_certified_new_refresh_running",
+    );
+    expect(buildBannerState(makeWithGapsSnapshot(), true).tone).toBe("amber");
+  });
+
+  it("missing session_coverage still yields honest amber copy (no crash, no green)", () => {
+    const snap = makeWithGapsSnapshot({ session_coverage: undefined });
+    const banner = buildBannerState(snap, false);
+    expect(banner.status).toBe("certified_with_gaps");
+    expect(banner.tone).toBe("amber");
+    expect(banner.detail).toContain("current for 3 of 5 holdings");
+  });
+
+  it("clean worker_certified behavior is unchanged (green Ready)", () => {
+    const clean = makeCertifiedSnapshot({
+      evidence_freshness_state: "certified_current",
+    } as any);
+    expect(deriveIntelV3UIStatus(clean, false)).toBe("certified_current");
+    expect(buildBannerState(clean, false).tone).toBe("green");
+    expect(buildStatusPillState(clean, false).pill).toBe("Ready");
+    expect(buildStatusPillState(clean, false).tone).toBe("green");
   });
 });

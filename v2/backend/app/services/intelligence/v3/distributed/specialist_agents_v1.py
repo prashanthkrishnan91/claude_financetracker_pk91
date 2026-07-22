@@ -20,6 +20,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from ....agents.llm import NON_RETRYABLE_PROVIDER_CLASSES
 from . import run_task_store_v1 as store
 from .run_scheduler_v1 import parse_batch_tickers
 from .task_contracts_v1 import (
@@ -42,6 +43,27 @@ PROMPT_VERSION = "distributed_specialist_v1"
 # How long a specialist output stays reusable for an unchanged evidence
 # fingerprint (skips duplicate LLM calls across sessions).
 OUTPUT_VALID_HOURS = 24.0
+
+# Bounded per-call Haiku output budget for compact JSON — scales with the
+# ticker count actually IN this call (batch or single-ticker repair), never
+# unbounded. Examples: 1 ticker -> 700, 2 tickers -> 1300, 3+ tickers capped
+# at 1800.
+SPECIALIST_TOKENS_PER_TICKER = 650
+SPECIALIST_MIN_TOKENS_PER_CALL = 700
+SPECIALIST_MAX_TOKENS_PER_CALL = 1800
+
+# Per-result field caps enforced by validate_specialist_result — mirrors the
+# compact-JSON limits stated in SPECIALIST_SYSTEM_PROMPT.
+_MAX_LIST_ITEMS = 2
+_MAX_STRING_CHARS = 120
+
+
+def _specialist_token_budget(ticker_count: int) -> int:
+    n = max(1, ticker_count)
+    return max(
+        SPECIALIST_MIN_TOKENS_PER_CALL,
+        min(SPECIALIST_MAX_TOKENS_PER_CALL, SPECIALIST_TOKENS_PER_TICKER * n),
+    )
 
 _AXIS_FOCUS: dict[str, str] = {
     AXIS_FUNDAMENTAL: (
@@ -82,22 +104,32 @@ given, never browse. If evidence for a field is missing, list it in
 missing_evidence and lower your confidence instead of guessing.
 
 You produce ADVISORY research only. You do NOT make buy/hold/trim/sell
-decisions — a deterministic policy engine owns those. Do not output action
-words as recommendations.
+decisions — a deterministic policy engine owns those. Never output a
+Buy/Hold/Trim/Sell action word anywhere in your response.
 
-Return STRICT JSON only (no markdown fences, no prose) with this exact shape:
+Output COMPACT JSON ONLY. Exceeding any limit below is INVALID output:
+- No markdown, no code fences, no commentary before or after the JSON.
+- Exactly one result object per requested ticker, using the exact requested
+  ticker symbol — never abbreviate, expand, or invent a symbol.
+- key_findings: at most 2 items.
+- risks: at most 2 items.
+- missing_evidence: at most 2 items.
+- limitations: at most 2 items.
+- Every string in every list: at most ~120 characters — a short,
+  evidence-based phrase, never a paragraph.
+
+Return exactly this JSON shape:
 {"results": [{
   "ticker": "...",
   "stance": "positive" | "neutral" | "negative",
   "score": <float -1.0..1.0>,
   "confidence": <float 0.0..1.0>,
-  "key_findings": ["...", ...],   // 1-4 short evidence-grounded findings
-  "risks": ["...", ...],          // 0-3 short risks
+  "key_findings": ["...", ...],
+  "risks": ["...", ...],
   "missing_evidence": ["...", ...],
   "limitations": ["...", ...]
 }]}
-One entry per requested ticker, in any order. Every requested ticker MUST
-appear exactly once."""
+Every requested ticker MUST appear exactly once, in any order."""
 
 
 def _now() -> datetime:
@@ -190,17 +222,20 @@ def validate_specialist_result(entry: Any) -> Optional[dict[str, Any]]:
     def _str_list(value: Any, cap: int) -> list[str]:
         if not isinstance(value, list):
             return []
-        return [str(v)[:300] for v in value if isinstance(v, (str, int, float))][:cap]
+        return [
+            str(v)[:_MAX_STRING_CHARS]
+            for v in value if isinstance(v, (str, int, float))
+        ][:cap]
 
     return {
         "ticker": ticker,
         "stance": stance,
         "score": round(score, 4),
         "confidence": round(confidence, 4),
-        "key_findings": _str_list(findings, 4),
-        "risks": _str_list(entry.get("risks"), 3),
-        "missing_evidence": _str_list(entry.get("missing_evidence"), 5),
-        "limitations": _str_list(entry.get("limitations"), 3),
+        "key_findings": _str_list(findings, _MAX_LIST_ITEMS),
+        "risks": _str_list(entry.get("risks"), _MAX_LIST_ITEMS),
+        "missing_evidence": _str_list(entry.get("missing_evidence"), _MAX_LIST_ITEMS),
+        "limitations": _str_list(entry.get("limitations"), _MAX_LIST_ITEMS),
     }
 
 
@@ -227,6 +262,19 @@ class SpecialistBatchOutcome:
         self.skipped_insufficient: list[str] = []
         self.malformed: list[str] = []
         self.llm_calls = 0
+        # Tickers this task was asked to cover (observability only — the
+        # batch_key already carries this; kept here so callers don't need to
+        # re-parse it just to log a requested count).
+        self.requested_tickers: list[str] = []
+        # Repair calls made for missing/malformed tickers after the initial
+        # batch call (bounded — see execute_specialist_task).
+        self.repair_calls = 0
+        # Calls (initial or repair) where the raw LLM response looked
+        # truncated (fenced/verbose/cut-off Haiku output).
+        self.truncated_calls = 0
+        # Calls that failed with a non-retryable provider error (quota /
+        # authentication) — these never trigger a repair call.
+        self.quota_or_auth_failures = 0
         self.error: Optional[str] = None
         # Actual model(s) that answered each ask_json call (per-session cost
         # metrics by model; best-effort observability only, never decision
@@ -240,6 +288,12 @@ class SpecialistBatchOutcome:
         if self.malformed or self.skipped_insufficient:
             return TASK_DEGRADED
         return TASK_SUCCEEDED
+
+    @property
+    def partial_success(self) -> bool:
+        """At least one ticker persisted AND at least one requested ticker
+        did not (malformed/insufficient evidence) — observability only."""
+        return bool(self.persisted) and bool(self.malformed or self.skipped_insufficient)
 
 
 def _axis_has_evidence(bundle: dict[str, Any], axis: str) -> bool:
@@ -279,6 +333,7 @@ async def execute_specialist_task(
     if not batch_tickers:
         outcome.error = "empty_batch_key"
         return outcome
+    outcome.requested_tickers = list(batch_tickers)
 
     # Claim fence (pre-work): don't even start LLM work on a lost claim.
     if not store.owns_claim(client, task):
@@ -343,48 +398,78 @@ async def execute_specialist_task(
         return outcome
 
     system = SPECIALIST_SYSTEM_PROMPT
-    user_prompt = _build_user_prompt(axis, to_analyze)
     requested = [str(b.get("ticker")).upper() for b in to_analyze]
+    bundle_by_ticker = {str(b.get("ticker")).upper(): b for b in to_analyze}
 
-    async def _call(prompt: str) -> dict[str, Any]:
+    async def _call(prompt: str, tickers_in_call: list[str]) -> tuple[dict[str, Any], str]:
         outcome.llm_calls += 1
         call_meta: dict[str, Any] = {"axis": axis, "run_session_id": session_id}
+        budget = _specialist_token_budget(len(tickers_in_call))
         response = await llm.ask_json(
-            system, prompt, max_tokens=350 * max(1, len(requested)),
-            metadata=call_meta,
+            system, prompt, max_tokens=budget,
+            metadata=call_meta, reject_prose=True,
         )
         model_used = call_meta.get("model_used")
         if model_used:
             outcome.models_used.append(str(model_used))
-        return response if isinstance(response, dict) else {}
+        if (
+            call_meta.get("primary_truncated_response_detected")
+            or call_meta.get("retry_truncated_response_detected")
+        ):
+            outcome.truncated_calls += 1
+        error_class = str(call_meta.get("error_classification") or "")
+        return (response if isinstance(response, dict) else {}), error_class
 
-    response = await _call(user_prompt)
-    validated: dict[str, dict[str, Any]] = {}
-    for entry in (response.get("results") or []):
-        normalized = validate_specialist_result(entry)
-        if normalized is not None and normalized["ticker"] in requested:
-            validated[normalized["ticker"]] = normalized
-
-    missing = [t for t in requested if t not in validated]
-    if missing:
-        # One bounded repair retry for only the missing/malformed tickers.
-        repair_bundles = [
-            b for b in to_analyze if str(b.get("ticker")).upper() in missing
-        ]
-        repair_prompt = (
-            "Your previous response was missing or malformed for: "
-            f"{', '.join(missing)}. Return STRICT JSON for ONLY these tickers.\n"
-            + _build_user_prompt(axis, repair_bundles)
-        )
-        repair_response = await _call(repair_prompt)
-        for entry in (repair_response.get("results") or []):
+    def _validate_batch(
+        response: dict[str, Any], expected: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for entry in (response.get("results") or []):
             normalized = validate_specialist_result(entry)
-            if normalized is not None and normalized["ticker"] in missing:
-                validated[normalized["ticker"]] = normalized
+            if normalized is not None and normalized["ticker"] in expected:
+                out[normalized["ticker"]] = normalized
+        return out
+
+    user_prompt = _build_user_prompt(axis, to_analyze)
+    response, error_class = await _call(user_prompt, requested)
+    validated: dict[str, dict[str, Any]] = _validate_batch(response, requested)
+
+    quota_or_auth = error_class in NON_RETRYABLE_PROVIDER_CLASSES
+    if quota_or_auth:
+        outcome.quota_or_auth_failures += 1
+        # Quota/authentication failures get exactly ONE provider call — never
+        # a repair call. The durable task retry backoff owns the retry.
+    else:
+        # Retry only missing/malformed tickers, one call PER ticker (bounded:
+        # a two-ticker batch never exceeds 1 initial + 2 individual = 3 total
+        # calls). This also guarantees an already-validated ticker is never
+        # re-requested, and a peer ticker's failure never re-runs a
+        # successfully validated ticker.
+        missing = [t for t in requested if t not in validated]
+        for ticker in missing:
+            repair_bundle = bundle_by_ticker.get(ticker)
+            if repair_bundle is None:
+                continue
+            repair_prompt = (
+                f"Your previous response was missing or malformed for: {ticker}. "
+                "Return STRICT JSON for ONLY this ticker.\n"
+                + _build_user_prompt(axis, [repair_bundle])
+            )
+            repair_response, repair_error_class = await _call(repair_prompt, [ticker])
+            outcome.repair_calls += 1
+            validated.update(_validate_batch(repair_response, [ticker]))
+            if repair_error_class in NON_RETRYABLE_PROVIDER_CLASSES:
+                outcome.quota_or_auth_failures += 1
+                quota_or_auth = True
+                break  # stop further per-ticker repairs; remainder stay missing
 
     if not validated and requested:
-        # Whole-call failure (LLM down / empty) — retry the task, keep nothing.
-        outcome.error = "specialist_llm_call_failed"
+        # Whole-call failure (LLM down / empty / quota-auth) — retry the
+        # durable task, keep nothing. Never fires once ANY ticker validated.
+        outcome.error = (
+            "specialist_provider_quota_or_auth_failure" if quota_or_auth
+            else "specialist_llm_call_failed"
+        )
         return outcome
 
     # Claim fence (post-LLM, pre-write): the LLM call is the long-running

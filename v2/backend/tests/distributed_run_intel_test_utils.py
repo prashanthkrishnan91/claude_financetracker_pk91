@@ -306,6 +306,8 @@ class FakeLLM:
         script: Optional[dict[tuple[str, str], Optional[dict]]] = None,
         fail_all: bool = False,
         score_by_ticker: Optional[dict[str, float]] = None,
+        error_classification_sequence: Optional[list[Optional[str]]] = None,
+        truncated_tickers: Optional[set] = None,
     ):
         self.calls: list[dict[str, Any]] = []
         self.script = script or {}
@@ -314,6 +316,18 @@ class FakeLLM:
             k.upper(): v for k, v in (score_by_ticker or {}).items()
         }
         self.primary_model = "fake-claude"
+        # Provider-error simulation: one entry consumed per ask_json call, in
+        # call order. `None`/falsy = normal call; a truthy string ("quota",
+        # "authentication", ...) makes that call return `{}` with
+        # metadata["error_classification"] set, exactly like the real
+        # LLMClient's non-retryable short-circuit.
+        self.error_classification_sequence: list[Optional[str]] = list(
+            error_classification_sequence or []
+        )
+        # Tickers whose call should be flagged as looking truncated (mirrors
+        # LLMClient's primary_truncated_response_detected debug flag) even
+        # though this fake always returns well-formed JSON.
+        self.truncated_tickers = {str(t).upper() for t in (truncated_tickers or set())}
 
     def _default_result(self, axis: str, ticker: str) -> dict[str, Any]:
         score = self.score_by_ticker.get(ticker.upper(), 0.5)
@@ -331,6 +345,7 @@ class FakeLLM:
     async def ask_json(
         self, system: str, user: str, max_tokens: int = 1024,
         normalizer: Any = None, metadata: Optional[dict] = None,
+        reject_prose: bool = False,
     ) -> dict[str, Any]:
         axis = str((metadata or {}).get("axis") or "unknown")
         tickers = re.findall(r"Analyze these tickers: ([A-Z0-9+, .]+)\.", user)
@@ -345,7 +360,18 @@ class FakeLLM:
             "tickers": [t.upper() for t in requested],
             "metadata": metadata or {},
             "prompt_chars": len(user),
+            "max_tokens": max_tokens,
         })
+        meta = metadata if isinstance(metadata, dict) else {}
+        if self.error_classification_sequence:
+            error_class = self.error_classification_sequence.pop(0)
+            if error_class:
+                meta["error_classification"] = error_class
+                return {}
+        if self.truncated_tickers and self.truncated_tickers.intersection(
+            {t.upper() for t in requested}
+        ):
+            meta["primary_truncated_response_detected"] = True
         if self.fail_all:
             return {}
         if axis == "review":
@@ -379,6 +405,8 @@ def make_settings(**overrides: Any) -> Any:
         "intel_v3_distributed_max_collector_concurrency": 4,
         "intel_v3_distributed_max_llm_concurrency": 2,
         "intel_v3_distributed_max_specialist_batch": 5,
+        "intel_v3_distributed_haiku_max_specialist_batch": 2,
+        "intel_v3_distributed_specialist_model": "claude-haiku-4-5-20251001",
         "intel_v3_distributed_task_lease_seconds": 300,
         "intel_v3_distributed_max_task_attempts": 3,
         "intel_v3_research_workers_enabled": False,

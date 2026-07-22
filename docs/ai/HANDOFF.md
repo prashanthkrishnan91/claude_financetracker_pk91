@@ -1,6 +1,13 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-22 (distributed Run Intel model cost routing — standard specialist
+Last updated: 2026-07-22 (Haiku specialist output completion fix — production failure:
+session 7c4069a1-cc07-4c1e-a7d4-3bea67dd206d froze 31 holdings but completed 14 decided /
+17 NO CALL / 22 terminal task failures because Haiku returned verbose/Markdown-fenced/
+truncated JSON at 5-ticker batches with an unbounded ~350 tokens/ticker budget, and the
+whole batch retried through the durable task's full attempt budget instead of repairing
+just the missing tickers. Fix landed entirely inside the existing specialist execution
+seam — no Run Intel architecture, collector, decision-policy, publication, or frontend
+change. Same-day: distributed Run Intel model cost routing — standard specialist
 analysis moved to Haiku 4.5 with no Sonnet escalation, conditional conflict review stays
 on Sonnet 5 with a Haiku fallback; migration 027's owner-guard trigger variable bug
 corrected. 2026-07-21: Run Intel distributed workflow — the bounded-drain execution
@@ -147,11 +154,22 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
     ownership; stale reclaimed workers cannot mutate outputs).
   * Collectors reuse existing providers (data_sources fetchers + breakers/semaphores,
     SEC/ETF/macro research-worker runners writing `research_artifacts`); lane TTL reuse +
-    specialist `input_fingerprint` reuse skip duplicate provider/LLM work. Specialists are
-    pure (bundle-only input, `LLMClient.ask_json`, strict JSON, one repair retry,
-    per-(ticker,axis) rows in `intel_run_specialist_outputs`). Deterministic
-    `decision_policy_v1.decide()` remains the only visible action authority; specialist
-    scores aggregate into an advisory signal only.
+    specialist `input_fingerprint` reuse skip duplicate provider/LLM work (reuse ignores
+    the producing model — a Sonnet-era output stays reusable under Haiku routing).
+    Specialists are pure (bundle-only input, `LLMClient.ask_json`, strict compact JSON —
+    no markdown/fences/commentary, ≤2 key_findings/risks/missing_evidence/limitations,
+    ~120 chars/string, no visible action word), per-(ticker,axis) rows in
+    `intel_run_specialist_outputs`. Normal specialist batches are capped at
+    `INTEL_V3_DISTRIBUTED_HAIKU_MAX_SPECIALIST_BATCH` (default 2, independent of the
+    unrelated architectural `INTEL_V3_DISTRIBUTED_MAX_SPECIALIST_BATCH=5` ceiling for
+    other models) with a bounded 650-tokens/ticker output budget (min 700, max 1800/call).
+    A batch call's missing/malformed tickers are repaired ONE TICKER PER CALL — never a
+    validated peer — bounding a 2-ticker batch to ≤3 total LLM calls (1 initial + ≤2
+    individual repairs) instead of retrying the whole durable task 3×. A quota/
+    authentication provider error makes exactly one call, skips repair, and returns
+    `TASK_FAILED_RETRYABLE` without ever discarding an already-persisted peer ticker.
+    Deterministic `decision_policy_v1.decide()` remains the only visible action authority;
+    specialist scores aggregate into an advisory signal only.
   * Retired: `intel_run_session_flow_v1`, `analyst_refresh_on_demand_drain_v1`, the
     browser auto-continuation in `useRunIntelV3`, session-scoped
     `analyst_refresh_jobs` enqueue. Unfinished legacy (workflow_version=1) sessions were
@@ -197,6 +215,11 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   `NEXT_PUBLIC_*` env vars needed to prerender locally — sandbox-only).
 - Distributed Run Intel model cost routing PR (2026-07-22): full backend suite green
   (8467 passed, 0 failed, includes 16 new focused tests); no frontend files changed.
+- Haiku specialist output completion fix PR (2026-07-22): full backend suite green
+  (8494 passed, 0 failed, includes 27 new focused tests in
+  `test_specialist_output_completion_v1.py`; the 34-holding golden run's exact LLM-call
+  accounting moved from 22 to 49 calls to reflect the new default 2-ticker Haiku batch
+  cap, same complete coverage); no frontend files changed; no SQL.
 
 ## SQL / env state
 
@@ -207,6 +230,8 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   code, no manual action): `INTEL_V3_DISTRIBUTED_MAX_COLLECTOR_CONCURRENCY=4`,
   `INTEL_V3_DISTRIBUTED_MAX_LLM_CONCURRENCY=2`,
   `INTEL_V3_DISTRIBUTED_MAX_SPECIALIST_BATCH=5`,
+  `INTEL_V3_DISTRIBUTED_HAIKU_MAX_SPECIALIST_BATCH=2` (narrows Haiku-routed specialist
+  batches further; never exceeds the max-specialist-batch ceiling above),
   `INTEL_V3_DISTRIBUTED_TASK_LEASE_SECONDS=300`,
   `INTEL_V3_DISTRIBUTED_MAX_TASK_ATTEMPTS=3`.
   `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` no longer affects Run Intel (kept only so set
@@ -230,6 +255,27 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   Haiku 4.5 default failover unchanged. Env vars (all additive, existing deployments
   unaffected without setting them): `INTEL_V3_DISTRIBUTED_SPECIALIST_MODEL`,
   `INTEL_V3_DISTRIBUTED_REVIEW_MODEL`, `INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL`.
+- Haiku specialist output completion fix (2026-07-22, no SQL): root cause was an unbounded
+  token budget (`350 * batch_size`) combined with 5-ticker Haiku batches and a single
+  batched repair retry that re-requested already-valid tickers — Haiku's verbose/fenced/
+  truncated responses then exhausted the durable task's whole 3-attempt budget on tickers
+  that had already succeeded. `specialist_agents_v1.py`: `_specialist_token_budget()`
+  replaces the bare multiplier (650/ticker, clamped 700–1800); the repair loop now issues
+  one call PER missing/malformed ticker (never a validated peer), bounding a 2-ticker batch
+  to ≤3 total calls; `SpecialistBatchOutcome` gained `repair_calls`/`truncated_calls`/
+  `quota_or_auth_failures`/`requested_tickers`/`partial_success` for observability.
+  `agents/llm.py`: new `_classify_provider_exception()` (quota/authentication/rate_limit/
+  transient) — quota/auth stop the same-model backoff loop after one attempt (a configured
+  fallback MODEL, e.g. the review agent's Sonnet→Haiku, still runs — only same-model
+  retries and specialist repair calls are skipped); new `_extract_json(..., reject_prose=)`
+  strict mode (trim + strip one outer fence, no prose-object scanning) used only by
+  specialist calls via `ask_json(..., reject_prose=True)` — the default prose-tolerant
+  behavior for all other `ask_json` callers is unchanged. `worker_supervisor_v1.py`:
+  `_effective_specialist_batch_cap()` applies `intel_v3_distributed_haiku_max_specialist_batch`
+  (default 2) whenever the configured specialist model name contains "haiku", clamped to
+  never exceed the unrelated `intel_v3_distributed_max_specialist_batch` ceiling; new
+  per-task structured log line + 4 session metrics counters (additive to the existing
+  JSONB `intel_run_sessions.metrics`, no schema change).
 - Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
   endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
 - `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`

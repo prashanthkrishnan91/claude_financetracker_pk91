@@ -176,6 +176,36 @@ class WorkerSupervisor:
             )
         return self._review_llm
 
+    def _effective_specialist_batch_cap(self) -> int:
+        """Batch size the scheduler chunks specialist tickers into.
+
+        `intel_v3_distributed_max_specialist_batch` stays the unrelated
+        architectural ceiling for any model. When the configured specialist
+        model is a Haiku model (the normal routing —
+        `WorkerSupervisor.specialist_llm`), the narrower
+        `intel_v3_distributed_haiku_max_specialist_batch` applies instead so
+        compact-JSON Haiku output stays reliable — it can only narrow the
+        batch, never widen past the architectural ceiling.
+        """
+        global_max = int(
+            getattr(self.settings, "intel_v3_distributed_max_specialist_batch", 5)
+        )
+        specialist_model = str(
+            getattr(
+                self.settings, "intel_v3_distributed_specialist_model",
+                "claude-haiku-4-5-20251001",
+            ) or ""
+        )
+        if "haiku" not in specialist_model.lower():
+            return max(1, global_max)
+        haiku_max = int(
+            getattr(
+                self.settings,
+                "intel_v3_distributed_haiku_max_specialist_batch", 2,
+            )
+        )
+        return max(1, min(haiku_max, global_max))
+
     # ── One pass ─────────────────────────────────────────────────────────────
     async def run_pass(self) -> dict[str, int]:
         """One full supervisor pass: schedule → claim → execute → flush.
@@ -222,9 +252,7 @@ class WorkerSupervisor:
             lambda: store.sweep_exhausted_expired_claims(self.client)
         )
 
-        max_batch = int(
-            getattr(self.settings, "intel_v3_distributed_max_specialist_batch", 5)
-        )
+        max_batch = self._effective_specialist_batch_cap()
         for session in sessions:
             try:
                 await asyncio.to_thread(
@@ -320,8 +348,34 @@ class WorkerSupervisor:
                 buffer["llm_reused"] = (
                     buffer.get("llm_reused", 0) + len(outcome.reused)
                 )
+                buffer["specialist_repair_calls"] = (
+                    buffer.get("specialist_repair_calls", 0) + outcome.repair_calls
+                )
+                buffer["specialist_truncations"] = (
+                    buffer.get("specialist_truncations", 0) + outcome.truncated_calls
+                )
+                buffer["specialist_quota_failures"] = (
+                    buffer.get("specialist_quota_failures", 0)
+                    + outcome.quota_or_auth_failures
+                )
+                if outcome.partial_success:
+                    buffer["specialist_partial_successes"] = (
+                        buffer.get("specialist_partial_successes", 0) + 1
+                    )
                 self._buffer_model_metrics(buffer, outcome.models_used)
                 stats["llm_calls"] += outcome.llm_calls
+                logger.info(
+                    "specialist_task.completed session=%s axis=%s requested=%d "
+                    "persisted=%d reused=%d malformed=%d llm_calls=%d "
+                    "repair_calls=%d truncated_calls=%d quota_or_auth_failures=%d "
+                    "model=%s failure=%s",
+                    session_id, task.get("lane"), len(outcome.requested_tickers),
+                    len(outcome.persisted), len(outcome.reused),
+                    len(outcome.malformed), outcome.llm_calls, outcome.repair_calls,
+                    outcome.truncated_calls, outcome.quota_or_auth_failures,
+                    outcome.models_used[-1] if outcome.models_used else "",
+                    outcome.error or "",
+                )
                 await asyncio.to_thread(
                     lambda: store.complete_task(
                         self.client,

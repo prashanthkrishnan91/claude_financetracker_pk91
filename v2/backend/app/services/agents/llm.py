@@ -46,6 +46,19 @@ _JSON_ONLY_CONTRACT = (
     "No prose before/after JSON. Include all required keys; use null/[]/\"\" defaults."
 )
 
+# Provider error classification (best-effort, message/status-based — the
+# Anthropic SDK does not expose a stable machine-readable error taxonomy).
+# Quota/authentication failures are never worth retrying within a call: the
+# key/account is broken until a human fixes it, so callers should make one
+# provider call, skip any repair/fallback attempts, and let the DURABLE task
+# retry own the backoff instead of burning attempts against a dead key.
+ERROR_CLASS_QUOTA = "quota"
+ERROR_CLASS_AUTHENTICATION = "authentication"
+ERROR_CLASS_RATE_LIMIT = "rate_limit"
+ERROR_CLASS_TRANSIENT = "transient"
+ERROR_CLASS_UNKNOWN = "unknown"
+NON_RETRYABLE_PROVIDER_CLASSES = (ERROR_CLASS_QUOTA, ERROR_CLASS_AUTHENTICATION)
+
 
 class LLMClient:
     """Stateless async wrapper around anthropic.Anthropic with failover.
@@ -86,6 +99,7 @@ class LLMClient:
         max_tokens: int = 1024,
         normalizer: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
         metadata: Optional[dict[str, Any]] = None,
+        reject_prose: bool = False,
     ) -> dict[str, Any]:
         """Run a single prompt, parse JSON reply, return `{}` on total failure.
 
@@ -95,6 +109,20 @@ class LLMClient:
              model ONCE with a trimmed prompt and reduced max_tokens.
           3. If the fallback also fails, return `{}`; the caller decides how
              to populate degraded defaults.
+
+        A quota/authentication provider error is never retried against the
+        SAME model (single attempt, no backoff) — retrying a dead key/account
+        just wastes time on a guaranteed failure. It does NOT by itself skip
+        a configured fallback MODEL (e.g. the conflict-review agent's
+        Sonnet → Haiku fallback keeps working through a Sonnet quota
+        failure); callers that must stop after exactly one provider call
+        (e.g. specialist tasks, which run with no fallback model configured)
+        get that behavior for free once fallback is disabled.
+        `metadata["error_classification"]` carries the last non-empty
+        classification so callers can decide whether a repair call is worth
+        attempting. ``reject_prose=True`` uses the strict compact-JSON
+        extractor (no prose-wrapped-object fallback) instead of the default
+        prose-tolerant one.
         """
         if not self.api_key:
             logger.warning("LLM call skipped — no anthropic_api_key configured")
@@ -103,7 +131,7 @@ class LLMClient:
         # ── Primary attempt (with 429 backoff) ────────────────────────────
         meta: dict[str, Any] = metadata if isinstance(metadata, dict) else {}
         logger.info("LLM call start — model=%s max_tokens=%d", self.model, max_tokens)
-        text, err = await self._call_with_backoff(
+        text, err, error_class = await self._call_with_backoff(
             model=self.model,
             system=system,
             user=user,
@@ -112,7 +140,7 @@ class LLMClient:
         )
         if text:
             logger.debug("raw_llm_response_preview model=%s preview=%r", self.model, text[:800])
-            parsed, debug = _extract_json(text)
+            parsed, debug = _extract_json(text, reject_prose=reject_prose)
             meta.update({f"primary_{k}": v for k, v in debug.items()})
             if parsed is not None:
                 logger.debug("extracted_json_preview model=%s preview=%r", self.model, (debug.get("candidate") or "")[:800])
@@ -130,7 +158,7 @@ class LLMClient:
                     "LLM primary parse looks truncated; retrying once with larger max_tokens=%d",
                     larger_budget,
                 )
-                trunc_text, trunc_err = await self._call_with_backoff(
+                trunc_text, trunc_err, trunc_error_class = await self._call_with_backoff(
                     model=self.model,
                     system=system + _JSON_ONLY_CONTRACT,
                     user=user + _JSON_ONLY_CONTRACT,
@@ -138,8 +166,12 @@ class LLMClient:
                     timeout_s=PRIMARY_TIMEOUT_S,
                     max_attempts=2,
                 )
+                if trunc_error_class:
+                    error_class = trunc_error_class
                 if trunc_text:
-                    trunc_parsed, trunc_debug = _extract_json(trunc_text)
+                    trunc_parsed, trunc_debug = _extract_json(
+                        trunc_text, reject_prose=reject_prose,
+                    )
                     meta.update({f"retry_{k}": v for k, v in trunc_debug.items()})
                     meta["retry_reason"] = "truncated_response_detected"
                     if trunc_parsed is not None:
@@ -161,6 +193,8 @@ class LLMClient:
                 "parse_success": False,
                 "retry_reason": err or "no-json",
             })
+            if error_class:
+                meta["error_classification"] = error_class
             logger.warning(
                 "LLM primary failed and no fallback configured (model=%s) — "
                 "returning {}", self.model,
@@ -174,7 +208,7 @@ class LLMClient:
         fb_system = _trim_prompt(system + _JSON_ONLY_CONTRACT, ratio=0.8)
         fb_user = _trim_prompt(user + _JSON_ONLY_CONTRACT, ratio=0.8)
         fb_max_tokens = max(320, min(700, int(max_tokens * 0.75)))
-        fb_text, fb_err = await self._call_with_backoff(
+        fb_text, fb_err, fb_error_class = await self._call_with_backoff(
             model=self.fallback_model,
             system=fb_system,
             user=fb_user,
@@ -184,7 +218,7 @@ class LLMClient:
         )
         if fb_text:
             logger.debug("raw_llm_response_preview model=%s preview=%r", self.fallback_model, fb_text[:800])
-            parsed, debug = _extract_json(fb_text)
+            parsed, debug = _extract_json(fb_text, reject_prose=reject_prose)
             meta.update({f"fallback_{k}": v for k, v in debug.items()})
             if parsed is not None:
                 logger.info("LLM fallback succeeded — model=%s", self.fallback_model)
@@ -203,6 +237,8 @@ class LLMClient:
             "parse_success": False,
             "retry_reason": err or "no-json",
         })
+        if fb_error_class:
+            meta["error_classification"] = fb_error_class
         logger.warning("LLM fallback failed: %s — returning {}", fb_err or "no-json")
         return {}
 
@@ -217,11 +253,14 @@ class LLMClient:
         max_tokens: int,
         timeout_s: float,
         max_attempts: int = 4,
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], str]:
         """Call Anthropic with exp. backoff on 429 / overloaded.
 
-        Returns `(text, error_str)`. `text` is None on total failure.
-        `max_attempts` caps the total number of tries (initial + retries).
+        Returns `(text, error_str, error_class)`. `text` is None on total
+        failure. `max_attempts` caps the total number of tries (initial +
+        retries). Quota/authentication errors are never retried — they fail
+        on the first attempt regardless of `max_attempts` since retrying a
+        dead key/account wastes attempts and time for a guaranteed failure.
         """
         attempts = min(max_attempts, len(_BACKOFF_SCHEDULE_S))
 
@@ -231,22 +270,27 @@ class LLMClient:
                     self._single_call(model, system, user, max_tokens),
                     timeout=timeout_s,
                 )
-                return text, None
+                return text, None, ""
             except asyncio.TimeoutError:
                 # Timeout is not retryable on same model — escalate to fallback.
                 logger.warning("LLM timeout after %.1fs — model=%s", timeout_s, model)
-                return None, f"timeout after {timeout_s:.0f}s"
+                return None, f"timeout after {timeout_s:.0f}s", ERROR_CLASS_TRANSIENT
             except Exception as exc:  # noqa: BLE001 — we classify below
                 err_str = str(exc)
-                status = _status_code_from_exc(exc)
-                retryable = isinstance(exc, (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError, httpx.WriteError)) or status in (429, 529) or "overloaded" in err_str.lower() \
-                    or "rate_limit" in err_str.lower()
+                error_class = _classify_provider_exception(exc)
+                if error_class in NON_RETRYABLE_PROVIDER_CLASSES:
+                    logger.warning(
+                        "LLM call failed non-retryably — model=%s class=%s attempt=%d/%d: %s",
+                        model, error_class, attempt + 1, attempts, err_str[:200],
+                    )
+                    return None, err_str, error_class
+                retryable = error_class in (ERROR_CLASS_RATE_LIMIT, ERROR_CLASS_TRANSIENT)
                 if not retryable or attempt == attempts - 1:
                     logger.warning(
                         "LLM call failed — model=%s attempt=%d/%d: %s",
                         model, attempt + 1, attempts, err_str[:200],
                     )
-                    return None, err_str
+                    return None, err_str, error_class
                 # Exponential backoff with jitter
                 delay = _BACKOFF_SCHEDULE_S[attempt] + random.uniform(0, 1.0)
                 logger.warning(
@@ -255,7 +299,7 @@ class LLMClient:
                 )
                 await asyncio.sleep(delay)
 
-        return None, "exhausted retries"
+        return None, "exhausted retries", ERROR_CLASS_RATE_LIMIT
 
     async def _single_call(
         self, model: str, system: str, user: str, max_tokens: int
@@ -299,10 +343,40 @@ class LLMClient:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+_OUTER_FENCE_OPEN_RE = re.compile(r"^```[ \t]*(?:json)?[ \t]*\r?\n?", re.IGNORECASE)
+_OUTER_FENCE_CLOSE_RE = re.compile(r"\r?\n?[ \t]*```[ \t]*$")
+
+
+def _strip_single_outer_fence(text: str) -> str:
+    """Strip at most one leading/trailing Markdown code fence.
+
+    Only removes the delimiter characters (``` or ```json) — never
+    interprets or executes the fenced content. A missing/unfinished closing
+    fence still has its opening delimiter stripped so truncation detection
+    runs against the actual JSON body instead of failing on stray backticks.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    without_open = _OUTER_FENCE_OPEN_RE.sub("", stripped, count=1)
+    without_close = _OUTER_FENCE_CLOSE_RE.sub("", without_open, count=1)
+    return without_close.strip()
+
+
+def _extract_json(
+    text: str, *, reject_prose: bool = False,
+) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     """Parse a JSON object from raw model text.
 
-    Accepts raw JSON, fenced JSON blocks, and JSON with short prose wrappers.
+    Default (``reject_prose=False``): accepts raw JSON, fenced JSON blocks,
+    and JSON with short prose wrappers (existing tolerant behavior, used by
+    legacy callers). ``reject_prose=True`` uses a strict compact-JSON
+    contract instead — whitespace trimmed, at most one outer Markdown fence
+    stripped, and NOTHING else: no scanning for a JSON object buried in
+    surrounding prose. Use this for agents whose prompt contract demands
+    JSON-only output (e.g. distributed specialists) so a verbose/commentary
+    response is correctly rejected rather than silently salvaged.
+
     Returns parsed object + debug metadata for targeted logging.
     """
     debug: dict[str, Any] = {
@@ -316,6 +390,25 @@ def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     }
     if not text:
         debug["error"] = "empty response text"
+        return None, debug
+
+    if reject_prose:
+        candidate = _strip_single_outer_fence(text)
+        debug["candidate"] = candidate
+        debug["extracted_json_length"] = len(candidate)
+        try:
+            loaded = json.loads(candidate)
+            if isinstance(loaded, dict):
+                debug["parse_error_type"] = "none"
+                return loaded, debug
+            debug["error"] = f"top-level JSON must be object, got {type(loaded).__name__}"
+            debug["parse_error_type"] = "top_level_not_object"
+        except Exception as exc:  # noqa: BLE001
+            debug["error"] = str(exc)
+            debug["parse_error_type"] = _classify_parse_error(str(exc), candidate=candidate)
+            debug["truncated_response_detected"] = _looks_truncated(
+                candidate=candidate, error=str(exc),
+            )
         return None, debug
 
     stripped = text.strip()
@@ -521,6 +614,39 @@ def _is_compatibility_400(exc: Exception) -> bool:
         "content block",
     )
     return any(h in msg for h in hints)
+
+
+def _classify_provider_exception(exc: Exception) -> str:
+    """Best-effort classification of an Anthropic SDK exception.
+
+    The SDK does not expose a stable machine-readable taxonomy, so this
+    combines HTTP status (when available) with message hints. Never raises —
+    an unrecognized shape falls back to ``ERROR_CLASS_UNKNOWN`` (fail fast,
+    not retried by the caller's default policy).
+    """
+    status = _status_code_from_exc(exc)
+    msg = str(exc).lower()
+
+    if status == 401 or "authentication_error" in msg or "invalid x-api-key" in msg \
+            or "invalid api key" in msg:
+        return ERROR_CLASS_AUTHENTICATION
+    if "credit balance" in msg or "insufficient_quota" in msg \
+            or "insufficient credit" in msg or "billing" in msg:
+        return ERROR_CLASS_QUOTA
+    if status == 403:
+        return (
+            ERROR_CLASS_QUOTA if ("credit" in msg or "quota" in msg)
+            else ERROR_CLASS_AUTHENTICATION
+        )
+    if status == 429 or "rate_limit" in msg:
+        return ERROR_CLASS_RATE_LIMIT
+    if status == 529 or "overloaded" in msg:
+        return ERROR_CLASS_TRANSIENT
+    if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError, httpx.WriteError)):
+        return ERROR_CLASS_TRANSIENT
+    if status is not None and status >= 500:
+        return ERROR_CLASS_TRANSIENT
+    return ERROR_CLASS_UNKNOWN
 
 
 def clamp(v: Any, lo: float, hi: float, default: float = 0.0) -> float:

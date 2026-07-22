@@ -512,6 +512,18 @@ class Settings(BaseSettings):
     intel_v3_distributed_task_lease_seconds: int = 300
     intel_v3_distributed_max_task_attempts: int = 3
 
+    # Model cost routing (distributed Run Intel ONLY — legacy agent/background-
+    # worker LLMClient defaults in services/agents/llm.py are untouched).
+    # Standard specialist analysis routes to Haiku with no fallback: a failed
+    # specialist task retries the durable task (same cheap model), it never
+    # auto-escalates to Sonnet. The conditional conflict-review agent routes
+    # to Sonnet with a Haiku fallback. decision_policy_v1.decide() remains the
+    # only visible Buy/Hold/Trim/Sell authority regardless of which model
+    # produced the advisory specialist/review signal.
+    intel_v3_distributed_specialist_model: str = "claude-haiku-4-5-20251001"
+    intel_v3_distributed_review_model: str = "claude-sonnet-5"
+    intel_v3_distributed_review_fallback_model: str = "claude-haiku-4-5-20251001"
+
 
 @lru_cache
 def get_settings() -> Settings:

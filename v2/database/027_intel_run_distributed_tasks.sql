@@ -40,6 +40,13 @@
 --   Until applied, the distributed Run Intel path degrades safely with an
 --   explicit retryable error at session creation (table missing); no legacy
 --   behavior is affected.
+--
+-- PRODUCTION TRUTH CORRECTION: production had already manually patched a
+-- trigger-function bug in this migration (owner-guard PL/pgSQL variable
+-- named `session_user`, which shadows the reserved SQL builtin `SESSION_USER`
+-- instead of the intended local variable). This source file now matches that
+-- production fix (`v_session_user_id`, qualified aliases, `IS DISTINCT FROM`)
+-- — re-running `CREATE OR REPLACE FUNCTION` is idempotent and safe.
 -- ============================================================================
 
 -- ── 1. intel_run_sessions — distributed-workflow extensions ──────────────────
@@ -189,22 +196,29 @@ CREATE INDEX IF NOT EXISTS idx_intel_run_tickers_user
 
 -- Cross-user link protection: a ticker row's user must match its session's
 -- user. Service-role writes bypass RLS, so enforce with a trigger.
+-- NOTE (production truth correction): the PL/pgSQL variable was originally
+-- named `session_user`, which collides with the reserved SQL keyword/builtin
+-- `SESSION_USER` (the connecting database role). Bare `session_user` in a
+-- boolean expression resolves to that builtin rather than the local
+-- variable, so the owner comparison silently compared the wrong values.
+-- Renamed to `v_session_user_id` with qualified aliases and a NULL-safe
+-- `IS DISTINCT FROM` comparison.
 CREATE OR REPLACE FUNCTION public.intel_run_ticker_owner_guard()
 RETURNS TRIGGER AS $$
 DECLARE
-    session_user UUID;
+    v_session_user_id UUID;
 BEGIN
-    SELECT user_id INTO session_user
-    FROM public.intel_run_sessions
-    WHERE id = NEW.run_session_id;
-    IF session_user IS NULL THEN
+    SELECT s.user_id INTO v_session_user_id
+    FROM public.intel_run_sessions s
+    WHERE s.id = NEW.run_session_id;
+    IF v_session_user_id IS NULL THEN
         RAISE EXCEPTION 'intel_run_tickers: unknown run_session_id %',
             NEW.run_session_id;
     END IF;
-    IF session_user <> NEW.user_id THEN
+    IF v_session_user_id IS DISTINCT FROM NEW.user_id THEN
         RAISE EXCEPTION
             'intel_run_tickers: user_id % does not own session % (owner %)',
-            NEW.user_id, NEW.run_session_id, session_user;
+            NEW.user_id, NEW.run_session_id, v_session_user_id;
     END IF;
     RETURN NEW;
 END;
@@ -317,19 +331,19 @@ CREATE INDEX IF NOT EXISTS idx_intel_run_tasks_user
 CREATE OR REPLACE FUNCTION public.intel_run_task_owner_guard()
 RETURNS TRIGGER AS $$
 DECLARE
-    session_user UUID;
+    v_session_user_id UUID;
 BEGIN
-    SELECT user_id INTO session_user
-    FROM public.intel_run_sessions
-    WHERE id = NEW.run_session_id;
-    IF session_user IS NULL THEN
+    SELECT s.user_id INTO v_session_user_id
+    FROM public.intel_run_sessions s
+    WHERE s.id = NEW.run_session_id;
+    IF v_session_user_id IS NULL THEN
         RAISE EXCEPTION 'intel_run_tasks: unknown run_session_id %',
             NEW.run_session_id;
     END IF;
-    IF session_user <> NEW.user_id THEN
+    IF v_session_user_id IS DISTINCT FROM NEW.user_id THEN
         RAISE EXCEPTION
             'intel_run_tasks: user_id % does not own session % (owner %)',
-            NEW.user_id, NEW.run_session_id, session_user;
+            NEW.user_id, NEW.run_session_id, v_session_user_id;
     END IF;
     RETURN NEW;
 END;

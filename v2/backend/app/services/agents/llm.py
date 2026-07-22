@@ -61,12 +61,17 @@ class LLMClient:
         self,
         api_key: str,
         model: str = PRIMARY_MODEL,
-        fallback_model: str = FALLBACK_MODEL,
+        fallback_model: Optional[str] = FALLBACK_MODEL,
     ):
         self.api_key = api_key
         self.model = model
         self.fallback_model = fallback_model
         self._client = None
+
+    @property
+    def _fallback_enabled(self) -> bool:
+        """No fallback when unset, empty, or identical to the primary model."""
+        return bool(self.fallback_model) and self.fallback_model != self.model
 
     def _ensure_client(self):
         if self._client is None:
@@ -148,6 +153,19 @@ class LLMClient:
                 if trunc_err:
                     err = trunc_err
             logger.warning("LLM primary returned unparseable JSON; falling back")
+
+        # ── No fallback configured — the primary is the only attempt ──────
+        if not self._fallback_enabled:
+            meta.update({
+                "model_used": self.model,
+                "parse_success": False,
+                "retry_reason": err or "no-json",
+            })
+            logger.warning(
+                "LLM primary failed and no fallback configured (model=%s) — "
+                "returning {}", self.model,
+            )
+            return {}
 
         # ── Fallback attempt (Haiku, trimmed prompt, single try) ──────────
         logger.warning(

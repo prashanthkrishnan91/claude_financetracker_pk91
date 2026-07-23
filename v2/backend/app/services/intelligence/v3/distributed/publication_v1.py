@@ -36,6 +36,7 @@ from .task_contracts_v1 import (
     SESSION_COMPLETED_WITH_GAPS,
     SESSION_RUNNING,
     STAGE_DONE,
+    TASK_PORTFOLIO_JOIN_PUBLISH,
     TICKER_DECIDED,
     TICKER_FAILED,
     TICKER_NO_CALL,
@@ -92,13 +93,34 @@ async def execute_publication_task(
         outputs = store.list_specialist_outputs(
             client, run_session_id=session_id
         )
-        return session, rows, outputs
+        session_tasks = store.list_tasks(client, run_session_id=session_id)
+        return session, rows, outputs, session_tasks
 
-    session, ticker_rows, specialist_outputs = await asyncio.to_thread(
+    session, ticker_rows, specialist_outputs, session_tasks = await asyncio.to_thread(
         _read_state
     )
     if session is None:
         outcome.error = "session_row_missing"
+        return outcome
+
+    # Sanity fence for the trust-contract read: every real session seeds a
+    # task graph at creation (portfolio/macro context + per-ticker lane
+    # collectors) before it can freeze any ticker row, so frozen tickers with
+    # no non-publish task rows is never legitimate — it means the tasks read
+    # silently failed (the store's reads degrade to `[]` rather than
+    # raising; the in-flight portfolio_join_publish task itself always
+    # appears in the list and must not count as evidence of a healthy read).
+    # Publishing on that would make ``run_trust_contract_v1`` report every
+    # conflict review as not-required and every axis as merely missing
+    # (never failed), falsely improving overall_status. Fail retryable
+    # instead of persisting a falsely-optimistic trust contract.
+    non_publish_tasks = [
+        t for t in session_tasks
+        if str(t.get("task_type") or "") != TASK_PORTFOLIO_JOIN_PUBLISH
+    ]
+    if ticker_rows and not non_publish_tasks:
+        outcome.error = "session_tasks_read_empty_or_failed"
+        outcome.final_state = TASK_FAILED_RETRYABLE
         return outcome
 
     decided = [
@@ -163,6 +185,7 @@ async def execute_publication_task(
                 session=session,
                 ticker_rows=ticker_rows,
                 specialist_outputs=specialist_outputs,
+                tasks=session_tasks,
                 now=now,
             )
         )

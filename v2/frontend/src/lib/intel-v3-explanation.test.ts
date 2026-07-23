@@ -19,6 +19,8 @@ import {
   buildPortfolioEvidenceSummary,
   buildSupportingEvidenceSentences,
   buildIncompleteEvidenceSentences,
+  decisionConstraintToLabel,
+  allDecisionConstraintLabels,
   RAW_KEYS_BANNED,
 } from "./intel-v3-explanation";
 import type { IntelV3EvidenceExplanation, IntelV3HeldCard } from "./api";
@@ -316,6 +318,80 @@ describe("buildSafetyDisplay", () => {
       safe_for_visible_decision: false,
     }));
     expect(d.tier).toBe("limited");
+  });
+
+  // ── run_trust_contract_v1 decisionConstraints — production-shaped proofs ────
+  // Regression coverage for the reported bug: "current UI calls every
+  // nonempty decision blocker 'Evidence blocked'". When decisionConstraints
+  // is provided, ONLY an evidence_quality constraint is "blocked" — every
+  // other category (price_context/portfolio_policy/risk/source_lineage/
+  // conflict_review) is real but never relabeled an evidence failure.
+
+  it("AMD/TSM-style: price_context only → not evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["price_context"]);
+    expect(d.tier).not.toBe("blocked");
+    expect(d.label).not.toBe("Evidence blocked");
+    expect(d.label).toBe("Price context limited");
+  });
+
+  it("NVDA-style: portfolio_policy only → not evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["portfolio_policy"]);
+    expect(d.tier).not.toBe("blocked");
+    expect(d.label).not.toBe("Evidence blocked");
+    expect(d.label).toBe("Portfolio policy constraint");
+  });
+
+  it("CRM/GOOGL/NFLX-style: conflict_review failure → limited, not blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["conflict_review", "source_lineage"]);
+    expect(d.tier).toBe("limited");
+    expect(d.label).toBe("Conflict review not resolved");
+  });
+
+  it("a real evidence_quality constraint still shows Evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["evidence_quality", "price_context"]);
+    expect(d.tier).toBe("blocked");
+    expect(d.label).toBe("Evidence blocked");
+  });
+
+  it("empty decisionConstraints array falls back to the underlying evidence-band logic, not blocked", () => {
+    const d = buildSafetyDisplay(
+      makeExplanation({ action_blocks: ["some_legacy_block"], safe_for_visible_decision: true, primary_evidence_status: "READY", corroboration_gap: false }),
+      [],
+    );
+    // decisionConstraints=[] means "no real constraint categories" — must not
+    // fall back to the raw action_blocks heuristic that caused the bug.
+    expect(d.tier).not.toBe("blocked");
+  });
+
+  it("undefined decisionConstraints preserves legacy action_blocks behavior", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: ["buy_blocked_thin_evidence"] }));
+    expect(d.tier).toBe("blocked");
+  });
+});
+
+describe("decisionConstraintToLabel / allDecisionConstraintLabels", () => {
+  it("returns null for empty/undefined categories", () => {
+    expect(decisionConstraintToLabel(undefined)).toBeNull();
+    expect(decisionConstraintToLabel([])).toBeNull();
+    expect(allDecisionConstraintLabels(undefined)).toEqual([]);
+  });
+
+  it("BLSH-style: portfolio_policy AND conflict_review show as two distinct labels", () => {
+    const labels = allDecisionConstraintLabels(["portfolio_policy", "conflict_review"]);
+    expect(labels).toHaveLength(2);
+    expect(labels.map((l) => l.label)).toContain("Portfolio policy constraint");
+    expect(labels.map((l) => l.label)).toContain("Conflict review not resolved");
+    // Never merged into one generic label.
+    expect(new Set(labels.map((l) => l.label)).size).toBe(2);
+  });
+
+  it("priority order surfaces evidence_quality first when present", () => {
+    const top = decisionConstraintToLabel(["portfolio_policy", "evidence_quality"]);
+    expect(top?.label).toBe("Evidence blocked");
+  });
+
+  it("unrecognized/'other' category yields no display entries", () => {
+    expect(allDecisionConstraintLabels(["other"])).toEqual([]);
   });
 });
 

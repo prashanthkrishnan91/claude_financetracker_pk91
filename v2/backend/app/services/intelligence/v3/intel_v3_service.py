@@ -165,6 +165,21 @@ class IntelV3Service:
                 snapshot_id=str(snapshot_id),
             )
 
+            # Read-time run-trust overlay: additive-only enrichment for a
+            # distributed-session snapshot persisted before
+            # run_trust_contract_v1 existed. No-op when the payload already
+            # carries a trust contract (future publications persist it
+            # directly) or isn't a distributed session snapshot. Runs its
+            # (synchronous) DB reads off the event loop, same convention as
+            # every other blocking call in this method.
+            await asyncio.to_thread(
+                lambda: _enrich_snapshot_with_run_trust_contract(
+                    response_payload,
+                    client=self.client,
+                    user_id=self.user_id,
+                )
+            )
+
             logger.info(
                 "intel_v3_snapshot_response_summary user_id=%s result=found "
                 "snapshot_id=%s total_cards=%d action_counts=%s "
@@ -2870,6 +2885,157 @@ def _normalize_legacy_committee_status(
         unchanged_count,
         validated_count + existing_validated,
         pending_count + existing_pending,
+    )
+
+
+def _committee_status_from_trust(
+    *, evidence_band: str, has_source_lineage: bool, review_failed: bool
+) -> dict:
+    """Same policy as ``snapshot_builder._build_source_pack_status`` — never
+    "source_validated" without real lineage AND a passed/not-required review.
+    Duplicated (not imported) intentionally: this is a small, self-contained
+    response-time read rule over an already-persisted card, the same pattern
+    ``_normalize_legacy_committee_status`` already uses for old snapshots.
+    """
+    if review_failed:
+        return {
+            "status": "pending",
+            "reason": (
+                "A required conflict review failed for this ticker — shown "
+                "without successful conflict reconciliation."
+            ),
+        }
+    if not has_source_lineage:
+        return {
+            "status": "pending",
+            "reason": "No source references recorded for this run — lineage not established.",
+        }
+    if evidence_band in ("STRONG", "PARTIAL"):
+        return {"status": "source_validated"}
+    return {"status": "pending", "reason": "Source-linked evidence not yet available for this ticker."}
+
+
+def _enrich_snapshot_with_run_trust_contract(
+    response_payload: dict,
+    *,
+    client: Any,
+    user_id: Any,
+) -> None:
+    """Read-time trust overlay for a distributed-session snapshot persisted
+    BEFORE ``run_trust_contract_v1`` existed.
+
+    Additive only — never mutates the DB row, never reruns collectors,
+    providers or LLMs. Calls the SAME pure projection future publications
+    persist (``run_trust_contract_v1.build_run_trust_contract``) over the
+    session's still-durable rows, so an existing session displays truthful
+    trust information after deployment. A session with no
+    ``run_session_id`` (legacy/non-distributed snapshot) or one whose durable
+    rows are gone is left completely unchanged — this function fails open.
+    """
+    if response_payload.get("run_trust_contract"):
+        return
+    session_id = response_payload.get("run_session_id")
+    if not session_id:
+        return
+
+    try:
+        from .distributed import run_task_store_v1 as dstore
+        from .distributed import run_trust_contract_v1 as trust
+        from .intel_run_session_store_v1 import get_session
+
+        session = get_session(client, str(session_id))
+        if session is None:
+            return
+        ticker_rows = dstore.list_ticker_rows(client, run_session_id=str(session_id))
+        if not ticker_rows:
+            return
+        tasks = dstore.list_tasks(client, run_session_id=str(session_id))
+        specialist_outputs = dstore.list_specialist_outputs(
+            client, run_session_id=str(session_id)
+        )
+        trust_contract = trust.build_run_trust_contract(
+            session=session,
+            ticker_rows=ticker_rows,
+            tasks=tasks,
+            specialist_outputs=specialist_outputs,
+        )
+    except Exception as exc:
+        logger.warning(
+            "intel_v3.run_trust_contract_enrichment_failed user_id=%s "
+            "run_session_id=%s err=%s",
+            user_id, session_id, exc,
+        )
+        return
+
+    response_payload["run_trust_contract"] = trust_contract
+    response_payload["source_health"] = trust_contract.get("source_health")
+    pcc = response_payload.get("portfolio_command_center")
+    if isinstance(pcc, dict):
+        pcc["source_health"] = trust_contract.get("source_health")
+
+    ticker_trust_by_ticker = {
+        str(entry.get("ticker") or ""): entry
+        for entry in trust_contract.get("ticker_trust") or []
+    }
+
+    def _apply(card: dict) -> dict:
+        entry = ticker_trust_by_ticker.get(str(card.get("ticker") or ""))
+        if entry is None:
+            return card
+        ddp = dict(card.get("detail_drawer_payload") or {})
+        has_lineage = bool(entry.get("has_source_lineage"))
+        review_status = str(entry.get("conflict_review_status") or "not_required")
+        ddp["committee"] = _committee_status_from_trust(
+            evidence_band=str(card.get("evidence_band") or ddp.get("evidence_band") or "THIN"),
+            has_source_lineage=has_lineage,
+            review_failed=review_status == "failed",
+        )
+        ddp["source_lineage"] = {"has_source_refs": has_lineage}
+        ddp["conflict_review_status"] = review_status
+        ddp["decision_constraints"] = list(entry.get("decision_constraints") or [])
+        axis_readiness = entry.get("axis_readiness") or {}
+        evidence_explanation = ddp.get("evidence_explanation")
+        if isinstance(evidence_explanation, dict):
+            new_explanation = dict(evidence_explanation)
+            if axis_readiness.get("technical"):
+                new_explanation["technical_signals_status"] = axis_readiness["technical"]
+            if axis_readiness.get("sentiment"):
+                new_explanation["sentiment_status"] = axis_readiness["sentiment"]
+            ddp["evidence_explanation"] = new_explanation
+        new_card = dict(card)
+        new_card["detail_drawer_payload"] = ddp
+        return new_card
+
+    holdings = response_payload.get("current_holdings") or []
+    new_holdings = [_apply(card) for card in holdings]
+    response_payload["current_holdings"] = new_holdings
+    by_ticker = {c.get("ticker", ""): c for c in new_holdings}
+
+    def _replace(card_list: list) -> list:
+        return [by_ticker.get(c.get("ticker", ""), c) for c in (card_list or [])]
+
+    response_payload["best_buys"] = _replace(response_payload.get("best_buys", []))
+    response_payload["trim_sell_desk"] = _replace(response_payload.get("trim_sell_desk", []))
+
+    validated = sum(
+        1 for c in new_holdings
+        if (c.get("detail_drawer_payload") or {}).get("committee", {}).get("status")
+        == "source_validated"
+    )
+    pending = sum(
+        1 for c in new_holdings
+        if (c.get("detail_drawer_payload") or {}).get("committee", {}).get("status")
+        == "pending"
+    )
+    response_payload["source_pack_validated_count"] = validated
+    response_payload["source_pack_pending_count"] = pending
+
+    logger.info(
+        "intel_v3_run_trust_contract_enrichment_summary user_id=%s "
+        "run_session_id=%s overall_status=%s source_health=%s "
+        "source_pack_validated_count=%d source_pack_pending_count=%d",
+        user_id, session_id, trust_contract.get("overall_status"),
+        trust_contract.get("source_health"), validated, pending,
     )
 
 

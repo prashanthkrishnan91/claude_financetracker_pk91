@@ -30,7 +30,12 @@ import { IntelV3Card } from "@/components/cards/IntelV3Card";
 import { IntelV3Drawer } from "@/components/cards/IntelV3Drawer";
 import { DataHealthDrawer } from "@/components/cards/DataHealthDrawer";
 import { Spinner } from "@/components/ui/Spinner";
-import type { IntelV3HeldCard, IntelV3Action, IntelV3Snapshot } from "@/lib/api";
+import type {
+  IntelV3HeldCard,
+  IntelV3Action,
+  IntelV3Snapshot,
+  IntelV3RunTrustAxisCoverage,
+} from "@/lib/api";
 
 // LOCKED: Intel v3 visible filter contract — ALL / BUY / HOLD / TRIM / SELL only.
 // Never expand or rename. Radar/posture labels must not appear here.
@@ -172,16 +177,56 @@ function WhatChangedStrip({ items }: { items: string[] }) {
 
 // ── Evidence Summary Band ─────────────────────────────────────────────────────
 
-function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
+/** Honest "X/Y contributing" label from the trust contract's authoritative
+ * axis coverage — replaces the old boolean-only "contributing" / "not yet
+ * usable" chip text with real counts when the contract is present. */
+function axisCoverageLabel(
+  counts: IntelV3RunTrustAxisCoverage | undefined,
+  laneLabel: string,
+): { label: string; usable: boolean } {
+  if (!counts || counts.expected_count === 0) {
+    return { label: `${laneLabel} not applicable`, usable: false };
+  }
+  if (counts.succeeded_count === 0) {
+    return { label: `${laneLabel} not yet usable`, usable: false };
+  }
+  if (counts.succeeded_count === counts.expected_count) {
+    return { label: `${laneLabel} contributing (${counts.succeeded_count}/${counts.expected_count})`, usable: true };
+  }
+  return {
+    label: `${laneLabel} contributing for ${counts.succeeded_count}/${counts.expected_count}`,
+    usable: true,
+  };
+}
+
+function EvidenceSummaryBand({
+  cards,
+  axisCoverage,
+}: {
+  cards: IntelV3HeldCard[];
+  /** run_trust_contract_v1.axis_coverage — authoritative counts derived
+   * from durable specialist outputs/tasks, not card-level heuristics.
+   * Absent on legacy/non-distributed snapshots (falls back to per-card
+   * evidence_explanation counts). */
+  axisCoverage?: Record<string, IntelV3RunTrustAxisCoverage>;
+}) {
   const hasAnyExplanation = cards.some(
     (c) => c.detail_drawer_payload?.evidence_explanation != null
   );
 
-  if (!hasAnyExplanation) return null;
+  if (!hasAnyExplanation && !axisCoverage) return null;
 
   const summary = buildPortfolioEvidenceSummary(cards);
-  const technicalUsable = summary.technicalUsableCount > 0;
-  const sentimentUsable = summary.sentimentUsableCount > 0;
+  const technical = axisCoverage
+    ? axisCoverageLabel(axisCoverage["technical"], "Price signals")
+    : { label: summary.technicalUsableCount > 0 ? "Price signals contributing" : "Price signals not yet usable",
+        usable: summary.technicalUsableCount > 0 };
+  const sentiment = axisCoverage
+    ? axisCoverageLabel(axisCoverage["sentiment"], "News & sentiment")
+    : { label: summary.sentimentUsableCount > 0 ? "News & sentiment contributing" : "News & sentiment not yet usable",
+        usable: summary.sentimentUsableCount > 0 };
+  const technicalUsable = technical.usable;
+  const sentimentUsable = sentiment.usable;
 
   const { fundamentalsUsableCount, cardsWithExplanation } = summary;
   const companyDataLabel =
@@ -246,7 +291,7 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
               ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
               : "border-border bg-surface-elevated text-text-muted"
           )}>
-            {technicalUsable ? "Price signals contributing" : "Price signals not yet usable"}
+            {technical.label}
           </span>
           <span className={cn(
             "text-[11px] px-2 py-0.5 rounded border font-medium",
@@ -254,7 +299,7 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
               ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
               : "border-border bg-surface-elevated text-text-muted"
           )}>
-            {sentimentUsable ? "News & sentiment contributing" : "News & sentiment not yet usable"}
+            {sentiment.label}
           </span>
         </div>
         {(!technicalUsable || !sentimentUsable) && (
@@ -390,7 +435,7 @@ export function IntelV3HoldingsPanel({
       <PortfolioOverview snapshot={snapshot} onDataHealth={() => setDataHealthOpen(true)} />
 
       {/* Evidence quality summary (when governance data is present) */}
-      <EvidenceSummaryBand cards={allCards} />
+      <EvidenceSummaryBand cards={allCards} axisCoverage={snapshot.run_trust_contract?.axis_coverage} />
 
       {/* Action filter rail — LOCKED: ALL/BUY/HOLD/TRIM/SELL only */}
       <FilterRail filter={filter} setFilter={setFilter} counts={counts} />

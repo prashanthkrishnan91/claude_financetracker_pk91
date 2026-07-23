@@ -10,6 +10,7 @@
 
 import type {
   IntelV3HeldCard,
+  IntelV3RunTrustContract,
   IntelV3SessionStatus,
   IntelV3Snapshot,
 } from "@/lib/api";
@@ -28,6 +29,7 @@ import {
   deriveAdvisorReadiness,
   deriveRunModel,
   deriveRunProgress,
+  deriveRunTrustSummary,
   deriveTruthRows,
   evidenceFreshnessLabel,
   formatSnapshotAge,
@@ -921,6 +923,152 @@ describe("helpers", () => {
     expect(evidenceFreshnessLabel("no_snapshot_exists")).toBe("No evidence snapshot yet");
     expect(evidenceFreshnessLabel("weird_new_state")).toBe("Evidence freshness unknown");
     expect(evidenceFreshnessLabel(null)).toBeNull();
+  });
+});
+
+// ── deriveRunTrustSummary (run_trust_contract_v1) ─────────────────────────────
+//
+// Production-shaped mock: 31 holdings decided, 5 of 7 required conflict
+// reviews failed, zero source references anywhere — mirrors the mission's
+// production evidence. Proves the panel model surfaces an independent
+// analysis-trust status that is "blocked" even though session coverage is
+// complete (31/31 decided) — "decisions persisted" is never "trusted".
+function makeRunTrustContract(
+  overrides: Partial<IntelV3RunTrustContract> = {},
+): IntelV3RunTrustContract {
+  const base: IntelV3RunTrustContract = {
+    schema_version: "run_trust_contract_v1",
+    run_session_id: "a51e977b-561a-4e98-baa8-59ad56a877ff",
+    generated_at: "2026-07-23T00:00:00Z",
+    overall_status: "blocked",
+    session_coverage: {
+      frozen_holding_count: 31,
+      decided_count: 31,
+      no_call_count: 0,
+      failed_count: 0,
+      unaccounted_count: 0,
+      publication_complete: true,
+    },
+    axis_coverage: {
+      technical: { expected_count: 31, succeeded_count: 31, missing_count: 0, failed_count: 0, not_applicable_count: 0 },
+      sentiment: { expected_count: 31, succeeded_count: 31, missing_count: 0, failed_count: 0, not_applicable_count: 0 },
+      fundamental: { expected_count: 19, succeeded_count: 19, missing_count: 0, failed_count: 0, not_applicable_count: 12 },
+      etf_exposure: { expected_count: 12, succeeded_count: 12, missing_count: 0, failed_count: 0, not_applicable_count: 19 },
+      crypto_market: { expected_count: 0, succeeded_count: 0, missing_count: 0, failed_count: 0, not_applicable_count: 31 },
+      risk_filing: { expected_count: 19, succeeded_count: 0, missing_count: 19, failed_count: 0, not_applicable_count: 12 },
+    },
+    conflict_review_coverage: {
+      required_count: 7,
+      succeeded_count: 2,
+      failed_count: 5,
+      pending_count: 0,
+      required_tickers: ["BLSH", "CRM", "GLD", "GOOGL", "KLAR", "NFLX", "NVDA"],
+      succeeded_tickers: ["KLAR", "NVDA"],
+      failed_tickers: ["BLSH", "CRM", "GLD", "GOOGL", "NFLX"],
+      pending_tickers: [],
+    },
+    source_lineage: {
+      outputs_with_source_refs: 0,
+      outputs_missing_source_refs: 93,
+      tickers_with_lineage: [],
+      tickers_missing_lineage: [],
+    },
+    source_health: { status: "blocked" },
+    ticker_trust: [],
+    blocking_reasons: ["5 required conflict review(s) failed."],
+    warnings: ["No specialist outputs in this session carry source references."],
+  };
+  return { ...base, ...overrides };
+}
+
+describe("deriveRunTrustSummary", () => {
+  it("returns null when the snapshot carries no run_trust_contract (legacy snapshot)", () => {
+    expect(deriveRunTrustSummary(makeSnapshot())).toBeNull();
+    expect(deriveRunTrustSummary(null)).toBeNull();
+  });
+
+  it("31/31 decided + 5 failed reviews → overall blocked, not conflated with session coverage", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.overallStatus).toBe("blocked");
+    expect(summary.sessionCoverageLine).toContain("31 of 31 holdings decided");
+    expect(summary.sessionCoverageLine).toContain("0 no-call, 0 failed");
+  });
+
+  it("axis coverage line reports technical/sentiment as fully usable, never MISSING", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.axisCoverageLine).toContain("Technical 31/31");
+    expect(summary.axisCoverageLine).toContain("Sentiment 31/31");
+    expect(summary.axisCoverageLine).toContain("Fundamentals 19/19");
+    expect(summary.axisCoverageLine).toContain("ETF exposure 12/12");
+    // crypto_market has zero expected holdings — not applicable, omitted
+    // rather than shown as a failure.
+    expect(summary.axisCoverageLine).not.toContain("Crypto");
+  });
+
+  it("conflict review line states required/succeeded/failed honestly", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.conflictReviewLine).toContain("2 of 7 required conflict reviews succeeded");
+    expect(summary.conflictReviewLine).toContain("5 failed");
+  });
+
+  it("source lineage line reports zero references explicitly, never a bare dash", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.sourceLineageLine).toContain("Source lineage missing");
+    expect(summary.sourceLineageLine).toContain("0 of 93");
+    expect(summary.sourceLineageLine).not.toBe("—");
+  });
+
+  it("healthy contract (full lineage, all reviews passed) reports healthy", () => {
+    const snap = makeSnapshot({
+      run_trust_contract: makeRunTrustContract({
+        overall_status: "healthy",
+        conflict_review_coverage: {
+          required_count: 1, succeeded_count: 1, failed_count: 0, pending_count: 0,
+          required_tickers: ["NVDA"], succeeded_tickers: ["NVDA"], failed_tickers: [], pending_tickers: [],
+        },
+        source_lineage: {
+          outputs_with_source_refs: 93, outputs_missing_source_refs: 0,
+          tickers_with_lineage: ["AAPL"], tickers_missing_lineage: [],
+        },
+        source_health: { status: "healthy" },
+      }),
+    });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.overallStatus).toBe("healthy");
+    expect(summary.sourceLineageLine).toContain("Source lineage established");
+    expect(summary.conflictReviewLine).not.toContain("failed");
+  });
+});
+
+// snapshot_source_health row must never read a bare "—" for the new
+// not_assessed/not_applicable vocabulary — always an explicit sentence.
+describe("deriveTruthRows — snapshot source health explicit vocabulary", () => {
+  it('"not_assessed" status → explicit "not assessed" detail, not a raw echo', () => {
+    const snap = makeSnapshot({ source_health: { status: "not_assessed" } });
+    const rows = deriveTruthRows(snap, "certified");
+    const row = rows.find((r) => r.key === "snapshot_source_health")!;
+    expect(row.status).toBe("unavailable");
+    expect(row.detail).toContain("not assessed");
+  });
+
+  it('"limited" status maps to pending (not ok, not blocked)', () => {
+    const snap = makeSnapshot({ source_health: { status: "limited" } });
+    const rows = deriveTruthRows(snap, "certified");
+    const row = rows.find((r) => r.key === "snapshot_source_health")!;
+    expect(row.status).toBe("pending");
+  });
+
+  it('"unknown" status → explicit detail, not the generic "not a recognized status" fallback', () => {
+    const snap = makeSnapshot({ source_health: { status: "unknown" } });
+    const rows = deriveTruthRows(snap, "certified");
+    const row = rows.find((r) => r.key === "snapshot_source_health")!;
+    expect(row.status).toBe("unavailable");
+    expect(row.detail).not.toContain("not a recognized status");
+    expect(row.detail).toContain("unknown");
   });
 });
 

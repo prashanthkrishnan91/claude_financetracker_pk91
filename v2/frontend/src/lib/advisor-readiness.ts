@@ -24,6 +24,7 @@
 
 import type {
   IntelV3Action,
+  IntelV3RunTrustContract,
   IntelV3SessionStatus,
   IntelV3Snapshot,
 } from "@/lib/api";
@@ -319,6 +320,11 @@ export interface AdvisorReadinessModel {
   actionCounts: Record<IntelV3Action, number>;
   truthRows: AdvisorTruthRow[];
   run: AdvisorRunModel;
+  /** Independent Run Intel analysis-trust summary (run_trust_contract_v1).
+   * Null for legacy/non-distributed snapshots. Never conflated with `ready`
+   * — a session can be fully decided (session coverage complete) and still
+   * report analysis trust "blocked" (failed reviews, no source lineage). */
+  runTrust: AdvisorAnalysisTrustSummary | null;
 }
 
 export interface AdvisorSnapshotQueryInput {
@@ -434,7 +440,7 @@ function deriveSnapshotSourceHealthRow(snapshot: IntelV3Snapshot | null): Adviso
       detail: "Source health reported healthy by the latest snapshot.",
     };
   }
-  if (raw === "degraded" || raw === "stale" || raw === "partial") {
+  if (raw === "degraded" || raw === "stale" || raw === "partial" || raw === "limited") {
     return {
       key: "snapshot_source_health",
       label: "Snapshot source health",
@@ -450,13 +456,125 @@ function deriveSnapshotSourceHealthRow(snapshot: IntelV3Snapshot | null): Adviso
       detail: `Source health reported "${raw}" by the latest snapshot.`,
     };
   }
+  if (raw === "not_assessed") {
+    return {
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
+      status: "unavailable",
+      detail: "Source health not assessed — lineage has not been evaluated for this snapshot.",
+    };
+  }
+  if (raw === "not_applicable") {
+    return {
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
+      status: "unavailable",
+      detail: "Source health not applicable — no holdings to evaluate.",
+    };
+  }
+  if (raw === "unknown") {
+    return {
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
+      status: "unavailable",
+      detail: "Source health unknown — no specialist outputs were recorded this run.",
+    };
+  }
   return {
     key: "snapshot_source_health",
     label: "Snapshot source health",
     status: "unavailable",
     detail: raw
       ? `Source health reported "${raw}" — not a recognized status.`
-      : "Unknown — the snapshot did not report source health.",
+      : "Source health not assessed — the snapshot did not report it.",
+  };
+}
+
+// ── Run Intel trust-contract summary (run_trust_contract_v1) ─────────────────
+
+export type AnalysisTrustStatus = "healthy" | "limited" | "blocked" | "not_applicable" | "unknown";
+
+/** Plain-English summary of the six-dimension run trust contract, for the
+ * Advisor readiness panel. Independent of `ready`/`statusPillLabel` — a
+ * session can have full session coverage (every holding decided) and still
+ * be analysis-trust "blocked" (failed required reviews, no source lineage).
+ * Returned only when the snapshot carries a run_trust_contract (distributed
+ * session, published or read-time enriched); null otherwise (legacy
+ * snapshot — analysis trust is simply not applicable to it). */
+export interface AdvisorAnalysisTrustSummary {
+  overallStatus: AnalysisTrustStatus;
+  /** e.g. "31 of 31 holdings decided — 0 no-call, 0 failed." */
+  sessionCoverageLine: string;
+  /** e.g. "Technical 31/31 · Sentiment 31/31 · Fundamentals 19/19 · ETF exposure 12/12" */
+  axisCoverageLine: string;
+  /** e.g. "2 of 7 required conflict reviews succeeded — 5 failed." */
+  conflictReviewLine: string;
+  /** e.g. "Source lineage missing — 0 of 93 specialist outputs carry a source reference." */
+  sourceLineageLine: string;
+  blockingReasons: string[];
+  warnings: string[];
+}
+
+const AXIS_DISPLAY_LABELS: Record<string, string> = {
+  technical: "Technical",
+  sentiment: "Sentiment",
+  fundamental: "Fundamentals",
+  etf_exposure: "ETF exposure",
+  crypto_market: "Crypto",
+  risk_filing: "Risk filing",
+};
+
+function formatAxisCoverageLine(
+  axisCoverage: IntelV3RunTrustContract["axis_coverage"],
+): string {
+  const parts: string[] = [];
+  for (const axis of ["technical", "sentiment", "fundamental", "etf_exposure", "crypto_market"]) {
+    const counts = axisCoverage[axis];
+    if (!counts || counts.expected_count === 0) continue; // not applicable to this portfolio
+    parts.push(`${AXIS_DISPLAY_LABELS[axis] ?? axis} ${counts.succeeded_count}/${counts.expected_count}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "No specialist axes applied to any holding this run.";
+}
+
+export function deriveRunTrustSummary(
+  snapshot: IntelV3Snapshot | null,
+): AdvisorAnalysisTrustSummary | null {
+  const contract = snapshot?.run_trust_contract;
+  if (!contract) return null;
+
+  const cov = contract.session_coverage;
+  const sessionCoverageLine =
+    `${cov.decided_count} of ${cov.frozen_holding_count} holdings decided — ` +
+    `${cov.no_call_count} no-call, ${cov.failed_count} failed` +
+    (cov.publication_complete ? "." : " (publication incomplete).");
+
+  const rc = contract.conflict_review_coverage;
+  const conflictReviewLine =
+    rc.required_count === 0
+      ? "No conflict reviews were required this run."
+      : `${rc.succeeded_count} of ${rc.required_count} required conflict reviews succeeded` +
+        (rc.failed_count > 0 ? ` — ${rc.failed_count} failed.` : ".") +
+        (rc.pending_count > 0 ? ` ${rc.pending_count} still pending.` : "");
+
+  const sl = contract.source_lineage;
+  const totalOutputs = sl.outputs_with_source_refs + sl.outputs_missing_source_refs;
+  const sourceLineageLine =
+    totalOutputs === 0
+      ? "Source lineage not assessed — no specialist outputs recorded this run."
+      : sl.outputs_with_source_refs === 0
+        ? `Source lineage missing — 0 of ${totalOutputs} specialist outputs carry a source reference.`
+        : sl.outputs_missing_source_refs === 0
+          ? `Source lineage established — ${sl.outputs_with_source_refs} of ${totalOutputs} specialist outputs carry a source reference.`
+          : `Source lineage partial — ${sl.outputs_with_source_refs} of ${totalOutputs} specialist outputs carry a source reference.`;
+
+  return {
+    overallStatus: contract.overall_status,
+    sessionCoverageLine,
+    axisCoverageLine: formatAxisCoverageLine(contract.axis_coverage),
+    conflictReviewLine,
+    sourceLineageLine,
+    blockingReasons: contract.blocking_reasons,
+    warnings: contract.warnings,
   };
 }
 
@@ -720,5 +838,6 @@ export function deriveAdvisorReadiness(
     actionCounts: deriveActionCounts(snapshot),
     truthRows: deriveTruthRows(snapshot, snapshotState, truth),
     run,
+    runTrust: deriveRunTrustSummary(snapshot),
   };
 }

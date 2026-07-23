@@ -28,6 +28,27 @@ export function committeeStatusToPlainLabel(status: string): string {
   }
 }
 
+// ── Run Intel trust contract (run_trust_contract_v1) display helpers ─────────
+
+/** Explicit "not assessed"/"missing" text — never a bare "—" for source health. */
+export function sourceLineageToLabel(sourceLineage: { has_source_refs: boolean } | null | undefined): string {
+  if (!sourceLineage) return "Source lineage not assessed for this holding.";
+  return sourceLineage.has_source_refs
+    ? "Source references are recorded for this holding."
+    : "No source references are recorded for this holding yet.";
+}
+
+/** Per-card conflict-review status → plain-English label. */
+export function conflictReviewStatusToLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "succeeded": return "Conflict review passed for this holding.";
+    case "failed":    return "A required conflict review failed — shown without successful reconciliation.";
+    case "pending":   return "A required conflict review is still pending.";
+    case "not_required":
+    default:          return "No conflict review was required for this holding.";
+  }
+}
+
 // ── Source metadata formatting ────────────────────────────────────────────────
 
 /** Format a snapshot or run ID to an 8-char short form, or "—" when absent. */

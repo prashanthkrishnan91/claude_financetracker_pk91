@@ -1,6 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-22 (Haiku specialist output completion fix, PR #484 — production
+Last updated: 2026-07-23 (Run Intel trust contract PR 1/7 — production session
+`a51e977b-561a-4e98-baa8-59ad56a877ff` audit found 31/31 decided but 0 evidence
+bundles/specialist outputs with source references, 5/7 required conflict reviews
+failed silently, `research_axis_readiness={}` mislabeled successful technical/
+sentiment outputs as unusable, and every nonempty decision blocker rendered as
+"Evidence blocked" regardless of category. See the locked seven-PR sequence
+below — this entry is PR 1.)
+
+Previously (2026-07-22, Haiku specialist output completion fix, PR #484 — production
 failure: session 7c4069a1-cc07-4c1e-a7d4-3bea67dd206d froze 31 holdings but completed 14
 decided / 17 NO CALL / 22 terminal task failures because Haiku returned verbose/Markdown-
 fenced/truncated JSON at 5-ticker batches with an unbounded ~350 tokens/ticker budget, and
@@ -42,6 +50,68 @@ The authenticated app has exactly **three primary views**:
 Operational subpages (not primary nav): `/dashboard/import`, `/settings`,
 `/dashboard/position/[ticker]`, login. `/dashboard` redirects to Positions; all legacy product
 routes redirect (map in `v2/frontend/src/lib/route-redirects.ts`).
+
+## Run Intel trust-recovery sequence (LOCKED — active scope)
+
+Seven-PR sequence restoring truthful Run Intel trust after the 2026-07-23
+production audit of session `a51e977b-561a-4e98-baa8-59ad56a877ff` (31 frozen
+holdings, 31 persisted decisions, session `completed` — but 0 evidence
+bundles/specialist outputs carried a source reference, 5 of 7 required
+conflict reviews failed with no visible trace, distributed publication wrote
+`research_axis_readiness={}` so 31/31 successful technical and 31/31
+successful sentiment outputs displayed as unusable, and the UI collapsed
+every nonempty decision blocker into "Evidence blocked" regardless of
+category — including a merely-suppressed price context and a portfolio-
+overweight constraint). This sequence is the active scope for Run Intel work
+until production certification passes; do not start unrelated Run Intel
+slices ahead of it.
+
+1. **Publish and display a truthful Run Intel trust contract — COMPLETED
+   (this PR).** New pure projection `run_trust_contract_v1`
+   (`v2/backend/app/services/intelligence/v3/distributed/run_trust_contract_v1.py`):
+   session coverage, per-axis specialist coverage (technical/sentiment/
+   fundamental/etf_exposure/crypto_market/risk_filing, with explicit
+   succeeded/missing/failed/not_applicable), conflict-review coverage
+   (required/succeeded/failed/pending, per-ticker), source lineage (outputs
+   with vs. missing source refs — never "source validated" from
+   evidence_band alone), and a deterministic decision-constraint classifier
+   (evidence_quality / source_lineage / price_context / portfolio_policy /
+   risk / conflict_review / other — non-exclusive, so e.g. a speculative
+   holding with a failed review shows BOTH `portfolio_policy` AND
+   `conflict_review`, never merged). Wired into BOTH session-native
+   publication (`session_publication_v1.py`, persisted on
+   `payload.run_trust_contract`) AND a read-time, non-mutating enrichment of
+   pre-existing snapshots (`intel_v3_service._enrich_snapshot_with_run_trust_contract`,
+   keyed off `run_session_id`, zero provider/LLM calls) — the existing
+   production session displays truthful trust information without a rerun.
+   `research_axis_readiness={}` placeholder replaced with real per-axis
+   readiness; `snapshot_builder._build_source_pack_status` now requires real
+   source lineage AND a non-failed conflict review before "source_validated"
+   when lineage info is available (distributed sessions), preserving legacy
+   evidence-band-only behavior when it isn't (non-distributed callers).
+   Frontend: `AdvisorReadinessPanel` shows an independent "Analysis trust"
+   status (healthy/limited/blocked/not_applicable/unknown) plus session/axis/
+   conflict-review/source-lineage summary lines, separate from the renamed
+   "Holdings decided" coverage metric; `IntelV3Drawer` gained a "What's
+   limiting this holding" section listing each decision-constraint category
+   separately; `IntelV3HoldingsPanel`'s evidence band now shows authoritative
+   `axis_coverage` counts instead of the old boolean-only technical/sentiment
+   chips; `buildSafetyDisplay` no longer treats every nonempty blocker as
+   "Evidence blocked" — only an actual `evidence_quality` constraint is. Financial
+   truth rows (`portfolio_financial_truth`/`current_price_truth`/
+   `books_reconciliation`) are untouched — still sourced only from the
+   existing `/api/advisor/readiness` truth endpoint. No SQL.
+2. Source quality / source-reference generation — NOT STARTED. Owns making
+   `evidence_bundle.source_refs` / specialist `evidence_refs` actually
+   nonempty; PR 1's lineage fields will then reflect real coverage instead of
+   the current honest "0 of N" state.
+3. Conflict-review reliability — NOT STARTED. Owns why 5 of 7 reviews failed
+   (prompts, model routing, retry behavior) — PR 1 explicitly does not touch
+   review prompts/routing/retries, only surfaces the failures truthfully.
+4. Currency normalization — NOT STARTED.
+5. Financial-truth refresh — NOT STARTED.
+6. Repeat-run reliability — NOT STARTED.
+7. Performance — NOT STARTED.
 
 ## The decision spine (one spine, no competitors)
 
@@ -230,6 +300,15 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   34-holding golden run's exact LLM-call accounting moved from 22 to 49 calls to reflect
   the new default 2-ticker Haiku batch cap, same complete coverage); no frontend files
   changed; no SQL.
+- Run Intel trust contract PR 1/7 (2026-07-23): full backend suite green (8521 passed,
+  0 failed — Tier 3, broad cross-cutting change: `run_trust_contract_v1` is a new
+  shared projection consumed by both session-native publication and the shared
+  `snapshot_builder.py`/`intel_v3_service.py` read path used by every Intel v3
+  snapshot read, plus 33 new focused tests in `test_run_trust_contract_v1.py` and
+  `test_run_trust_contract_integration.py`); full frontend jest green (639 passed,
+  25 new), `tsc --noEmit` clean, `next build` green (same placeholder
+  `NEXT_PUBLIC_*` env vars as prior PRs needed to prerender locally — sandbox-only).
+  No SQL.
 
 ## SQL / env state
 

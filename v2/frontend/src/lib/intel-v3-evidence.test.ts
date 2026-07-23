@@ -13,6 +13,8 @@
 import {
   evidenceBandToBeginnerLabel,
   committeeStatusToPlainLabel,
+  conflictReviewStatusToLabel,
+  sourceLineageToLabel,
   formatSnapshotIdShort,
   formatUpdatedAtSafe,
   evidenceFreshnessToLabel,
@@ -87,6 +89,47 @@ describe("committeeStatusToPlainLabel", () => {
         expect(label.toLowerCase()).not.toContain(forbidden.toLowerCase());
       }
     }
+  });
+});
+
+// ── conflictReviewStatusToLabel / sourceLineageToLabel (run_trust_contract_v1) ─
+
+describe("conflictReviewStatusToLabel", () => {
+  it("succeeded → passed", () => {
+    expect(conflictReviewStatusToLabel("succeeded")).toContain("passed");
+  });
+
+  it("failed → explicit failure, without successful reconciliation", () => {
+    const label = conflictReviewStatusToLabel("failed");
+    expect(label).toContain("failed");
+    expect(label).toContain("without successful reconciliation");
+  });
+
+  it("pending → still pending", () => {
+    expect(conflictReviewStatusToLabel("pending")).toContain("pending");
+  });
+
+  it("not_required/undefined → no review required, never a bare dash", () => {
+    expect(conflictReviewStatusToLabel("not_required")).not.toBe("—");
+    expect(conflictReviewStatusToLabel(undefined)).not.toBe("—");
+    expect(conflictReviewStatusToLabel(null)).toContain("No conflict review");
+  });
+});
+
+describe("sourceLineageToLabel", () => {
+  it("has_source_refs=true → references recorded", () => {
+    expect(sourceLineageToLabel({ has_source_refs: true })).toContain("are recorded");
+  });
+
+  it("has_source_refs=false → explicit missing, never a bare dash", () => {
+    const label = sourceLineageToLabel({ has_source_refs: false });
+    expect(label).toContain("No source references");
+    expect(label).not.toBe("—");
+  });
+
+  it("null/undefined → explicit not-assessed text", () => {
+    expect(sourceLineageToLabel(null)).toContain("not assessed");
+    expect(sourceLineageToLabel(undefined)).toContain("not assessed");
   });
 });
 

@@ -42,6 +42,22 @@ const ACTION_CHIP_CLASS: Record<string, string> = {
   SELL: "action-badge-sell",
 };
 
+const ANALYSIS_TRUST_TONE: Record<string, string> = {
+  healthy: "bg-action-buy/10 text-action-buy border-action-buy/30",
+  limited: "bg-action-trim/10 text-action-trim border-action-trim/30",
+  blocked: "bg-action-sell/10 text-action-sell border-action-sell/30",
+  not_applicable: "bg-surface-elevated text-text-muted border-border",
+  unknown: "bg-surface-elevated text-text-muted border-border",
+};
+
+const ANALYSIS_TRUST_LABEL: Record<string, string> = {
+  healthy: "Analysis trust: Healthy",
+  limited: "Analysis trust: Limited",
+  blocked: "Analysis trust: Blocked",
+  not_applicable: "Analysis trust: N/A",
+  unknown: "Analysis trust: Unknown",
+};
+
 export function AdvisorReadinessPanel({
   model,
   onRun,
@@ -113,7 +129,10 @@ export function AdvisorReadinessPanel({
         ))}
       </div>
 
-      {/* Snapshot metadata */}
+      {/* Snapshot metadata. "Holdings decided" — never "certified" alone —
+          refers explicitly to session decision coverage, not analysis
+          trust. See the Analysis trust section below for the independent
+          trust status. */}
       <dl className="grid grid-cols-3 gap-3">
         <div>
           <dt className="metric-label">Snapshot age</dt>
@@ -126,7 +145,9 @@ export function AdvisorReadinessPanel({
           </dd>
         </div>
         <div>
-          <dt className="metric-label">Certified</dt>
+          <dt className="metric-label" title="Holdings with a persisted decision this run — not an analysis-trust guarantee.">
+            Holdings decided
+          </dt>
           <dd className="data-value-sm mt-0.5">
             {model.certifiedCount !== null && model.totalCount !== null
               ? `${model.certifiedCount}/${model.totalCount}`
@@ -134,6 +155,35 @@ export function AdvisorReadinessPanel({
           </dd>
         </div>
       </dl>
+
+      {/* Analysis trust — independent of session decision coverage above.
+          run_trust_contract_v1: a session can have every holding decided
+          and still be "blocked" (failed required conflict reviews, no
+          source lineage established yet). */}
+      {model.runTrust && (
+        <div className="border-t border-border/50 pt-3 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+                ANALYSIS_TRUST_TONE[model.runTrust.overallStatus] ?? ANALYSIS_TRUST_TONE.unknown,
+              )}
+            >
+              {ANALYSIS_TRUST_LABEL[model.runTrust.overallStatus] ?? "Analysis trust: Unknown"}
+            </span>
+          </div>
+          <p className="text-[10px] text-text-muted leading-snug">
+            Measures evidence sourcing and conflict-review completeness for this run —
+            separate from whether every holding received a decision (above).
+          </p>
+          <dl className="space-y-1 text-[11px] text-text-secondary">
+            <div>{model.runTrust.sessionCoverageLine}</div>
+            <div>{model.runTrust.axisCoverageLine}</div>
+            <div>{model.runTrust.conflictReviewLine}</div>
+            <div>{model.runTrust.sourceLineageLine}</div>
+          </dl>
+        </div>
+      )}
 
       {/* Action counts derived from current_holdings */}
       <div className="flex items-center gap-2 flex-wrap" aria-label="Holding action counts">

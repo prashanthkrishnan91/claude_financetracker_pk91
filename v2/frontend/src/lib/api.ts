@@ -481,6 +481,18 @@ export interface IntelV3HeldCard {
     committee: { status: "deferred" | "ready" | "source_validated" | "pending"; reason?: string };
     /** Stage 7C — evidence explanation. Always present: real from Stage 6 governance, or synthetic from decision band. */
     evidence_explanation?: IntelV3EvidenceExplanation | null;
+    /**
+     * Run Intel trust contract (run_trust_contract_v1) signals — present only
+     * on cards built by a distributed session publication/enrichment; null
+     * on legacy/non-distributed cards. Kept separate from `blockers`/`flags`
+     * so a suppressed price context or a portfolio-policy constraint is never
+     * relabeled "Evidence blocked".
+     */
+    source_lineage?: { has_source_refs: boolean } | null;
+    /** "not_required" | "succeeded" | "failed" | "pending" */
+    conflict_review_status?: string | null;
+    /** Deterministic categories: evidence_quality | source_lineage | price_context | portfolio_policy | risk | conflict_review | other */
+    decision_constraints?: string[] | null;
     /** Stage 9I — asset intelligence context from composer. Explanatory only; never overrides visible action. */
     asset_intelligence_context?: {
       role_lens: string;
@@ -518,6 +530,70 @@ export interface IntelV3SessionCoverage {
   no_call_tickers: string[];
   failed_tickers: string[];
   gaps: IntelV3SessionCoverageGap[];
+}
+
+/** run_trust_contract_v1 — the pure, truthful Run Intel trust projection.
+ * Present on distributed session snapshots (published or read-time
+ * enriched). Absent on legacy/non-distributed snapshots. "Decisions
+ * persisted" is never treated as synonymous with "analysis trusted" —
+ * overall_status can be "blocked" even when session_coverage is complete. */
+export interface IntelV3RunTrustAxisCoverage {
+  expected_count: number;
+  succeeded_count: number;
+  missing_count: number;
+  failed_count: number;
+  not_applicable_count: number;
+}
+
+export interface IntelV3RunTrustConflictReviewCoverage {
+  required_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  pending_count: number;
+  required_tickers: string[];
+  succeeded_tickers: string[];
+  failed_tickers: string[];
+  pending_tickers: string[];
+}
+
+export interface IntelV3RunTrustSourceLineage {
+  outputs_with_source_refs: number;
+  outputs_missing_source_refs: number;
+  tickers_with_lineage: string[];
+  tickers_missing_lineage: string[];
+}
+
+export interface IntelV3RunTrustTickerEntry {
+  ticker: string;
+  state: string;
+  axis_status: Record<string, string>;
+  axis_readiness: Record<string, string>;
+  conflict_review_status: string;
+  has_source_lineage: boolean;
+  source_validated: boolean;
+  decision_constraints: string[];
+}
+
+export interface IntelV3RunTrustContract {
+  schema_version: "run_trust_contract_v1";
+  run_session_id: string;
+  generated_at: string;
+  overall_status: "healthy" | "limited" | "blocked" | "not_applicable" | "unknown";
+  session_coverage: {
+    frozen_holding_count: number;
+    decided_count: number;
+    no_call_count: number;
+    failed_count: number;
+    unaccounted_count: number;
+    publication_complete: boolean;
+  };
+  axis_coverage: Record<string, IntelV3RunTrustAxisCoverage>;
+  conflict_review_coverage: IntelV3RunTrustConflictReviewCoverage;
+  source_lineage: IntelV3RunTrustSourceLineage;
+  source_health: { status: string };
+  ticker_trust: IntelV3RunTrustTickerEntry[];
+  blocking_reasons: string[];
+  warnings: string[];
 }
 
 export interface IntelV3Snapshot {
@@ -579,6 +655,9 @@ export interface IntelV3Snapshot {
   // snapshot ("completed" | "completed_with_gaps") plus per-holding coverage.
   session_status?: "completed" | "completed_with_gaps" | string;
   session_coverage?: IntelV3SessionCoverage;
+  // Run Intel trust contract (run_trust_contract_v1) — present on
+  // distributed-session snapshots; independent of session_coverage.
+  run_trust_contract?: IntelV3RunTrustContract;
   // Build 2 — evidence freshness state from watchtower republisher
   evidence_freshness_state?:
     | "certified_current"

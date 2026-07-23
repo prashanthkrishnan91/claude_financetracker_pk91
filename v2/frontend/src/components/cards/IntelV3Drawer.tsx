@@ -29,6 +29,7 @@ import { SourceMetadataStrip } from "./TrustPrimitives";
 import {
   evidenceBandToBeginnerLabel,
   committeeStatusToPlainLabel,
+  conflictReviewStatusToLabel,
   formatSnapshotIdShort,
   formatUpdatedAtSafe,
 } from "@/lib/intel-v3-evidence";
@@ -36,6 +37,7 @@ import {
   buildEvidenceLaneRows,
   buildSafetyDisplay,
   convictionCapLabel,
+  allDecisionConstraintLabels,
   governancePriorityToExplanation,
   buildWhyActionExplanation,
   buildSupportingEvidenceSentences,
@@ -343,7 +345,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   // Fallback explanation if no narrative text available
   const fallbackNarrative = primaryNarrative
     ? null
-    : buildWhyActionExplanation(card.action, ex);
+    : buildWhyActionExplanation(card.action, ex, payload.decision_constraints);
 
   // Section 5: risk — deduplicate flags that duplicate blocker text
   const riskText = onceOnly(card.risk_text);
@@ -375,7 +377,25 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const supportingSentences = ex ? buildSupportingEvidenceSentences(ex, assetClass) : [];
   const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex, assetClass) : [];
   const capLabel = ex ? convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason) : "";
-  const safety = ex ? buildSafetyDisplay(ex) : null;
+  const safety = ex ? buildSafetyDisplay(ex, payload.decision_constraints) : null;
+
+  // Run Intel trust-contract signals — present only for distributed-session
+  // cards. Each constraint category shows separately (never one merged
+  // "Evidence blocked" label for price-context/portfolio-policy/lineage/
+  // conflict-review limitations that aren't evidence-quality failures).
+  // Only an ACTUAL limitation renders here — a holding with recorded source
+  // lineage, a passed/not-required review, and no constraints shows nothing
+  // in this section (never reassuring text under a "what's limiting" header).
+  // Missing lineage and a FAILED review are both already represented as
+  // their own decision-constraint category below, so they aren't repeated
+  // here — only a still-PENDING review (which never earns a constraint
+  // category, since it isn't a confirmed failure) gets its own line.
+  const constraintDisplays = allDecisionConstraintLabels(payload.decision_constraints);
+  const conflictReviewLine =
+    payload.conflict_review_status === "pending"
+      ? conflictReviewStatusToLabel(payload.conflict_review_status)
+      : null;
+  const hasTrustSignals = constraintDisplays.length > 0 || conflictReviewLine !== null;
 
   const safetyChipStyle = !safety
     ? "bg-surface-elevated text-text-secondary border-border"
@@ -633,6 +653,30 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
             {/* Stage 8D: SEC/company catalyst evidence readiness */}
             {ex && <CatalystEvidenceModule ex={ex} />}
           </Section>
+
+          {/* What's limiting this holding — run_trust_contract_v1 signals.
+              Source lineage, conflict-review outcome and each decision
+              constraint shown separately so a suppressed price context or a
+              portfolio-policy limit is never conflated with an evidence
+              failure or a failed conflict review. */}
+          {hasTrustSignals && (
+            <>
+              <Rule />
+              <Section title="What's limiting this holding">
+                <ul className="space-y-1.5">
+                  {conflictReviewLine && (
+                    <li className="text-xs text-text-muted">{conflictReviewLine}</li>
+                  )}
+                  {constraintDisplays.map((c, i) => (
+                    <li key={i} className="text-xs text-text-muted">
+                      <span className="font-medium text-text-secondary">{c.label}:</span>{" "}
+                      {c.detail}
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            </>
+          )}
 
           {/* Valuation context — rendered only when present */}
           {payload.valuation_context && (

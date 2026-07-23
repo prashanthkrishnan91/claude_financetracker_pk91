@@ -77,19 +77,51 @@ _RISK_DISPLAY: dict[str, str] = {
 }
 
 
-def _build_source_pack_status(decision: DecisionOutputV3) -> dict:
-    """Compute honest source-pack / committee status from decision evidence quality.
+def _build_source_pack_status(
+    decision: DecisionOutputV3,
+    *,
+    has_source_lineage: Optional[bool] = None,
+    review_failed: bool = False,
+) -> dict:
+    """Compute honest source-pack / committee status.
 
-    source_validated: intel_read had 1+ trusted signals — analyst produced real evidence.
-    pending: evidence is thin or suppressed — no trusted source-linked signals present.
+    source_validated: intel_read had 1+ trusted signals AND (when lineage
+    information is available for this publication path) real source
+    references AND no failed required conflict review.
+    pending: evidence is thin/suppressed, lineage is missing, or a required
+    conflict review failed — no trusted, source-linked, reconciled signal.
 
-    This replaces the hard-coded "deferred" status so the UI accurately reflects
-    whether analyst evidence has been source-validated for this ticker.
+    ``has_source_lineage`` is None for callers that don't carry per-ticker
+    lineage information (legacy/non-distributed publication) — preserves the
+    prior evidence-band-only behavior for them. Distributed session
+    publication always passes an explicit bool so a session with zero source
+    references (today's production reality) is never mislabeled
+    "source_validated" purely because evidence_band is STRONG/PARTIAL.
     """
+    if has_source_lineage is None:
+        if decision.evidence_quality in _SOURCE_VALIDATED_BANDS:
+            return {"status": "source_validated"}
+        ev_reason = decision.suppression_reasons.get("evidence_quality") or ""
+        truth_reason = decision.suppression_reasons.get("truth_evidence_quality") or ""
+        reason_text = ev_reason or truth_reason or "Source-linked evidence not yet available for this ticker."
+        return {"status": "pending", "reason": reason_text}
+
+    if review_failed:
+        return {
+            "status": "pending",
+            "reason": (
+                "A required conflict review failed for this ticker — shown "
+                "without successful conflict reconciliation."
+            ),
+        }
+    if not has_source_lineage:
+        return {
+            "status": "pending",
+            "reason": "No source references recorded for this run — lineage not established.",
+        }
     if decision.evidence_quality in _SOURCE_VALIDATED_BANDS:
         return {"status": "source_validated"}
 
-    # Evidence is THIN or SUPPRESSED — surface the suppression reason when available.
     ev_reason = decision.suppression_reasons.get("evidence_quality") or ""
     truth_reason = decision.suppression_reasons.get("truth_evidence_quality") or ""
     reason_text = ev_reason or truth_reason or "Source-linked evidence not yet available for this ticker."
@@ -205,6 +237,14 @@ def _build_held_card(
     # thesis_state: derived from card_meta or default intact.
     thesis_state = card_meta.get("thesis_state") or "intact"
 
+    # Trust-contract signals (distributed session publication only — absent
+    # for legacy/non-distributed card_metas, which keeps the prior
+    # evidence-band-only committee behavior via has_source_lineage=None).
+    has_source_lineage = card_meta.get("session_has_source_lineage")
+    conflict_review_status = card_meta.get("session_conflict_review_status")
+    review_failed = conflict_review_status == "failed"
+    decision_constraints = card_meta.get("session_decision_constraints")
+
     gov_result = card_meta.get("governance_result")
     if gov_result:
         evidence_explanation = _build_evidence_explanation(gov_result)
@@ -292,14 +332,33 @@ def _build_held_card(
             "schema_version":       decision.schema_version,
             # Build 3 PR 2B — plain-English valuation context (None when suppressed).
             "valuation_context":    valuation_context,
-            # Source-pack / committee status — computed from real evidence quality.
-            "committee":            _build_source_pack_status(decision),
+            # Source-pack / committee status — computed from real evidence
+            # quality AND (when available) real source lineage + conflict
+            # review outcome, never evidence_band alone.
+            "committee":            _build_source_pack_status(
+                decision,
+                has_source_lineage=has_source_lineage,
+                review_failed=review_failed,
+            ),
             # Stage 7C — evidence explanation for plain-English UI.
             # Always non-None: Stage 6 active → real governance result; Stage 6 off → synthetic.
             "evidence_explanation": evidence_explanation,
             # Stage 9I — asset intelligence context from composer.
             # Explanatory only; never overrides visible action authority.
             "asset_intelligence_context": asset_intel_ctx,
+            # Run-trust contract signals (distributed sessions only; None/[]
+            # when this card_meta carries no session trust info). Kept
+            # separate from `blockers`/`flags` so the drawer can show source
+            # lineage, price-context and portfolio-policy limitations without
+            # collapsing every nonempty blocker into "Evidence blocked".
+            "source_lineage": (
+                {"has_source_refs": bool(has_source_lineage)}
+                if has_source_lineage is not None else None
+            ),
+            "conflict_review_status": conflict_review_status,
+            "decision_constraints": (
+                list(decision_constraints) if decision_constraints is not None else None
+            ),
         },
     }
 

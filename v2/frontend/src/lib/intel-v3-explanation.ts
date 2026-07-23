@@ -199,9 +199,95 @@ export interface SafetyDisplay {
   tier: "stronger" | "limited" | "blocked";
 }
 
-/** Map the safe_for_visible_decision flag and reason to a display tier and label. */
-export function buildSafetyDisplay(ex: IntelV3EvidenceExplanation): SafetyDisplay {
-  if (ex.action_blocks && ex.action_blocks.length > 0) {
+// ── Decision-constraint categories (run_trust_contract_v1) → plain English ───
+
+/** One category's label/detail/tier — never "blocked" except evidence_quality. */
+const DECISION_CONSTRAINT_DISPLAY: Record<string, SafetyDisplay> = {
+  evidence_quality: {
+    label: "Evidence blocked",
+    detail: "A quality issue was found that prevents a stronger recommendation.",
+    tier: "blocked",
+  },
+  conflict_review: {
+    label: "Conflict review not resolved",
+    detail: "A required conflict review failed — shown without successful reconciliation.",
+    tier: "limited",
+  },
+  source_lineage: {
+    label: "Source lineage missing",
+    detail: "No source references are recorded for this run yet.",
+    tier: "limited",
+  },
+  price_context: {
+    label: "Price context limited",
+    detail: "Price/valuation context isn't confirmed for this holding yet.",
+    tier: "limited",
+  },
+  portfolio_policy: {
+    label: "Portfolio policy constraint",
+    detail: "Position-sizing rules limit this holding — not an evidence issue.",
+    tier: "limited",
+  },
+  risk: {
+    label: "Risk elevated",
+    detail: "This holding's risk band is high enough to limit how much conviction the engine can show.",
+    tier: "limited",
+  },
+};
+
+/** Priority order when a ticker carries more than one category at once. */
+const DECISION_CONSTRAINT_PRIORITY = [
+  "evidence_quality", "conflict_review", "source_lineage",
+  "price_context", "portfolio_policy", "risk",
+];
+
+/** Pick the single most relevant constraint category to display as the
+ * compact safety chip. Returns null for an empty list or only "other". */
+export function decisionConstraintToLabel(
+  categories: string[] | null | undefined,
+): SafetyDisplay | null {
+  if (!categories || categories.length === 0) return null;
+  for (const category of DECISION_CONSTRAINT_PRIORITY) {
+    if (categories.includes(category)) return DECISION_CONSTRAINT_DISPLAY[category];
+  }
+  return null;
+}
+
+/** Every recognized constraint category on this ticker, each shown
+ * separately — never conflated into one label (e.g. a speculative holding
+ * with a failed required review shows BOTH "Portfolio policy constraint"
+ * AND "Conflict review not resolved"). Priority-ordered, unrecognized/
+ * "other" categories omitted (nothing user-facing to say). */
+export function allDecisionConstraintLabels(
+  categories: string[] | null | undefined,
+): SafetyDisplay[] {
+  if (!categories || categories.length === 0) return [];
+  return DECISION_CONSTRAINT_PRIORITY.filter((c) => categories.includes(c)).map(
+    (c) => DECISION_CONSTRAINT_DISPLAY[c],
+  );
+}
+
+/**
+ * Map the safe_for_visible_decision flag and reason to a display tier and
+ * label.
+ *
+ * ``decisionConstraints`` — when provided (run_trust_contract_v1 categories:
+ * evidence_quality | source_lineage | price_context | portfolio_policy |
+ * risk | conflict_review | other) — governs the tier precisely: ONLY an
+ * actual `evidence_quality` constraint is "blocked". A suppressed price
+ * context, a portfolio-policy limit, or a failed conflict review is real but
+ * NOT an evidence failure, so it never collapses into "Evidence blocked".
+ * When omitted (legacy/non-distributed cards with no per-category
+ * breakdown), the prior any-nonempty-`action_blocks` heuristic is preserved.
+ */
+export function buildSafetyDisplay(
+  ex: IntelV3EvidenceExplanation,
+  decisionConstraints?: string[] | null,
+): SafetyDisplay {
+  if (decisionConstraints) {
+    const constraint = decisionConstraintToLabel(decisionConstraints);
+    if (constraint) return constraint;
+  } else if (ex.action_blocks && ex.action_blocks.length > 0) {
     return {
       label: "Evidence blocked",
       detail: "A quality issue was found that prevents a stronger recommendation.",
@@ -258,9 +344,10 @@ export function deduplicateTexts(texts: (string | null | undefined)[]): string[]
  */
 export function buildWhyActionExplanation(
   action: string,
-  ex: IntelV3EvidenceExplanation | null | undefined
+  ex: IntelV3EvidenceExplanation | null | undefined,
+  decisionConstraints?: string[] | null,
 ): string {
-  const safety = ex ? buildSafetyDisplay(ex) : null;
+  const safety = ex ? buildSafetyDisplay(ex, decisionConstraints) : null;
 
   switch (action) {
     case "BUY":
@@ -449,7 +536,7 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
       continue;
     }
     cardsWithExplanation++;
-    const safety = buildSafetyDisplay(ex);
+    const safety = buildSafetyDisplay(ex, card.detail_drawer_payload?.decision_constraints);
     if (safety.tier === "blocked") blockedCount++;
     else if (safety.tier === "stronger") safeCount++;
     else limitedCount++;

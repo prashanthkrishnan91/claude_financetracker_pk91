@@ -10,6 +10,7 @@
 
 import type {
   IntelV3HeldCard,
+  IntelV3RunTrustAxisCoverage,
   IntelV3RunTrustContract,
   IntelV3SessionStatus,
   IntelV3Snapshot,
@@ -933,6 +934,26 @@ describe("helpers", () => {
 // production evidence. Proves the panel model surfaces an independent
 // analysis-trust status that is "blocked" even though session coverage is
 // complete (31/31 decided) — "decisions persisted" is never "trusted".
+function mkAxisCoverage(
+  succeeded: number, missing: number, failed: number, notApplicable: number,
+): IntelV3RunTrustAxisCoverage {
+  return {
+    expected_count: succeeded + missing + failed,
+    succeeded_count: succeeded,
+    missing_count: missing,
+    failed_count: failed,
+    not_applicable_count: notApplicable,
+    required_expected_count: succeeded + missing + failed,
+    required_succeeded_count: succeeded,
+    required_missing_count: missing,
+    required_failed_count: failed,
+    optional_expected_count: 0,
+    optional_succeeded_count: 0,
+    optional_missing_count: 0,
+    optional_failed_count: 0,
+  };
+}
+
 function makeRunTrustContract(
   overrides: Partial<IntelV3RunTrustContract> = {},
 ): IntelV3RunTrustContract {
@@ -950,12 +971,12 @@ function makeRunTrustContract(
       publication_complete: true,
     },
     axis_coverage: {
-      technical: { expected_count: 31, succeeded_count: 31, missing_count: 0, failed_count: 0, not_applicable_count: 0 },
-      sentiment: { expected_count: 31, succeeded_count: 31, missing_count: 0, failed_count: 0, not_applicable_count: 0 },
-      fundamental: { expected_count: 19, succeeded_count: 19, missing_count: 0, failed_count: 0, not_applicable_count: 12 },
-      etf_exposure: { expected_count: 12, succeeded_count: 12, missing_count: 0, failed_count: 0, not_applicable_count: 19 },
-      crypto_market: { expected_count: 0, succeeded_count: 0, missing_count: 0, failed_count: 0, not_applicable_count: 31 },
-      risk_filing: { expected_count: 19, succeeded_count: 0, missing_count: 19, failed_count: 0, not_applicable_count: 12 },
+      technical: mkAxisCoverage(31, 0, 0, 0),
+      sentiment: mkAxisCoverage(31, 0, 0, 0),
+      fundamental: mkAxisCoverage(19, 0, 0, 12),
+      etf_exposure: mkAxisCoverage(12, 0, 0, 19),
+      crypto_market: mkAxisCoverage(0, 0, 0, 31),
+      risk_filing: mkAxisCoverage(0, 19, 0, 12),
     },
     conflict_review_coverage: {
       required_count: 7,
@@ -972,6 +993,9 @@ function makeRunTrustContract(
       outputs_missing_source_refs: 93,
       tickers_with_lineage: [],
       tickers_missing_lineage: [],
+      tickers_full_lineage: [],
+      tickers_partial_lineage: [],
+      tickers_missing_lineage_full: [],
     },
     source_health: { status: "blocked" },
     ticker_trust: [],
@@ -1033,6 +1057,8 @@ describe("deriveRunTrustSummary", () => {
         source_lineage: {
           outputs_with_source_refs: 93, outputs_missing_source_refs: 0,
           tickers_with_lineage: ["AAPL"], tickers_missing_lineage: [],
+          tickers_full_lineage: ["AAPL"], tickers_partial_lineage: [],
+          tickers_missing_lineage_full: [],
         },
         source_health: { status: "healthy" },
       }),

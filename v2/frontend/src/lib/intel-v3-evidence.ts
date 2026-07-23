@@ -30,22 +30,40 @@ export function committeeStatusToPlainLabel(status: string): string {
 
 // ── Run Intel trust contract (run_trust_contract_v1) display helpers ─────────
 
-/** Explicit "not assessed"/"missing" text — never a bare "—" for source health. */
-export function sourceLineageToLabel(sourceLineage: { has_source_refs: boolean } | null | undefined): string {
+/** Explicit "not assessed"/"missing" text — never a bare "—" for source health.
+ * ``status`` is the authoritative field (full/partial/missing/unknown);
+ * ``has_source_refs`` is a legacy convenience boolean (true only when full). */
+export function sourceLineageToLabel(
+  sourceLineage: { status?: string; has_source_refs: boolean } | null | undefined,
+): string {
   if (!sourceLineage) return "Source lineage not assessed for this holding.";
-  return sourceLineage.has_source_refs
-    ? "Source references are recorded for this holding."
-    : "No source references are recorded for this holding yet.";
+  switch (sourceLineage.status) {
+    case "full":    return "Every output behind this decision carries a source reference.";
+    case "partial": return "Some but not all outputs behind this decision carry a source reference.";
+    case "unknown": return "Source lineage could not be re-verified for this holding.";
+    case "missing":
+      return "No source references are recorded for this holding yet.";
+    default:
+      return sourceLineage.has_source_refs
+        ? "Source references are recorded for this holding."
+        : "No source references are recorded for this holding yet.";
+  }
 }
 
-/** Per-card conflict-review status → plain-English label. */
+/** Per-card conflict-review status → plain-English label. Never claims "no
+ * review was required" for "unknown" (fail-closed read-time overlay) — that
+ * would silently re-introduce the exact optimistic-default bug this exists
+ * to prevent. */
 export function conflictReviewStatusToLabel(status: string | null | undefined): string {
   switch (status) {
     case "succeeded": return "Conflict review passed for this holding.";
     case "failed":    return "A required conflict review failed — shown without successful reconciliation.";
     case "pending":   return "A required conflict review is still pending.";
+    case "unknown":   return "Conflict-review status could not be re-verified for this holding.";
     case "not_required":
-    default:          return "No conflict review was required for this holding.";
+      return "No conflict review was required for this holding.";
+    default:
+      return "Conflict-review status unavailable for this holding.";
   }
 }
 

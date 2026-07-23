@@ -20,15 +20,45 @@ Pure function, derived ONLY from already-fetched rows:
 
 No IO, no DB reads, no LLM calls here — callers (session-native publication,
 and a read-time enrichment path for snapshots persisted before this contract
-existed) own fetching the rows and passing them in. The SAME projection runs
-in both places so a pre-existing snapshot displays truthful trust information
-without rerunning collectors, providers or LLMs.
+existed) own fetching the rows and passing them in. The caller is also
+responsible for failing CLOSED (an explicit unknown overlay — see
+``unknown_overlay_contract``) instead of calling this function at all when
+the underlying reads themselves are unavailable/suspect; this function
+always assumes its inputs are a successful, complete read.
 
 Trust is never inferred from display text, and "all decisions persisted" is
 never treated as synonymous with "analysis trusted": a session can have full
 session coverage (every ticker decided) and still be ``blocked`` overall
-because required conflict reviews failed or no output carries a source
-reference.
+because a REQUIRED axis is missing/failed, a required conflict review is
+unresolved, or required decision-influencing source lineage is missing.
+
+## Proof of success
+
+A terminal task is not proof of anything by itself:
+
+  * a specialist axis "succeeds" only when a VALID persisted
+    ``intel_run_specialist_outputs`` row exists for (ticker, axis) — one
+    with both ``score`` and ``confidence`` set, the exact same validity gate
+    ``decision_tasks_v1.aggregate_advisory_signal`` itself uses to decide
+    whether an output actually influenced the decision. A terminal
+    (succeeded/degraded) specialist task with no valid output is FAILED, not
+    succeeded and not merely missing — the pipeline claimed to finish but
+    produced nothing usable.
+  * a conflict review "succeeds" only when its task reached
+    ``TASK_SUCCEEDED`` AND a valid persisted ``axis=review`` output exists.
+    ``TASK_DEGRADED`` is never review success. A terminal-success task with
+    no valid review output is FAILED (succeeded-without-output).
+
+## Source lineage
+
+Lineage is evaluated over every VALID output that actually feeds
+``aggregate_advisory_signal`` for a ticker — every tracked axis output AND
+the review output when one exists (aggregate_advisory_signal is called with
+the full output set, review included). Per ticker this yields one of
+``full`` (every decision-influencing output has a source reference),
+``partial`` (some but not all do) or ``missing`` (none do, or there are no
+valid decision-influencing outputs at all). ``source_validated`` requires
+``full`` — never merely "at least one axis has a reference somewhere".
 """
 from __future__ import annotations
 
@@ -54,6 +84,7 @@ from .task_contracts_v1 import (
     TICKER_FAILED,
     TICKER_NO_CALL,
     axes_for_asset,
+    required_axes_for_asset,
 )
 
 SCHEMA_VERSION = "run_trust_contract_v1"
@@ -74,6 +105,14 @@ REVIEW_NOT_REQUIRED = "not_required"
 REVIEW_SUCCEEDED = "succeeded"
 REVIEW_FAILED = "failed"
 REVIEW_PENDING = "pending"
+# Only ever produced by the fail-closed read-time overlay — never by
+# build_run_trust_contract itself, which assumes a successful read.
+REVIEW_UNKNOWN = "unknown"
+
+LINEAGE_FULL = "full"
+LINEAGE_PARTIAL = "partial"
+LINEAGE_MISSING = "missing"
+LINEAGE_UNKNOWN = "unknown"
 
 # Readiness vocabulary consumed by the legacy evidence_explanation drawer
 # (READY | LIMITED | SUPPRESSED | MISSING | INSUFFICIENT | NOT_APPLICABLE).
@@ -83,7 +122,8 @@ READINESS_MISSING = "MISSING"
 READINESS_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 # Axes tracked for coverage/readiness (review is handled separately — it is
-# advisory reconciliation, not a specialist evidence axis).
+# advisory reconciliation, not a specialist evidence axis, and is folded
+# into source lineage instead since it feeds the same aggregate signal).
 TRACKED_AXES: tuple[str, ...] = (
     AXIS_FUNDAMENTAL,
     AXIS_TECHNICAL,
@@ -107,13 +147,39 @@ CONSTRAINT_RISK = "risk"
 CONSTRAINT_CONFLICT_REVIEW = "conflict_review"
 CONSTRAINT_OTHER = "other"
 
+ALL_CONSTRAINT_CATEGORIES = frozenset({
+    CONSTRAINT_EVIDENCE_QUALITY, CONSTRAINT_SOURCE_LINEAGE,
+    CONSTRAINT_PRICE_CONTEXT, CONSTRAINT_PORTFOLIO_POLICY,
+    CONSTRAINT_RISK, CONSTRAINT_CONFLICT_REVIEW, CONSTRAINT_OTHER,
+})
+
 _SOURCE_VALIDATED_EVIDENCE_BANDS = frozenset({"OK", "STRONG"})
-_PORTFOLIO_POLICY_FIT_BANDS = frozenset(
-    {"UNDERWEIGHT", "OVERWEIGHT", "BREACH", "BLOCKED"}
-)
+# UNDERWEIGHT is room-to-add — a positive/neutral fit, never a limitation.
+_PORTFOLIO_POLICY_FIT_BANDS = frozenset({"OVERWEIGHT", "BREACH", "BLOCKED"})
 _PRICE_CONTEXT_LIMITED_BANDS = frozenset({"SUPPRESSED", "FULL", "EXPENSIVE"})
 _RISK_ELEVATED_BANDS = frozenset({"HIGH", "CRITICAL"})
 _THIN_EVIDENCE_BANDS = frozenset({"THIN", "SUPPRESSED"})
+
+# Substrings of KNOWN persisted blocker text (decision_policy_v1.decide()) —
+# anything in the persisted ``blockers`` list that matches NONE of these is a
+# real constraint the band-based checks don't already represent (e.g. "
+# Attractiveness signal absent or weak.") and must surface as CONSTRAINT_OTHER
+# rather than silently disappear, even when other categories already apply.
+_KNOWN_BLOCKER_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    CONSTRAINT_EVIDENCE_QUALITY: ("insufficient evidence",),
+    CONSTRAINT_PRICE_CONTEXT: ("price context",),
+    CONSTRAINT_PORTFOLIO_POLICY: ("portfolio fit",),
+    CONSTRAINT_RISK: ("risk too elevated", "critical risk", "high risk with"),
+}
+
+
+def _is_valid_output(output: Optional[dict[str, Any]]) -> bool:
+    """Same validity gate ``aggregate_advisory_signal`` uses — a terminal
+    task claiming success with no usable score/confidence is not proof of
+    anything."""
+    if not output:
+        return False
+    return output.get("score") is not None and output.get("confidence") is not None
 
 
 def _has_min_source_lineage(refs: Any) -> bool:
@@ -128,17 +194,21 @@ def _has_min_source_lineage(refs: Any) -> bool:
 def classify_decision_constraints(
     *,
     decision_record: dict[str, Any],
-    has_source_lineage: bool,
+    lineage_status: str,
     review_status: str,
 ) -> list[str]:
     """Deterministic, non-exclusive classifier over PERSISTED decision fields.
 
-    Replaces "any nonempty blocker == evidence blocked": each independent
-    decision axis maps to its own category, so a suppressed price context
-    (universal today) or a portfolio-policy constraint never gets relabeled
-    as an evidence-quality failure. A ticker can carry more than one category
-    at once (e.g. a speculative holding with a failed required review is both
-    ``portfolio_policy`` AND ``conflict_review`` — never conflated into one).
+    Each independent decision axis maps to its own category, so a suppressed
+    price context or a portfolio-policy constraint never gets relabeled as
+    an evidence-quality failure, and a positive/assessed band (UNDERWEIGHT
+    fit) never renders as a limitation. A ticker can carry more than one
+    category at once (e.g. a speculative holding with a failed required
+    review is both ``portfolio_policy`` AND ``conflict_review`` — never
+    conflated into one). The persisted ``blockers`` list is also parsed
+    directly: any blocker text not matched by a known category (e.g. a weak
+    attractiveness signal) still surfaces as ``other`` — additively, never
+    replacing whatever band-based categories already apply.
     """
     categories: set[str] = set()
 
@@ -155,10 +225,19 @@ def classify_decision_constraints(
         categories.add(CONSTRAINT_PORTFOLIO_POLICY)
     if risk_band in _RISK_ELEVATED_BANDS:
         categories.add(CONSTRAINT_RISK)
-    if not has_source_lineage:
+    if lineage_status != LINEAGE_FULL:
         categories.add(CONSTRAINT_SOURCE_LINEAGE)
-    if review_status == REVIEW_FAILED:
+    if review_status in (REVIEW_FAILED, REVIEW_PENDING, REVIEW_UNKNOWN):
         categories.add(CONSTRAINT_CONFLICT_REVIEW)
+
+    for blocker in decision_record.get("blockers") or []:
+        text = str(blocker).lower()
+        matched = any(
+            any(sub in text for sub in subs)
+            for subs in _KNOWN_BLOCKER_SUBSTRINGS.values()
+        )
+        if not matched:
+            categories.add(CONSTRAINT_OTHER)
 
     if not categories:
         categories.add(CONSTRAINT_OTHER)
@@ -168,16 +247,17 @@ def classify_decision_constraints(
 def is_source_validated(
     *,
     evidence_quality: str,
-    has_source_lineage: bool,
+    lineage_status: str,
     review_status: str,
 ) -> bool:
-    """A ticker is source-validated ONLY with real lineage, a real evidence
-    band AND no failed required conflict review — never from evidence_band
-    alone."""
+    """A ticker is source-validated ONLY with FULL lineage across every
+    decision-influencing output, a real evidence band, AND a conflict review
+    that is exactly not-required or succeeded — never merely "not failed"
+    (a still-pending required review is not validated either)."""
     return (
-        has_source_lineage
+        lineage_status == LINEAGE_FULL
         and str(evidence_quality or "").upper() in _SOURCE_VALIDATED_EVIDENCE_BANDS
-        and review_status != REVIEW_FAILED
+        and review_status in (REVIEW_NOT_REQUIRED, REVIEW_SUCCEEDED)
     )
 
 
@@ -205,7 +285,12 @@ def _axis_task_states_for_ticker(
     return states
 
 
-def _review_status_for_ticker(tasks: list[dict[str, Any]], ticker: str) -> str:
+def _review_status_for_ticker(
+    tasks: list[dict[str, Any]],
+    ticker: str,
+    *,
+    has_valid_review_output: bool,
+) -> str:
     review_states = {
         str(task.get("state") or "")
         for task in tasks
@@ -214,9 +299,12 @@ def _review_status_for_ticker(tasks: list[dict[str, Any]], ticker: str) -> str:
     }
     if not review_states:
         return REVIEW_NOT_REQUIRED
-    if TASK_SUCCEEDED in review_states or TASK_DEGRADED in review_states:
-        return REVIEW_SUCCEEDED
-    if TASK_FAILED in review_states or TASK_CANCELLED in review_states:
+    if TASK_SUCCEEDED in review_states:
+        # A terminal-success review task with no valid persisted review
+        # output is NOT success — the reconciliation claimed to finish but
+        # produced nothing usable.
+        return REVIEW_SUCCEEDED if has_valid_review_output else REVIEW_FAILED
+    if TASK_DEGRADED in review_states or TASK_FAILED in review_states or TASK_CANCELLED in review_states:
         return REVIEW_FAILED
     return REVIEW_PENDING
 
@@ -226,14 +314,19 @@ def _axis_status(
     axis: str,
     ticker: str,
     asset_type: str,
-    outputs_by_ticker_axis: dict[tuple[str, str], dict[str, Any]],
+    valid_outputs_by_ticker_axis: dict[tuple[str, str], dict[str, Any]],
     task_states: dict[str, str],
 ) -> str:
     if axis not in axes_for_asset(asset_type):
         return AXIS_STATUS_NOT_APPLICABLE
-    if (ticker, axis) in outputs_by_ticker_axis:
+    if (ticker, axis) in valid_outputs_by_ticker_axis:
         return AXIS_STATUS_SUCCEEDED
-    if task_states.get(axis) == TASK_FAILED:
+    state = task_states.get(axis)
+    if state == TASK_FAILED:
+        return AXIS_STATUS_FAILED
+    if state in (TASK_SUCCEEDED, TASK_DEGRADED):
+        # Terminal task, no valid output — the pipeline claimed to finish
+        # but produced nothing usable. Never counted as merely "missing".
         return AXIS_STATUS_FAILED
     return AXIS_STATUS_MISSING
 
@@ -246,6 +339,17 @@ def _readiness_label(status: str, confidence: Optional[float]) -> str:
     if status == AXIS_STATUS_NOT_APPLICABLE:
         return READINESS_NOT_APPLICABLE
     return READINESS_MISSING
+
+
+def _lineage_status_for_outputs(outputs: list[dict[str, Any]]) -> str:
+    if not outputs:
+        return LINEAGE_MISSING
+    with_refs = sum(1 for o in outputs if _has_min_source_lineage(o.get("evidence_refs")))
+    if with_refs == 0:
+        return LINEAGE_MISSING
+    if with_refs == len(outputs):
+        return LINEAGE_FULL
+    return LINEAGE_PARTIAL
 
 
 def build_run_trust_contract(
@@ -261,22 +365,35 @@ def build_run_trust_contract(
     Deterministic over its inputs alone — same rows in, same contract out.
     Integrated identically by session-native publication (persisted) and by
     read-time enrichment of a pre-existing snapshot (not persisted, additive
-    overlay only).
+    overlay only). ASSUMES the inputs are a successful, complete read — the
+    caller must fail closed (``unknown_overlay_contract``) instead of
+    calling this function when reads are unavailable/suspect.
     """
     now = now or datetime.now(timezone.utc)
     session_id = str(session.get("id") or "")
     tasks = tasks or []
 
-    non_review_outputs = [
-        o for o in specialist_outputs if str(o.get("axis") or "") != AXIS_REVIEW
-    ]
-    outputs_by_ticker_axis: dict[tuple[str, str], dict[str, Any]] = {
-        (str(o.get("ticker") or ""), str(o.get("axis") or "")): o
-        for o in non_review_outputs
+    asset_type_by_ticker = {
+        str(r.get("ticker") or ""): str(r.get("asset_type") or "equity")
+        for r in ticker_rows
     }
-    outputs_by_ticker: dict[str, list[dict[str, Any]]] = {}
-    for output in non_review_outputs:
-        outputs_by_ticker.setdefault(str(output.get("ticker") or ""), []).append(output)
+
+    # Valid (score+confidence present) outputs only — the same set that
+    # actually influences aggregate_advisory_signal. Keyed both by
+    # (ticker, axis) for lookup and by ticker for lineage aggregation across
+    # every decision-influencing output, review included.
+    valid_outputs_by_ticker_axis: dict[tuple[str, str], dict[str, Any]] = {}
+    valid_outputs_by_ticker_all_axes: dict[str, list[dict[str, Any]]] = {}
+    valid_outputs_by_ticker_tracked_axes: dict[str, list[dict[str, Any]]] = {}
+    for output in specialist_outputs:
+        if not _is_valid_output(output):
+            continue
+        ticker = str(output.get("ticker") or "")
+        axis = str(output.get("axis") or "")
+        valid_outputs_by_ticker_axis[(ticker, axis)] = output
+        valid_outputs_by_ticker_all_axes.setdefault(ticker, []).append(output)
+        if axis != AXIS_REVIEW:
+            valid_outputs_by_ticker_tracked_axes.setdefault(ticker, []).append(output)
 
     # ── Session coverage ──────────────────────────────────────────────────
     decided_rows = [r for r in ticker_rows if str(r.get("state")) == TICKER_DECIDED]
@@ -298,46 +415,88 @@ def build_run_trust_contract(
         "publication_complete": publication_complete,
     }
 
-    # ── Per-ticker axis status + conflict-review status ──────────────────
+    # ── Per-ticker axis status + conflict-review status + lineage ─────────
     ticker_axis_status: dict[str, dict[str, str]] = {}
     review_status_by_ticker: dict[str, str] = {}
+    lineage_status_by_ticker: dict[str, str] = {}
     for row in ticker_rows:
         ticker = str(row.get("ticker") or "")
-        asset_type = str(row.get("asset_type") or "equity")
+        asset_type = asset_type_by_ticker.get(ticker, "equity")
         task_states = _axis_task_states_for_ticker(tasks, ticker)
         ticker_axis_status[ticker] = {
             axis: _axis_status(
                 axis=axis,
                 ticker=ticker,
                 asset_type=asset_type,
-                outputs_by_ticker_axis=outputs_by_ticker_axis,
+                valid_outputs_by_ticker_axis=valid_outputs_by_ticker_axis,
                 task_states=task_states,
             )
             for axis in TRACKED_AXES
         }
-        review_status_by_ticker[ticker] = _review_status_for_ticker(tasks, ticker)
+        has_valid_review_output = (ticker, AXIS_REVIEW) in valid_outputs_by_ticker_axis
+        review_status_by_ticker[ticker] = _review_status_for_ticker(
+            tasks, ticker, has_valid_review_output=has_valid_review_output,
+        )
+        lineage_status_by_ticker[ticker] = _lineage_status_for_outputs(
+            valid_outputs_by_ticker_all_axes.get(ticker, [])
+        )
 
-    # ── Axis (specialist) coverage, session-wide ──────────────────────────
+    # ── Axis (specialist) coverage, session-wide — required vs optional ───
     axis_coverage: dict[str, Any] = {}
     for axis in TRACKED_AXES:
-        succeeded = missing = failed = not_applicable = 0
-        for per_axis in ticker_axis_status.values():
+        req_succeeded = req_missing = req_failed = 0
+        opt_succeeded = opt_missing = opt_failed = 0
+        not_applicable = 0
+        for ticker, per_axis in ticker_axis_status.items():
             status = per_axis[axis]
-            if status == AXIS_STATUS_SUCCEEDED:
-                succeeded += 1
-            elif status == AXIS_STATUS_MISSING:
-                missing += 1
-            elif status == AXIS_STATUS_FAILED:
-                failed += 1
-            else:
+            if status == AXIS_STATUS_NOT_APPLICABLE:
                 not_applicable += 1
+                continue
+            asset_type = asset_type_by_ticker.get(ticker, "equity")
+            required = axis in required_axes_for_asset(asset_type)
+            if status == AXIS_STATUS_SUCCEEDED:
+                if required:
+                    req_succeeded += 1
+                else:
+                    opt_succeeded += 1
+            elif status == AXIS_STATUS_MISSING:
+                if required:
+                    req_missing += 1
+                else:
+                    opt_missing += 1
+            elif status == AXIS_STATUS_FAILED:
+                if required:
+                    req_failed += 1
+                else:
+                    opt_failed += 1
         axis_coverage[axis] = {
-            "expected_count": succeeded + missing + failed,
-            "succeeded_count": succeeded,
-            "missing_count": missing,
-            "failed_count": failed,
+            # Aggregate (required + optional) — kept for existing frontend
+            # chips (e.g. "Technical 31/31") that don't need the split.
+            "expected_count": req_succeeded + req_missing + req_failed
+                + opt_succeeded + opt_missing + opt_failed,
+            "succeeded_count": req_succeeded + opt_succeeded,
+            "missing_count": req_missing + opt_missing,
+            "failed_count": req_failed + opt_failed,
             "not_applicable_count": not_applicable,
+            # Required vs optional split — the authority for overall_status.
+            "required_expected_count": req_succeeded + req_missing + req_failed,
+            "required_succeeded_count": req_succeeded,
+            "required_missing_count": req_missing,
+            "required_failed_count": req_failed,
+            "optional_expected_count": opt_succeeded + opt_missing + opt_failed,
+            "optional_succeeded_count": opt_succeeded,
+            "optional_missing_count": opt_missing,
+            "optional_failed_count": opt_failed,
         }
+
+    any_required_axis_gap = any(
+        counts["required_missing_count"] + counts["required_failed_count"] > 0
+        for counts in axis_coverage.values()
+    )
+    any_optional_axis_gap = any(
+        counts["optional_missing_count"] + counts["optional_failed_count"] > 0
+        for counts in axis_coverage.values()
+    )
 
     # ── Conflict-review coverage, session-wide ─────────────────────────────
     required_tickers = sorted(
@@ -362,30 +521,29 @@ def build_run_trust_contract(
         "failed_tickers": failed_review_tickers,
         "pending_tickers": pending_review_tickers,
     }
+    any_required_review_unresolved = bool(failed_review_tickers or pending_review_tickers)
 
-    # ── Source lineage ──────────────────────────────────────────────────
-    outputs_with_refs = sum(
-        1 for o in non_review_outputs if _has_min_source_lineage(o.get("evidence_refs"))
+    # ── Source lineage, session-wide (decided tickers only — the only ones
+    # with a visible action and a real decision to have lineage over) ─────
+    decided_tickers = sorted(str(r.get("ticker") or "") for r in decided_rows)
+    lineage_full_tickers = sorted(
+        t for t in decided_tickers if lineage_status_by_ticker.get(t) == LINEAGE_FULL
     )
-    outputs_missing_refs = len(non_review_outputs) - outputs_with_refs
+    lineage_partial_tickers = sorted(
+        t for t in decided_tickers if lineage_status_by_ticker.get(t) == LINEAGE_PARTIAL
+    )
+    lineage_missing_tickers = sorted(
+        t for t in decided_tickers if lineage_status_by_ticker.get(t) == LINEAGE_MISSING
+    )
 
-    tickers_with_lineage: list[str] = []
-    tickers_missing_lineage: list[str] = []
-    ticker_has_lineage: dict[str, bool] = {}
-    for row in ticker_rows:
-        ticker = str(row.get("ticker") or "")
-        bundle = row.get("evidence_bundle") or {}
-        bundle_has_refs = _has_min_source_lineage(bundle.get("source_refs"))
-        output_has_refs = any(
-            _has_min_source_lineage(o.get("evidence_refs"))
-            for o in outputs_by_ticker.get(ticker, [])
-        )
-        has_lineage = bundle_has_refs or output_has_refs
-        ticker_has_lineage[ticker] = has_lineage
-        (tickers_with_lineage if has_lineage else tickers_missing_lineage).append(ticker)
+    outputs_with_refs = sum(
+        1 for outs in valid_outputs_by_ticker_all_axes.values()
+        for o in outs if _has_min_source_lineage(o.get("evidence_refs"))
+    )
+    total_valid_outputs = sum(len(outs) for outs in valid_outputs_by_ticker_all_axes.values())
+    outputs_missing_refs = total_valid_outputs - outputs_with_refs
 
-    total_outputs = len(non_review_outputs)
-    if total_outputs == 0:
+    if total_valid_outputs == 0:
         source_health_status = STATUS_UNKNOWN
     elif outputs_with_refs == 0:
         source_health_status = STATUS_BLOCKED
@@ -397,10 +555,17 @@ def build_run_trust_contract(
     source_lineage = {
         "outputs_with_source_refs": outputs_with_refs,
         "outputs_missing_source_refs": outputs_missing_refs,
-        "tickers_with_lineage": sorted(tickers_with_lineage),
-        "tickers_missing_lineage": sorted(tickers_missing_lineage),
+        # Back-compat ticker lists (nonempty lineage anywhere) — superseded
+        # by the explicit full/partial/missing lists below for new readers.
+        "tickers_with_lineage": lineage_full_tickers,
+        "tickers_missing_lineage": lineage_missing_tickers,
+        "tickers_full_lineage": lineage_full_tickers,
+        "tickers_partial_lineage": lineage_partial_tickers,
+        "tickers_missing_lineage_full": lineage_missing_tickers,
     }
     source_health = {"status": source_health_status}
+    any_required_lineage_missing = bool(lineage_missing_tickers)
+    any_lineage_partial = bool(lineage_partial_tickers)
 
     # ── Per-ticker trust entries ────────────────────────────────────────
     ticker_trust: list[dict[str, Any]] = []
@@ -410,70 +575,124 @@ def build_run_trust_contract(
     for row in sorted(ticker_rows, key=lambda r: str(r.get("ticker") or "")):
         ticker = str(row.get("ticker") or "")
         state = str(row.get("state") or "")
+        asset_type = asset_type_by_ticker.get(ticker, "equity")
         review_status = review_status_by_ticker.get(ticker, REVIEW_NOT_REQUIRED)
-        has_lineage = ticker_has_lineage.get(ticker, False)
+        lineage_status = lineage_status_by_ticker.get(ticker, LINEAGE_MISSING)
         decision_record = row.get("decision") or {}
         evidence_quality = str(decision_record.get("evidence_quality") or "")
 
         per_axis_status = ticker_axis_status.get(ticker, {})
+        required_axes = set(required_axes_for_asset(asset_type))
         axis_readiness = {
             axis: _readiness_label(
                 per_axis_status.get(axis, AXIS_STATUS_MISSING),
                 (
-                    (outputs_by_ticker_axis.get((ticker, axis)) or {}).get("confidence")
+                    (valid_outputs_by_ticker_axis.get((ticker, axis)) or {}).get("confidence")
                 ),
             )
             for axis in TRACKED_AXES
+        }
+        required_axis_gap_ticker = any(
+            per_axis_status.get(axis) in (AXIS_STATUS_MISSING, AXIS_STATUS_FAILED)
+            for axis in required_axes
+        )
+        optional_axis_gap_ticker = any(
+            per_axis_status.get(axis) in (AXIS_STATUS_MISSING, AXIS_STATUS_FAILED)
+            for axis in TRACKED_AXES if axis not in required_axes
+        )
+
+        decision_bands = {
+            "evidence_quality": decision_record.get("evidence_quality"),
+            "price_context": decision_record.get("price_context"),
+            "portfolio_fit": decision_record.get("portfolio_fit"),
+            "risk_band": decision_record.get("risk_band"),
+            "attractiveness": decision_record.get("attractiveness"),
         }
 
         if state == TICKER_DECIDED:
             constraints = classify_decision_constraints(
                 decision_record=decision_record,
-                has_source_lineage=has_lineage,
+                lineage_status=lineage_status,
                 review_status=review_status,
             )
             source_validated = is_source_validated(
                 evidence_quality=evidence_quality,
-                has_source_lineage=has_lineage,
+                lineage_status=lineage_status,
                 review_status=review_status,
             )
+            if (
+                required_axis_gap_ticker
+                or review_status in (REVIEW_FAILED, REVIEW_PENDING, REVIEW_UNKNOWN)
+                or lineage_status == LINEAGE_MISSING
+            ):
+                trust_status = STATUS_BLOCKED
+            elif optional_axis_gap_ticker or lineage_status == LINEAGE_PARTIAL:
+                trust_status = STATUS_LIMITED
+            else:
+                trust_status = STATUS_HEALTHY
+        elif state == TICKER_NO_CALL:
+            constraints = []
+            source_validated = False
+            trust_status = STATUS_LIMITED
+        elif state == TICKER_FAILED:
+            constraints = []
+            source_validated = False
+            trust_status = STATUS_BLOCKED
         else:
             constraints = []
             source_validated = False
+            trust_status = STATUS_UNKNOWN
 
         ticker_trust.append({
             "ticker": ticker,
             "state": state,
+            "trust_status": trust_status,
             "axis_status": dict(per_axis_status),
             "axis_readiness": axis_readiness,
+            "required_axis_gap": required_axis_gap_ticker,
+            "optional_axis_gap": optional_axis_gap_ticker,
             "conflict_review_status": review_status,
-            "has_source_lineage": has_lineage,
+            "lineage_status": lineage_status,
             "source_validated": source_validated,
             "decision_constraints": constraints,
+            "decision_bands": decision_bands,
         })
 
-        if review_status == REVIEW_FAILED:
+        if state == TICKER_DECIDED and required_axis_gap_ticker:
             blocking_reasons.append(
-                f"{ticker}: required conflict review failed — action shown "
+                f"{ticker}: a required specialist axis is missing or failed this run."
+            )
+        if review_status in (REVIEW_FAILED, REVIEW_PENDING):
+            verb = "failed" if review_status == REVIEW_FAILED else "is still pending"
+            blocking_reasons.append(
+                f"{ticker}: required conflict review {verb} — action shown "
                 "without successful conflict reconciliation."
+            )
+        if state == TICKER_DECIDED and lineage_status == LINEAGE_MISSING:
+            blocking_reasons.append(
+                f"{ticker}: no decision-influencing output carries a source reference."
             )
         if state == TICKER_FAILED:
             blocking_reasons.append(f"{ticker}: analysis could not finish this run.")
 
-    if total_outputs > 0 and outputs_with_refs == 0:
+    if total_valid_outputs > 0 and outputs_with_refs == 0:
         warnings.append(
             "No specialist outputs in this session carry source references — "
             "source lineage is not established for any holding."
         )
     elif outputs_missing_refs > 0:
         warnings.append(
-            f"{outputs_missing_refs} of {total_outputs} specialist outputs are "
+            f"{outputs_missing_refs} of {total_valid_outputs} specialist outputs are "
             "missing source references."
         )
     if failed_review_tickers:
         warnings.append(
             f"{len(failed_review_tickers)} required conflict review(s) failed — "
             "affected holdings are shown without successful conflict reconciliation."
+        )
+    if pending_review_tickers:
+        warnings.append(
+            f"{len(pending_review_tickers)} required conflict review(s) are still pending."
         )
 
     # ── Overall status (deterministic; never "decisions persisted" == trust) ─
@@ -486,9 +705,14 @@ def build_run_trust_contract(
         )
     elif frozen_count == 0:
         overall_status = STATUS_NOT_APPLICABLE
-    elif failed_rows or failed_review_tickers or source_health_status == STATUS_BLOCKED:
+    elif (
+        failed_rows
+        or any_required_axis_gap
+        or any_required_review_unresolved
+        or any_required_lineage_missing
+    ):
         overall_status = STATUS_BLOCKED
-    elif no_call_rows or source_health_status == STATUS_LIMITED:
+    elif no_call_rows or any_optional_axis_gap or any_lineage_partial:
         overall_status = STATUS_LIMITED
     else:
         overall_status = STATUS_HEALTHY
@@ -506,4 +730,57 @@ def build_run_trust_contract(
         "ticker_trust": ticker_trust,
         "blocking_reasons": blocking_reasons,
         "warnings": warnings,
+    }
+
+
+def unknown_overlay_contract(
+    *, run_session_id: str, reason: str, now: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Fail-closed trust contract for when durable state cannot be read at
+    all (missing session row, missing ticker rows, a suspiciously empty task
+    read, or a raised read failure). NEVER preserves an old snapshot's
+    optimistic ``source_validated``/committee status — this is an explicit,
+    honest "we don't know" projection, not a guess. ``ticker_trust`` is
+    intentionally empty: the caller applies a matching neutral overlay to
+    every existing card (see ``intel_v3_service._enrich_snapshot_with_run_trust_contract``)
+    rather than fabricating per-ticker detail this function has no rows for.
+    """
+    now = now or datetime.now(timezone.utc)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_session_id": run_session_id,
+        "generated_at": now.isoformat(),
+        "overall_status": STATUS_UNKNOWN,
+        "session_coverage": {
+            "frozen_holding_count": 0,
+            "decided_count": 0,
+            "no_call_count": 0,
+            "failed_count": 0,
+            "unaccounted_count": 0,
+            "publication_complete": False,
+        },
+        "axis_coverage": {},
+        "conflict_review_coverage": {
+            "required_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "pending_count": 0,
+            "required_tickers": [],
+            "succeeded_tickers": [],
+            "failed_tickers": [],
+            "pending_tickers": [],
+        },
+        "source_lineage": {
+            "outputs_with_source_refs": 0,
+            "outputs_missing_source_refs": 0,
+            "tickers_with_lineage": [],
+            "tickers_missing_lineage": [],
+            "tickers_full_lineage": [],
+            "tickers_partial_lineage": [],
+            "tickers_missing_lineage_full": [],
+        },
+        "source_health": {"status": STATUS_UNKNOWN},
+        "ticker_trust": [],
+        "blocking_reasons": [reason],
+        "warnings": [reason],
     }

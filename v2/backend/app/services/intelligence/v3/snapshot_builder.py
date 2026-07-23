@@ -77,28 +77,43 @@ _RISK_DISPLAY: dict[str, str] = {
 }
 
 
+# Reasons for each non-"full" lineage status (never "not confirmed" text for
+# an assessed/positive state — these are strictly about MISSING references).
+_LINEAGE_STATUS_REASON: dict[str, str] = {
+    "missing": "No source references recorded for this run — lineage not established.",
+    "partial": "Some but not all decision-influencing outputs for this ticker carry a source reference.",
+    "unknown": "Source lineage could not be re-verified for this holding.",
+}
+_REVIEW_STATUS_REASON: dict[str, str] = {
+    "failed": "A required conflict review failed for this ticker — shown without successful conflict reconciliation.",
+    "pending": "A required conflict review is still pending for this ticker.",
+    "unknown": "Conflict-review status could not be re-verified for this holding.",
+}
+
+
 def _build_source_pack_status(
     decision: DecisionOutputV3,
     *,
-    has_source_lineage: Optional[bool] = None,
-    review_failed: bool = False,
+    lineage_status: Optional[str] = None,
+    review_status: Optional[str] = None,
 ) -> dict:
     """Compute honest source-pack / committee status.
 
-    source_validated: intel_read had 1+ trusted signals AND (when lineage
-    information is available for this publication path) real source
-    references AND no failed required conflict review.
-    pending: evidence is thin/suppressed, lineage is missing, or a required
-    conflict review failed — no trusted, source-linked, reconciled signal.
+    source_validated: intel_read had 1+ trusted signals AND (when trust
+    information is available for this publication path) FULL source lineage
+    across every decision-influencing output AND a conflict review that is
+    exactly not-required or succeeded (never merely "not failed" — a still-
+    pending required review is not validated either).
 
-    ``has_source_lineage`` is None for callers that don't carry per-ticker
-    lineage information (legacy/non-distributed publication) — preserves the
-    prior evidence-band-only behavior for them. Distributed session
-    publication always passes an explicit bool so a session with zero source
-    references (today's production reality) is never mislabeled
-    "source_validated" purely because evidence_band is STRONG/PARTIAL.
+    ``lineage_status``/``review_status`` are None for callers that don't
+    carry per-ticker trust information (legacy/non-distributed publication)
+    — preserves the prior evidence-band-only behavior for them. Distributed
+    session publication (and its read-time fail-closed overlay) always pass
+    explicit values so a session with zero source references, a failed
+    review, or unreadable trust state is never mislabeled "source_validated"
+    purely because evidence_band is STRONG/PARTIAL.
     """
-    if has_source_lineage is None:
+    if lineage_status is None and review_status is None:
         if decision.evidence_quality in _SOURCE_VALIDATED_BANDS:
             return {"status": "source_validated"}
         ev_reason = decision.suppression_reasons.get("evidence_quality") or ""
@@ -106,18 +121,19 @@ def _build_source_pack_status(
         reason_text = ev_reason or truth_reason or "Source-linked evidence not yet available for this ticker."
         return {"status": "pending", "reason": reason_text}
 
-    if review_failed:
+    if review_status not in (None, "not_required", "succeeded"):
         return {
             "status": "pending",
-            "reason": (
-                "A required conflict review failed for this ticker — shown "
-                "without successful conflict reconciliation."
+            "reason": _REVIEW_STATUS_REASON.get(
+                str(review_status), "Conflict-review status could not be re-verified for this holding.",
             ),
         }
-    if not has_source_lineage:
+    if lineage_status != "full":
         return {
             "status": "pending",
-            "reason": "No source references recorded for this run — lineage not established.",
+            "reason": _LINEAGE_STATUS_REASON.get(
+                str(lineage_status), "No source references recorded for this run — lineage not established.",
+            ),
         }
     if decision.evidence_quality in _SOURCE_VALIDATED_BANDS:
         return {"status": "source_validated"}
@@ -239,11 +255,12 @@ def _build_held_card(
 
     # Trust-contract signals (distributed session publication only — absent
     # for legacy/non-distributed card_metas, which keeps the prior
-    # evidence-band-only committee behavior via has_source_lineage=None).
-    has_source_lineage = card_meta.get("session_has_source_lineage")
+    # evidence-band-only committee behavior via lineage_status=None).
+    lineage_status = card_meta.get("session_lineage_status")
     conflict_review_status = card_meta.get("session_conflict_review_status")
-    review_failed = conflict_review_status == "failed"
     decision_constraints = card_meta.get("session_decision_constraints")
+    trust_status = card_meta.get("session_trust_status")
+    decision_bands = card_meta.get("session_decision_bands")
 
     gov_result = card_meta.get("governance_result")
     if gov_result:
@@ -337,8 +354,8 @@ def _build_held_card(
             # review outcome, never evidence_band alone.
             "committee":            _build_source_pack_status(
                 decision,
-                has_source_lineage=has_source_lineage,
-                review_failed=review_failed,
+                lineage_status=lineage_status,
+                review_status=conflict_review_status,
             ),
             # Stage 7C — evidence explanation for plain-English UI.
             # Always non-None: Stage 6 active → real governance result; Stage 6 off → synthetic.
@@ -351,14 +368,19 @@ def _build_held_card(
             # separate from `blockers`/`flags` so the drawer can show source
             # lineage, price-context and portfolio-policy limitations without
             # collapsing every nonempty blocker into "Evidence blocked".
+            # lineage_status is one of full/partial/missing/unknown — never a
+            # bare boolean, so "one axis had a reference" can't read as
+            # "everything that fed the decision is sourced".
             "source_lineage": (
-                {"has_source_refs": bool(has_source_lineage)}
-                if has_source_lineage is not None else None
+                {"status": lineage_status, "has_source_refs": lineage_status == "full"}
+                if lineage_status is not None else None
             ),
             "conflict_review_status": conflict_review_status,
             "decision_constraints": (
                 list(decision_constraints) if decision_constraints is not None else None
             ),
+            "trust_status": trust_status,
+            "decision_bands": decision_bands,
         },
     }
 

@@ -244,7 +244,8 @@ async def test_9_existing_snapshot_enriched_from_run_session_id_zero_provider_ll
     for ticker in ("AAPL", "MSFT"):
         ddp = cards[ticker]["detail_drawer_payload"]
         assert ddp["committee"]["status"] != "source_validated"
-        assert ddp["source_lineage"] == {"has_source_refs": False}
+        assert ddp["source_lineage"]["status"] == trust.LINEAGE_MISSING
+        assert ddp["source_lineage"]["has_source_refs"] is False
 
     # Zero provider/LLM calls: FakeSupabase exposes only .table()/.rows() —
     # no provider or LLM client methods exist on it at all, so re-running
@@ -254,3 +255,125 @@ async def test_9_existing_snapshot_enriched_from_run_session_id_zero_provider_ll
     payload2.pop("run_trust_contract", None)
     _enrich_snapshot_with_run_trust_contract(payload2, client=client, user_id=USER)
     assert payload2["run_trust_contract"]["run_session_id"] == session_id
+
+
+# ── Fail-closed historical enrichment (release-blocker patch, point 5) ───────
+#
+# The read-time overlay must NEVER preserve an old snapshot's optimistic
+# source_validated/committee status when durable trust state cannot be read
+# — it must attach an explicit "unknown" overlay instead, on both the
+# contract and every existing card, with zero provider/LLM calls in every
+# case (FakeSupabase has no such methods at all, so any read past .table()/
+# .rows() would itself raise — the tests below never see that happen).
+
+def _old_shaped_optimistic_payload(session_id: str, tickers: list[str]) -> dict:
+    """A payload shaped like a pre-run_trust_contract_v1 snapshot: every
+    card wrongly reads committee.status == source_validated, no trust
+    fields at all."""
+    cards = []
+    for ticker in tickers:
+        cards.append({
+            "ticker": ticker,
+            "evidence_band": "STRONG",
+            "detail_drawer_payload": {
+                "evidence_band": "STRONG",
+                "committee": {"status": "source_validated"},
+                "evidence_explanation": {
+                    "technical_signals_status": "READY",
+                    "sentiment_status": "READY",
+                },
+            },
+        })
+    return {
+        "run_session_id": session_id,
+        "source_health": {"status": "ok"},
+        "portfolio_command_center": {"source_health": {"status": "ok"}},
+        "current_holdings": cards,
+        "best_buys": [cards[0]] if cards else [],
+        "trim_sell_desk": [],
+    }
+
+
+def _assert_failed_closed(payload: dict, tickers: list[str]) -> None:
+    contract = payload["run_trust_contract"]
+    assert contract["overall_status"] == trust.STATUS_UNKNOWN
+    assert payload["source_health"]["status"] == trust.STATUS_UNKNOWN
+    assert payload["portfolio_command_center"]["source_health"]["status"] == trust.STATUS_UNKNOWN
+    cards = {c["ticker"]: c for c in payload["current_holdings"]}
+    for ticker in tickers:
+        ddp = cards[ticker]["detail_drawer_payload"]
+        # NEVER preserved as the old optimistic "source_validated".
+        assert ddp["committee"]["status"] != "source_validated"
+        assert ddp["committee"]["status"] == "pending"
+        assert ddp["source_lineage"]["status"] == "unknown"
+        assert ddp["conflict_review_status"] == "unknown"
+        assert ddp["trust_status"] == "unknown"
+        # Technical/sentiment readiness is never fabricated — untouched.
+        assert ddp["evidence_explanation"]["technical_signals_status"] == "READY"
+        assert ddp["evidence_explanation"]["sentiment_status"] == "READY"
+    assert payload["source_pack_validated_count"] == 0
+
+
+def test_fail_closed_missing_session_row():
+    client = FakeSupabase()
+    tickers = ["AAPL", "MSFT"]
+    payload = _old_shaped_optimistic_payload("nonexistent-session-id", tickers)
+    _enrich_snapshot_with_run_trust_contract(payload, client=client, user_id=USER)
+    _assert_failed_closed(payload, tickers)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_missing_ticker_rows():
+    client = FakeSupabase()
+    session_id = str(uuid.uuid4())
+    await control.create_distributed_session(
+        client=client, user_id=USER, session_id=session_id,
+    )
+    # Delete every frozen ticker row out from under an otherwise-real session.
+    client.store["intel_run_tickers"] = [
+        t for t in client.store.get("intel_run_tickers", [])
+        if t.get("run_session_id") != session_id
+    ]
+    tickers = ["AAPL"]
+    payload = _old_shaped_optimistic_payload(session_id, tickers)
+    _enrich_snapshot_with_run_trust_contract(payload, client=client, user_id=USER)
+    _assert_failed_closed(payload, tickers)
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_suspiciously_empty_task_read():
+    client = FakeSupabase()
+    session_id = await _session_with_review(client)
+    # A real session with real ticker rows, but every task row is gone —
+    # exactly the "read came back suspiciously empty" signal.
+    client.store["intel_run_tasks"] = [
+        t for t in client.store.get("intel_run_tasks", [])
+        if t.get("run_session_id") != session_id
+    ]
+    tickers = ["AAPL", "MSFT", "GOOGL"]
+    payload = _old_shaped_optimistic_payload(session_id, tickers)
+    _enrich_snapshot_with_run_trust_contract(payload, client=client, user_id=USER)
+    _assert_failed_closed(payload, tickers)
+    # Never silently claims "no review was required" for GOOGL just because
+    # the task read came back empty.
+    assert "not_required" not in {
+        c["detail_drawer_payload"]["conflict_review_status"]
+        for c in payload["current_holdings"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_raised_read_failure(monkeypatch):
+    import app.services.intelligence.v3.distributed.run_task_store_v1 as dstore
+
+    client = FakeSupabase()
+    session_id = await _session_with_review(client)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated transient DB failure")
+
+    monkeypatch.setattr(dstore, "list_specialist_outputs", _boom)
+    tickers = ["AAPL", "MSFT", "GOOGL"]
+    payload = _old_shaped_optimistic_payload(session_id, tickers)
+    _enrich_snapshot_with_run_trust_contract(payload, client=client, user_id=USER)
+    _assert_failed_closed(payload, tickers)

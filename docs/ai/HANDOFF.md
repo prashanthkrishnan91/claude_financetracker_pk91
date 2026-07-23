@@ -66,41 +66,78 @@ overweight constraint). This sequence is the active scope for Run Intel work
 until production certification passes; do not start unrelated Run Intel
 slices ahead of it.
 
-1. **Publish and display a truthful Run Intel trust contract — COMPLETED
-   (this PR).** New pure projection `run_trust_contract_v1`
+1. **Publish and display a truthful Run Intel trust contract — IN PROGRESS —
+   PR #485.** Becomes COMPLETED only after merge. New pure projection
+   `run_trust_contract_v1`
    (`v2/backend/app/services/intelligence/v3/distributed/run_trust_contract_v1.py`):
-   session coverage, per-axis specialist coverage (technical/sentiment/
-   fundamental/etf_exposure/crypto_market/risk_filing, with explicit
-   succeeded/missing/failed/not_applicable), conflict-review coverage
-   (required/succeeded/failed/pending, per-ticker), source lineage (outputs
-   with vs. missing source refs — never "source validated" from
-   evidence_band alone), and a deterministic decision-constraint classifier
+   session coverage; per-axis specialist coverage split into **required vs.
+   optional** per asset type (`task_contracts_v1.REQUIRED_AXES_BY_ASSET` /
+   `OPTIONAL_AXES_BY_ASSET`), each succeeded/missing/failed/not_applicable —
+   a valid persisted specialist output (`score` and `confidence` both
+   present) is the only proof an axis succeeded; a terminal task
+   (`SUCCEEDED`/`DEGRADED`) without one counts as failed, never succeeded;
+   conflict-review coverage that requires BOTH a successfully-terminal review
+   task AND a valid persisted `axis="review"` output — `TASK_DEGRADED` is
+   never review success merely for being terminal — with explicit
+   not_required/succeeded/failed/pending states, `failed` and `pending` both
+   blocking trust and `is_source_validated`; source lineage as
+   full/partial/missing per ticker, computed over **every** output that fed
+   `aggregate_advisory_signal()` (including the review axis when present),
+   not one arbitrary axis; and a deterministic decision-constraint classifier
    (evidence_quality / source_lineage / price_context / portfolio_policy /
-   risk / conflict_review / other — non-exclusive, so e.g. a speculative
-   holding with a failed review shows BOTH `portfolio_policy` AND
-   `conflict_review`, never merged). Wired into BOTH session-native
-   publication (`session_publication_v1.py`, persisted on
-   `payload.run_trust_contract`) AND a read-time, non-mutating enrichment of
-   pre-existing snapshots (`intel_v3_service._enrich_snapshot_with_run_trust_contract`,
-   keyed off `run_session_id`, zero provider/LLM calls) — the existing
-   production session displays truthful trust information without a rerun.
+   risk / conflict_review / other — non-exclusive) that no longer conflates
+   UNDERWEIGHT (room to add) with a portfolio-policy limitation, distinguishes
+   SUPPRESSED price context (unconfirmed) from assessed FULL/EXPENSIVE
+   valuation states, and preserves an `other` category for any real persisted
+   blocker text that doesn't match a known category instead of silently
+   dropping it. A per-ticker `trust_status`
+   (healthy/limited/blocked/unknown) is derived from these same required-axis/
+   review/lineage facts — never a separate heuristic — and an overall
+   `overall_status` that can only be `healthy` when every required axis,
+   every required review, and full decision-influencing lineage pass; any
+   required gap forces `blocked`; only optional gaps or partial lineage
+   produce `limited`. Wired into BOTH session-native publication
+   (`session_publication_v1.py`, persisted on `payload.run_trust_contract`)
+   AND a read-time, **fail-closed** enrichment of pre-existing snapshots
+   (`intel_v3_service._enrich_snapshot_with_run_trust_contract`, keyed off
+   `run_session_id`, zero provider/LLM calls): when the session, ticker rows,
+   or task rows can't be read (missing, empty, or a raised exception), the
+   enrichment applies an explicit `unknown`/`pending` trust overlay
+   (`_apply_unknown_trust_overlay`) instead of ever preserving a stale
+   optimistic `source_validated`/committee status — old cards flip to
+   explicitly `unknown`, they never stay silently "healthy" on a failed read.
    `research_axis_readiness={}` placeholder replaced with real per-axis
-   readiness; `snapshot_builder._build_source_pack_status` now requires real
-   source lineage AND a non-failed conflict review before "source_validated"
-   when lineage info is available (distributed sessions), preserving legacy
-   evidence-band-only behavior when it isn't (non-distributed callers).
-   Frontend: `AdvisorReadinessPanel` shows an independent "Analysis trust"
-   status (healthy/limited/blocked/not_applicable/unknown) plus session/axis/
-   conflict-review/source-lineage summary lines, separate from the renamed
-   "Holdings decided" coverage metric; `IntelV3Drawer` gained a "What's
-   limiting this holding" section listing each decision-constraint category
-   separately; `IntelV3HoldingsPanel`'s evidence band now shows authoritative
-   `axis_coverage` counts instead of the old boolean-only technical/sentiment
-   chips; `buildSafetyDisplay` no longer treats every nonempty blocker as
-   "Evidence blocked" — only an actual `evidence_quality` constraint is. Financial
-   truth rows (`portfolio_financial_truth`/`current_price_truth`/
+   readiness; `snapshot_builder._build_source_pack_status` now requires full
+   source lineage AND a non-failed, non-pending review status before
+   "source_validated" when lineage/review info is available (distributed
+   sessions), preserving legacy evidence-band-only behavior when it isn't
+   (non-distributed callers). Frontend: `AdvisorReadinessPanel` shows an
+   independent "Analysis trust" status (healthy/limited/blocked/
+   not_applicable/unknown) plus session/axis/conflict-review/source-lineage
+   summary lines, separate from the renamed "Holdings decided" coverage
+   metric; `IntelV3Drawer` gained a "What's limiting this holding" section
+   listing each decision-constraint category separately, using
+   `decision_bands`-aware wording so SUPPRESSED/FULL/EXPENSIVE price context
+   read as distinct, accurate states rather than one generic "isn't
+   confirmed" claim; `IntelV3HoldingsPanel`'s evidence band keeps its
+   existing technical/sentiment `axis_coverage` chips unchanged, but the
+   portfolio "better supported / evidence limited / data issues" counts now
+   derive directly from backend per-ticker `trust_status`
+   (`buildPortfolioEvidenceSummary`) instead of a second frontend safety
+   heuristic, so the summary, holding cards, and drawer agree on one backend
+   trust state; `buildSafetyDisplay` no longer treats every nonempty blocker
+   as "Evidence blocked" — only an actual `evidence_quality` constraint is.
+   Financial truth rows (`portfolio_financial_truth`/`current_price_truth`/
    `books_reconciliation`) are untouched — still sourced only from the
-   existing `/api/advisor/readiness` truth endpoint. No SQL.
+   existing `/api/advisor/readiness` truth endpoint. No SQL. **PR 2 still
+   owns reference generation** — this PR does not generate any
+   `evidence_refs`/`source_refs`, it only reports lineage truthfully against
+   whatever already exists (currently "0 of N" in production). **Runtime
+   caveat:** fixture and unit/integration test validation is complete, but
+   production verification of the historical-session, fail-closed enrichment
+   path (a real read against the existing production session with a stale/
+   missing task graph) is still required after deployment — it has not yet
+   been exercised against live production data.
 2. Source quality / source-reference generation — NOT STARTED. Owns making
    `evidence_bundle.source_refs` / specialist `evidence_refs` actually
    nonempty; PR 1's lineage fields will then reflect real coverage instead of

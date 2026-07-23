@@ -390,8 +390,10 @@ describe("decisionConstraintToLabel / allDecisionConstraintLabels", () => {
     expect(top?.label).toBe("Evidence blocked");
   });
 
-  it("unrecognized/'other' category yields no display entries", () => {
-    expect(allDecisionConstraintLabels(["other"])).toEqual([]);
+  it("'other' category is preserved, not silently dropped — a real persisted blocker deserves visibility", () => {
+    const labels = allDecisionConstraintLabels(["other"]);
+    expect(labels).toHaveLength(1);
+    expect(labels[0].label).toBe("Other constraint noted");
   });
 });
 

@@ -201,7 +201,32 @@ export interface SafetyDisplay {
 
 // ── Decision-constraint categories (run_trust_contract_v1) → plain English ───
 
-/** One category's label/detail/tier — never "blocked" except evidence_quality. */
+/** Raw persisted decision bands (run_trust_contract_v1 ticker_trust
+ * .decision_bands) — used ONLY to pick accurate wording per band; never a
+ * second source of trust-status truth. */
+export interface DecisionBands {
+  evidence_quality?: string | null;
+  price_context?: string | null;
+  portfolio_fit?: string | null;
+  risk_band?: string | null;
+  attractiveness?: string | null;
+}
+
+const PRICE_CONTEXT_UNCONFIRMED: SafetyDisplay = {
+  label: "Price context limited",
+  detail: "Price/valuation context isn't confirmed for this holding yet.",
+  tier: "limited",
+};
+// FULL/EXPENSIVE are ASSESSED valuation states, not missing data — never
+// worded as "isn't confirmed".
+const PRICE_CONTEXT_ELEVATED: SafetyDisplay = {
+  label: "Valuation elevated",
+  detail: "Price/valuation is assessed as elevated relative to the evidence base.",
+  tier: "limited",
+};
+
+/** One category's label/detail/tier — never "blocked" except evidence_quality.
+ * ``price_context`` resolves band-specific text via ``priceContextDisplay``. */
 const DECISION_CONSTRAINT_DISPLAY: Record<string, SafetyDisplay> = {
   evidence_quality: {
     label: "Evidence blocked",
@@ -210,19 +235,15 @@ const DECISION_CONSTRAINT_DISPLAY: Record<string, SafetyDisplay> = {
   },
   conflict_review: {
     label: "Conflict review not resolved",
-    detail: "A required conflict review failed — shown without successful reconciliation.",
+    detail: "A required conflict review failed or is still pending — shown without successful reconciliation.",
     tier: "limited",
   },
   source_lineage: {
     label: "Source lineage missing",
-    detail: "No source references are recorded for this run yet.",
+    detail: "Not every output behind this decision carries a source reference yet.",
     tier: "limited",
   },
-  price_context: {
-    label: "Price context limited",
-    detail: "Price/valuation context isn't confirmed for this holding yet.",
-    tier: "limited",
-  },
+  price_context: PRICE_CONTEXT_UNCONFIRMED,
   portfolio_policy: {
     label: "Portfolio policy constraint",
     detail: "Position-sizing rules limit this holding — not an evidence issue.",
@@ -233,22 +254,43 @@ const DECISION_CONSTRAINT_DISPLAY: Record<string, SafetyDisplay> = {
     detail: "This holding's risk band is high enough to limit how much conviction the engine can show.",
     tier: "limited",
   },
+  other: {
+    label: "Other constraint noted",
+    detail: "A decision-limiting factor was noted for this holding that doesn't fit the other categories.",
+    tier: "limited",
+  },
 };
 
 /** Priority order when a ticker carries more than one category at once. */
 const DECISION_CONSTRAINT_PRIORITY = [
   "evidence_quality", "conflict_review", "source_lineage",
-  "price_context", "portfolio_policy", "risk",
+  "price_context", "portfolio_policy", "risk", "other",
 ];
 
+const PRICE_CONTEXT_ELEVATED_BANDS = new Set(["FULL", "EXPENSIVE"]);
+
+/** Resolve the price_context category to band-accurate text: SUPPRESSED is
+ * genuinely unconfirmed/missing; FULL/EXPENSIVE are assessed-and-elevated
+ * valuation states and must never read as "isn't confirmed". */
+function priceContextDisplay(bands: DecisionBands | null | undefined): SafetyDisplay {
+  const band = String(bands?.price_context ?? "").toUpperCase();
+  return PRICE_CONTEXT_ELEVATED_BANDS.has(band) ? PRICE_CONTEXT_ELEVATED : PRICE_CONTEXT_UNCONFIRMED;
+}
+
+function displayForCategory(category: string, bands: DecisionBands | null | undefined): SafetyDisplay {
+  if (category === "price_context") return priceContextDisplay(bands);
+  return DECISION_CONSTRAINT_DISPLAY[category];
+}
+
 /** Pick the single most relevant constraint category to display as the
- * compact safety chip. Returns null for an empty list or only "other". */
+ * compact safety chip. Returns null for an empty list. */
 export function decisionConstraintToLabel(
   categories: string[] | null | undefined,
+  bands?: DecisionBands | null,
 ): SafetyDisplay | null {
   if (!categories || categories.length === 0) return null;
   for (const category of DECISION_CONSTRAINT_PRIORITY) {
-    if (categories.includes(category)) return DECISION_CONSTRAINT_DISPLAY[category];
+    if (categories.includes(category)) return displayForCategory(category, bands);
   }
   return null;
 }
@@ -256,14 +298,16 @@ export function decisionConstraintToLabel(
 /** Every recognized constraint category on this ticker, each shown
  * separately — never conflated into one label (e.g. a speculative holding
  * with a failed required review shows BOTH "Portfolio policy constraint"
- * AND "Conflict review not resolved"). Priority-ordered, unrecognized/
- * "other" categories omitted (nothing user-facing to say). */
+ * AND "Conflict review not resolved"). Priority-ordered; "other" is shown
+ * too (never silently dropped — a real persisted blocker with no matching
+ * band-based category still deserves visibility). */
 export function allDecisionConstraintLabels(
   categories: string[] | null | undefined,
+  bands?: DecisionBands | null,
 ): SafetyDisplay[] {
   if (!categories || categories.length === 0) return [];
   return DECISION_CONSTRAINT_PRIORITY.filter((c) => categories.includes(c)).map(
-    (c) => DECISION_CONSTRAINT_DISPLAY[c],
+    (c) => displayForCategory(c, bands),
   );
 }
 
@@ -283,9 +327,10 @@ export function allDecisionConstraintLabels(
 export function buildSafetyDisplay(
   ex: IntelV3EvidenceExplanation,
   decisionConstraints?: string[] | null,
+  decisionBands?: DecisionBands | null,
 ): SafetyDisplay {
   if (decisionConstraints) {
-    const constraint = decisionConstraintToLabel(decisionConstraints);
+    const constraint = decisionConstraintToLabel(decisionConstraints, decisionBands);
     if (constraint) return constraint;
   } else if (ex.action_blocks && ex.action_blocks.length > 0) {
     return {
@@ -346,8 +391,9 @@ export function buildWhyActionExplanation(
   action: string,
   ex: IntelV3EvidenceExplanation | null | undefined,
   decisionConstraints?: string[] | null,
+  decisionBands?: DecisionBands | null,
 ): string {
-  const safety = ex ? buildSafetyDisplay(ex, decisionConstraints) : null;
+  const safety = ex ? buildSafetyDisplay(ex, decisionConstraints, decisionBands) : null;
 
   switch (action) {
     case "BUY":
@@ -531,16 +577,30 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
 
   for (const card of cards) {
     const ex = card.detail_drawer_payload?.evidence_explanation;
-    if (!ex) {
-      limitedCount++;
-      continue;
-    }
-    cardsWithExplanation++;
-    const safety = buildSafetyDisplay(ex, card.detail_drawer_payload?.decision_constraints);
-    if (safety.tier === "blocked") blockedCount++;
-    else if (safety.tier === "stronger") safeCount++;
-    else limitedCount++;
+    const trustStatus = card.detail_drawer_payload?.trust_status;
 
+    // Backend-authoritative bucketing (run_trust_contract_v1.ticker_trust
+    // .trust_status) — the SAME status the Advisor summary line and the
+    // drawer read, so the portfolio counts, holding cards and drawer never
+    // disagree via a second, independently-computed frontend heuristic.
+    // Falls back to the per-card evidence-band heuristic only for legacy/
+    // non-distributed cards that carry no trust_status at all.
+    if (trustStatus === "healthy") safeCount++;
+    else if (trustStatus === "blocked" || trustStatus === "unknown") blockedCount++;
+    else if (trustStatus === "limited") limitedCount++;
+    else if (!ex) {
+      limitedCount++;
+    } else {
+      const safety = buildSafetyDisplay(
+        ex, card.detail_drawer_payload?.decision_constraints, card.detail_drawer_payload?.decision_bands,
+      );
+      if (safety.tier === "blocked") blockedCount++;
+      else if (safety.tier === "stronger") safeCount++;
+      else limitedCount++;
+    }
+
+    if (!ex) continue;
+    cardsWithExplanation++;
     if (ex.conviction_cap_applied) convictionCappedCount++;
     if (readinessToDisplay(ex.technical_signals_status).isUsable) technicalUsableCount++;
     if (readinessToDisplay(ex.sentiment_status).isUsable) sentimentUsableCount++;

@@ -109,10 +109,22 @@ describe("conflictReviewStatusToLabel", () => {
     expect(conflictReviewStatusToLabel("pending")).toContain("pending");
   });
 
-  it("not_required/undefined → no review required, never a bare dash", () => {
+  it("not_required → explicit no-review-needed text, never a bare dash", () => {
     expect(conflictReviewStatusToLabel("not_required")).not.toBe("—");
+    expect(conflictReviewStatusToLabel("not_required")).toContain("No conflict review");
+  });
+
+  it("unknown → explicit re-verification text, never silently 'not required'", () => {
+    const label = conflictReviewStatusToLabel("unknown");
+    expect(label).not.toBe("—");
+    expect(label).not.toContain("No conflict review was required");
+    expect(label).toContain("not be re-verified");
+  });
+
+  it("null/undefined (no info at all) → honest 'unavailable', never a bare dash and never claims not_required", () => {
     expect(conflictReviewStatusToLabel(undefined)).not.toBe("—");
-    expect(conflictReviewStatusToLabel(null)).toContain("No conflict review");
+    expect(conflictReviewStatusToLabel(null)).not.toBe("—");
+    expect(conflictReviewStatusToLabel(null)).not.toContain("No conflict review was required");
   });
 });
 
@@ -130,6 +142,27 @@ describe("sourceLineageToLabel", () => {
   it("null/undefined → explicit not-assessed text", () => {
     expect(sourceLineageToLabel(null)).toContain("not assessed");
     expect(sourceLineageToLabel(undefined)).toContain("not assessed");
+  });
+
+  it("status=full → every output carries a reference", () => {
+    expect(sourceLineageToLabel({ status: "full", has_source_refs: true })).toContain("Every output");
+  });
+
+  it("status=partial → some but not all outputs carry a reference", () => {
+    expect(sourceLineageToLabel({ status: "partial", has_source_refs: false })).toContain("Some but not all");
+  });
+
+  it("status=missing → explicit missing text, never a bare dash", () => {
+    const label = sourceLineageToLabel({ status: "missing", has_source_refs: false });
+    expect(label).toContain("No source references");
+    expect(label).not.toBe("—");
+  });
+
+  it("status=unknown → explicit re-verification text, never silently 'full' or 'missing'", () => {
+    const label = sourceLineageToLabel({ status: "unknown", has_source_refs: false });
+    expect(label).toContain("not be re-verified");
+    expect(label).not.toContain("Every output");
+    expect(label).not.toContain("No source references");
   });
 });
 

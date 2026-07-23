@@ -345,7 +345,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   // Fallback explanation if no narrative text available
   const fallbackNarrative = primaryNarrative
     ? null
-    : buildWhyActionExplanation(card.action, ex, payload.decision_constraints);
+    : buildWhyActionExplanation(card.action, ex, payload.decision_constraints, payload.decision_bands);
 
   // Section 5: risk — deduplicate flags that duplicate blocker text
   const riskText = onceOnly(card.risk_text);
@@ -377,7 +377,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const supportingSentences = ex ? buildSupportingEvidenceSentences(ex, assetClass) : [];
   const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex, assetClass) : [];
   const capLabel = ex ? convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason) : "";
-  const safety = ex ? buildSafetyDisplay(ex, payload.decision_constraints) : null;
+  const safety = ex ? buildSafetyDisplay(ex, payload.decision_constraints, payload.decision_bands) : null;
 
   // Run Intel trust-contract signals — present only for distributed-session
   // cards. Each constraint category shows separately (never one merged
@@ -386,13 +386,13 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   // Only an ACTUAL limitation renders here — a holding with recorded source
   // lineage, a passed/not-required review, and no constraints shows nothing
   // in this section (never reassuring text under a "what's limiting" header).
-  // Missing lineage and a FAILED review are both already represented as
-  // their own decision-constraint category below, so they aren't repeated
-  // here — only a still-PENDING review (which never earns a constraint
-  // category, since it isn't a confirmed failure) gets its own line.
-  const constraintDisplays = allDecisionConstraintLabels(payload.decision_constraints);
+  // A failed required review is already represented as its own decision-
+  // constraint category below, so it isn't repeated here — pending and
+  // unknown (fail-closed read-time overlay) reviews get their own line
+  // since neither earns a constraint category on its own.
+  const constraintDisplays = allDecisionConstraintLabels(payload.decision_constraints, payload.decision_bands);
   const conflictReviewLine =
-    payload.conflict_review_status === "pending"
+    payload.conflict_review_status === "pending" || payload.conflict_review_status === "unknown"
       ? conflictReviewStatusToLabel(payload.conflict_review_status)
       : null;
   const hasTrustSignals = constraintDisplays.length > 0 || conflictReviewLine !== null;

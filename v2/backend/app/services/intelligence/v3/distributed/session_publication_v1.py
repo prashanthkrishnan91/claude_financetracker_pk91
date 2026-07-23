@@ -256,8 +256,8 @@ def build_session_snapshot_payload(
             "session_evidence_refs": list(bundle.get("source_refs") or []),
             # Trust-contract signals for the card detail drawer — kept
             # separate from the evidence-band-only legacy committee logic.
-            "session_has_source_lineage": trust_entry.get(
-                "has_source_lineage", False
+            "session_lineage_status": trust_entry.get(
+                "lineage_status", trust.LINEAGE_MISSING
             ),
             "session_conflict_review_status": trust_entry.get(
                 "conflict_review_status", trust.REVIEW_NOT_REQUIRED
@@ -265,6 +265,10 @@ def build_session_snapshot_payload(
             "session_decision_constraints": trust_entry.get(
                 "decision_constraints", []
             ),
+            "session_trust_status": trust_entry.get(
+                "trust_status", trust.STATUS_UNKNOWN
+            ),
+            "session_decision_bands": trust_entry.get("decision_bands", {}),
         })
 
     payload = build_snapshot(

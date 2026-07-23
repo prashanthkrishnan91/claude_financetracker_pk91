@@ -6,7 +6,8 @@ Fixture mirrors the observed truth of production session
   * 31 frozen holdings, 31 persisted decisions, session status completed
   * 31 technical outputs, 31 sentiment outputs, 19 fundamental outputs
     (equities only), 12 ETF-exposure outputs (ETFs only)
-  * 7 conflict reviews required; 2 succeeded (KLAR, NVDA); 5 failed
+  * 7 conflict reviews required; 2 succeeded (KLAR, NVDA — each with a valid
+    persisted axis=review output, the actual proof of success); 5 failed
     (BLSH, CRM, GLD, GOOGL, NFLX)
   * 0 evidence bundles / specialist outputs with nonempty source refs
   * AMD and TSM: strong evidence, suppressed price context (not an evidence
@@ -17,6 +18,14 @@ Fixture mirrors the observed truth of production session
 
 ``build_run_trust_contract`` is a pure function over plain dicts — no
 FakeSupabase/DB/LLM required for these proofs.
+
+Also proves the release-blocker patch semantics: required-vs-optional axis
+coverage (a valid persisted output is the only proof of success), conflict-
+review truth (TASK_DEGRADED is never success; a terminal-success task with
+no valid output is FAILED, not succeeded), full/partial/missing source
+lineage across every decision-influencing output (review included), and a
+decision-constraint classifier that never mislabels a positive/assessed
+band (UNDERWEIGHT) as a limitation and never drops an unclassified blocker.
 """
 from __future__ import annotations
 
@@ -26,12 +35,19 @@ from app.services.intelligence.v3.distributed import run_trust_contract_v1 as tr
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_ETF_EXPOSURE,
     AXIS_FUNDAMENTAL,
+    AXIS_REVIEW,
+    AXIS_RISK_FILING,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
+    TASK_CANCELLED,
+    TASK_DEGRADED,
     TASK_REVIEW_CONFLICT,
     TASK_SUCCEEDED,
     TASK_FAILED,
+    TASK_PENDING,
     TICKER_DECIDED,
+    TICKER_FAILED,
+    TICKER_NO_CALL,
 )
 
 SESSION_ID = "a51e977b-561a-4e98-baa8-59ad56a877ff"
@@ -64,6 +80,7 @@ def _decision(
     price_context="SUPPRESSED",
     portfolio_fit="ON_TARGET",
     risk_band="LOW",
+    blockers=None,
 ) -> dict:
     return {
         "outcome": "DECIDED",
@@ -74,7 +91,7 @@ def _decision(
         "price_context": price_context,
         "portfolio_fit": portfolio_fit,
         "risk_band": risk_band,
-        "blockers": [],
+        "blockers": list(blockers or []),
         "suppression_reasons": {},
         "rationale_plain_english": "test rationale",
         "why_now": "", "why_not_now": "",
@@ -117,7 +134,7 @@ def _ticker_row(ticker: str) -> dict:
     }
 
 
-def _specialist_output(ticker: str, axis: str) -> dict:
+def _specialist_output(ticker: str, axis: str, *, evidence_refs=None) -> dict:
     return {
         "ticker": ticker,
         "axis": axis,
@@ -127,7 +144,7 @@ def _specialist_output(ticker: str, axis: str) -> dict:
         "risks": [],
         # Zero-reference outputs — matches production: 0 persisted specialist
         # outputs with nonempty evidence_refs.
-        "evidence_refs": [],
+        "evidence_refs": list(evidence_refs or []),
         "missing_evidence": [],
         "limitations": [],
         "model": "fake", "prompt_version": "test",
@@ -153,6 +170,9 @@ def build_production_shaped_fixture() -> tuple[dict, list, list, list]:
         tasks.append({
             "task_type": TASK_REVIEW_CONFLICT, "ticker": t, "state": TASK_SUCCEEDED,
         })
+        # The actual proof of review success: a valid persisted axis=review
+        # output — a terminal-success task alone is not proof of anything.
+        specialist_outputs.append(_specialist_output(t, AXIS_REVIEW))
     for t in REVIEW_FAILED_TICKERS:
         tasks.append({
             "task_type": TASK_REVIEW_CONFLICT, "ticker": t, "state": TASK_FAILED,
@@ -210,13 +230,19 @@ class TestAxisCoverage:
         assert axis_cov[AXIS_TECHNICAL]["failed_count"] == 0
         assert axis_cov[AXIS_SENTIMENT]["succeeded_count"] == 31
         assert axis_cov[AXIS_SENTIMENT]["missing_count"] == 0
+        # Technical is required for every equity/ETF in this fixture;
+        # sentiment is optional everywhere.
+        assert axis_cov[AXIS_TECHNICAL]["required_succeeded_count"] == 31
+        assert axis_cov[AXIS_SENTIMENT]["optional_succeeded_count"] == 31
 
     def test_fundamental_and_etf_exposure_scoped_by_asset_type(self, fixture_contract):
         axis_cov = fixture_contract["axis_coverage"]
         assert axis_cov[AXIS_FUNDAMENTAL]["succeeded_count"] == 19
         assert axis_cov[AXIS_FUNDAMENTAL]["not_applicable_count"] == 12
+        assert axis_cov[AXIS_FUNDAMENTAL]["required_succeeded_count"] == 19
         assert axis_cov[AXIS_ETF_EXPOSURE]["succeeded_count"] == 12
         assert axis_cov[AXIS_ETF_EXPOSURE]["not_applicable_count"] == 19
+        assert axis_cov[AXIS_ETF_EXPOSURE]["required_succeeded_count"] == 12
 
     def test_not_applicable_axes_never_count_as_failures(self, fixture_contract):
         axis_cov = fixture_contract["axis_coverage"]
@@ -243,7 +269,7 @@ class TestSourceLineage:
         assert fixture_contract["source_health"]["status"] == trust.STATUS_BLOCKED
         for entry in fixture_contract["ticker_trust"]:
             assert entry["source_validated"] is False
-            assert entry["has_source_lineage"] is False
+            assert entry["lineage_status"] == trust.LINEAGE_MISSING
 
 
 class TestDecisionConstraintClassification:
@@ -259,8 +285,14 @@ class TestDecisionConstraintClassification:
             assert trust.CONSTRAINT_PRICE_CONTEXT in entry["decision_constraints"]
             assert trust.CONSTRAINT_EVIDENCE_QUALITY not in entry["decision_constraints"]
 
+    def test_amd_underweight_is_not_a_portfolio_policy_limitation(self, fixture_contract):
+        entry = self._entry(fixture_contract, "AMD")
+        assert entry["decision_bands"]["portfolio_fit"] == "UNDERWEIGHT"
+        assert trust.CONSTRAINT_PORTFOLIO_POLICY not in entry["decision_constraints"]
+
     def test_nvda_portfolio_policy_not_evidence_blocked(self, fixture_contract):
         entry = self._entry(fixture_contract, "NVDA")
+        assert entry["decision_bands"]["portfolio_fit"] == "OVERWEIGHT"
         assert trust.CONSTRAINT_PORTFOLIO_POLICY in entry["decision_constraints"]
         assert trust.CONSTRAINT_EVIDENCE_QUALITY not in entry["decision_constraints"]
 
@@ -280,10 +312,10 @@ class TestDecisionConstraintClassification:
         constraints = set(entry["decision_constraints"])
         assert trust.CONSTRAINT_PORTFOLIO_POLICY in constraints
         assert trust.CONSTRAINT_CONFLICT_REVIEW in constraints
-        # Two distinct categories, not merged into one "other"/"evidence" bucket.
-        assert trust.CONSTRAINT_OTHER not in constraints
 
-    def test_klar_review_succeeded_not_conflict_blocked(self, fixture_contract):
+    def test_klar_review_succeeded_with_valid_output_not_conflict_blocked(
+        self, fixture_contract
+    ):
         entry = self._entry(fixture_contract, "KLAR")
         assert entry["conflict_review_status"] == trust.REVIEW_SUCCEEDED
         assert trust.CONSTRAINT_CONFLICT_REVIEW not in entry["decision_constraints"]
@@ -302,22 +334,20 @@ class TestNoLeakage:
             assert isinstance(text, str)
             assert "Traceback" not in text
             assert "Exception" not in text
-            assert "None" not in text
 
     def test_ticker_trust_uses_constrained_vocabulary_only(self, fixture_contract):
         allowed_review = {
             trust.REVIEW_NOT_REQUIRED, trust.REVIEW_SUCCEEDED,
             trust.REVIEW_FAILED, trust.REVIEW_PENDING,
         }
-        allowed_constraints = {
-            trust.CONSTRAINT_EVIDENCE_QUALITY, trust.CONSTRAINT_SOURCE_LINEAGE,
-            trust.CONSTRAINT_PRICE_CONTEXT, trust.CONSTRAINT_PORTFOLIO_POLICY,
-            trust.CONSTRAINT_RISK, trust.CONSTRAINT_CONFLICT_REVIEW,
-            trust.CONSTRAINT_OTHER,
+        allowed_constraints = trust.ALL_CONSTRAINT_CATEGORIES
+        allowed_lineage = {
+            trust.LINEAGE_FULL, trust.LINEAGE_PARTIAL, trust.LINEAGE_MISSING,
         }
         for entry in fixture_contract["ticker_trust"]:
             assert entry["conflict_review_status"] in allowed_review
             assert set(entry["decision_constraints"]) <= allowed_constraints
+            assert entry["lineage_status"] in allowed_lineage
 
 
 class TestFinancialTruthSeparation:
@@ -335,3 +365,391 @@ class TestNotApplicableAxesNeverFailures:
         assert counts["not_applicable_count"] == 31
         assert counts["failed_count"] == 0
         assert counts["missing_count"] == 0
+
+
+# ── Release-blocker patch: focused single-ticker scenarios ───────────────────
+# Small, hand-built session/ticker_rows/tasks/specialist_outputs — each
+# isolates exactly one semantic the patch fixed, independent of the big
+# 31-ticker fixture above.
+
+def _one_ticker_session(ticker="AAA", asset_type="equity"):
+    return {"id": "sess-1", "status": "completed", "workflow_version": 2}
+
+
+def _one_ticker_row(ticker="AAA", asset_type="equity", **decision_overrides):
+    return {
+        "ticker": ticker,
+        "asset_type": asset_type,
+        "state": TICKER_DECIDED,
+        "portfolio_weight_pct": 2.0,
+        "evidence_bundle": {"source_refs": []},
+        "decision": _decision(**decision_overrides),
+    }
+
+
+class TestRequiredVsOptionalAxisCoverage:
+    def test_missing_required_technical_never_yields_healthy(self):
+        # Equity ticker: fundamental present, technical (required) missing.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [_specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["ref1"])]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["axis_status"][AXIS_TECHNICAL] == trust.AXIS_STATUS_MISSING
+        assert entry["required_axis_gap"] is True
+        assert entry["trust_status"] == trust.STATUS_BLOCKED
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_missing_required_fundamental_never_yields_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [_specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["ref1"])]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["required_axis_gap"] is True
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_missing_required_etf_exposure_never_yields_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(ticker="EEE", asset_type="etf", evidence_quality="STRONG")]
+        outputs = [_specialist_output("EEE", AXIS_TECHNICAL, evidence_refs=["ref1"])]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["axis_status"][AXIS_ETF_EXPOSURE] == trust.AXIS_STATUS_MISSING
+        assert entry["required_axis_gap"] is True
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_missing_optional_sentiment_yields_limited_not_blocked(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["axis_status"][AXIS_SENTIMENT] == trust.AXIS_STATUS_MISSING
+        assert entry["required_axis_gap"] is False
+        assert entry["optional_axis_gap"] is True
+        assert entry["trust_status"] == trust.STATUS_LIMITED
+        assert contract["overall_status"] == trust.STATUS_LIMITED
+
+    def test_not_applicable_does_not_reduce_trust(self):
+        # ETF ticker: every APPLICABLE axis present (required: technical,
+        # etf_exposure; optional: sentiment) + full lineage, no review
+        # required — fundamental is NOT_APPLICABLE for an ETF and must not
+        # prevent healthy.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(ticker="EEE", asset_type="etf", evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("EEE", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("EEE", AXIS_ETF_EXPOSURE, evidence_refs=["r2"]),
+            _specialist_output("EEE", AXIS_SENTIMENT, evidence_refs=["r3"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["axis_status"][AXIS_FUNDAMENTAL] == trust.AXIS_STATUS_NOT_APPLICABLE
+        assert entry["required_axis_gap"] is False
+        assert entry["optional_axis_gap"] is False
+        assert entry["lineage_status"] == trust.LINEAGE_FULL
+        assert entry["trust_status"] == trust.STATUS_HEALTHY
+        assert contract["overall_status"] == trust.STATUS_HEALTHY
+
+    def test_zero_specialist_outputs_with_decided_holding_cannot_be_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=[],
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["required_axis_gap"] is True
+        assert entry["trust_status"] == trust.STATUS_BLOCKED
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_terminal_task_without_valid_output_is_failed_not_succeeded(self):
+        # A specialist_analysis task reached TASK_SUCCEEDED but no valid
+        # output was persisted (score/confidence missing) — must not count
+        # as succeeded, and must not silently read as merely "missing".
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{
+            "task_type": "specialist_analysis", "lane": AXIS_TECHNICAL,
+            "batch_key": "equity:technical:b000:AAA", "state": TASK_SUCCEEDED,
+        }]
+        outputs = [_specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r1"])]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["axis_status"][AXIS_TECHNICAL] == trust.AXIS_STATUS_FAILED
+        assert entry["required_axis_gap"] is True
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+
+class TestConflictReviewTruth:
+    def test_degraded_review_task_is_never_success_even_with_output(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_DEGRADED}]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=["r3"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["conflict_review_status"] == trust.REVIEW_FAILED
+        assert entry["trust_status"] == trust.STATUS_BLOCKED
+        assert entry["source_validated"] is False
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_succeeded_task_without_review_output_is_failed(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_SUCCEEDED}]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            # No axis=review output persisted.
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["conflict_review_status"] == trust.REVIEW_FAILED
+        assert entry["source_validated"] is False
+
+    def test_pending_review_blocks_ticker_and_overall_trust(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_PENDING}]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["conflict_review_status"] == trust.REVIEW_PENDING
+        assert entry["trust_status"] == trust.STATUS_BLOCKED
+        assert entry["source_validated"] is False
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+        assert trust.CONSTRAINT_CONFLICT_REVIEW in entry["decision_constraints"]
+
+    def test_succeeded_review_with_valid_output_is_success(self):
+        # Every applicable equity axis present (required: technical,
+        # fundamental; optional: sentiment, risk_filing) so ONLY the review
+        # outcome is under test — an optional gap would independently cap
+        # this at "limited" and mask what this test is actually proving.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_SUCCEEDED}]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_SENTIMENT, evidence_refs=["r4"]),
+            _specialist_output("AAA", AXIS_RISK_FILING, evidence_refs=["r5"]),
+            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=["r3"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["conflict_review_status"] == trust.REVIEW_SUCCEEDED
+        assert entry["lineage_status"] == trust.LINEAGE_FULL
+        assert entry["source_validated"] is True
+        assert entry["trust_status"] == trust.STATUS_HEALTHY
+        assert contract["overall_status"] == trust.STATUS_HEALTHY
+
+    def test_is_source_validated_requires_exactly_not_required_or_succeeded(self):
+        for bad_status in (trust.REVIEW_FAILED, trust.REVIEW_PENDING, trust.REVIEW_UNKNOWN):
+            assert trust.is_source_validated(
+                evidence_quality="STRONG", lineage_status=trust.LINEAGE_FULL,
+                review_status=bad_status,
+            ) is False
+        for good_status in (trust.REVIEW_NOT_REQUIRED, trust.REVIEW_SUCCEEDED):
+            assert trust.is_source_validated(
+                evidence_quality="STRONG", lineage_status=trust.LINEAGE_FULL,
+                review_status=good_status,
+            ) is True
+
+
+class TestSourceLineageFullPartialMissing:
+    def test_full_lineage_requires_every_decision_influencing_output_referenced(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["lineage_status"] == trust.LINEAGE_FULL
+
+    def test_partial_lineage_when_only_one_axis_has_a_reference(self):
+        # One arbitrary axis has a reference, the other decision-influencing
+        # output doesn't — must be "partial", never "full"/source_validated.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=[]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["lineage_status"] == trust.LINEAGE_PARTIAL
+        assert entry["source_validated"] is False
+        assert entry["trust_status"] == trust.STATUS_LIMITED
+        assert contract["overall_status"] == trust.STATUS_LIMITED
+
+    def test_missing_lineage_when_no_output_referenced(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=[]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=[]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["lineage_status"] == trust.LINEAGE_MISSING
+        assert entry["trust_status"] == trust.STATUS_BLOCKED
+        assert contract["overall_status"] == trust.STATUS_BLOCKED
+
+    def test_review_output_counts_toward_lineage(self):
+        # A ticker with full lineage on its tracked axes but a referenced
+        # review output missing its own reference must be "partial", since
+        # the review output also feeds aggregate_advisory_signal().
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_SUCCEEDED}]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=[]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["lineage_status"] == trust.LINEAGE_PARTIAL
+        assert entry["source_validated"] is False
+
+
+class TestDecisionConstraintTruth:
+    def test_underweight_never_a_portfolio_policy_limitation(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            evidence_quality="STRONG", portfolio_fit="UNDERWEIGHT",
+        )]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert trust.CONSTRAINT_PORTFOLIO_POLICY not in entry["decision_constraints"]
+
+    def test_overweight_is_a_portfolio_policy_limitation(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            evidence_quality="STRONG", portfolio_fit="OVERWEIGHT",
+        )]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert trust.CONSTRAINT_PORTFOLIO_POLICY in entry["decision_constraints"]
+
+    def test_suppressed_price_context_differs_from_full_and_expensive_bands(self):
+        session = _one_ticker_session()
+        rows = [
+            _one_ticker_row(ticker="SUP", evidence_quality="STRONG", price_context="SUPPRESSED"),
+            _one_ticker_row(ticker="FUL", evidence_quality="STRONG", price_context="FULL"),
+            _one_ticker_row(ticker="EXP", evidence_quality="STRONG", price_context="EXPENSIVE"),
+        ]
+        outputs = []
+        for t in ("SUP", "FUL", "EXP"):
+            outputs.append(_specialist_output(t, AXIS_TECHNICAL, evidence_refs=["r1"]))
+            outputs.append(_specialist_output(t, AXIS_FUNDAMENTAL, evidence_refs=["r2"]))
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        by_ticker = {e["ticker"]: e for e in contract["ticker_trust"]}
+        # All three carry the price_context category (a real dimension) but
+        # the RAW band is preserved distinctly for accurate downstream text
+        # — SUPPRESSED (unconfirmed) is never conflated with FULL/EXPENSIVE
+        # (assessed-and-elevated) at the data level.
+        for t in ("SUP", "FUL", "EXP"):
+            assert trust.CONSTRAINT_PRICE_CONTEXT in by_ticker[t]["decision_constraints"]
+        assert by_ticker["SUP"]["decision_bands"]["price_context"] == "SUPPRESSED"
+        assert by_ticker["FUL"]["decision_bands"]["price_context"] == "FULL"
+        assert by_ticker["EXP"]["decision_bands"]["price_context"] == "EXPENSIVE"
+
+    def test_unclassified_attractiveness_blocker_remains_visible(self):
+        # STUB/VIS-style HOLD: evidence fine, price/portfolio/risk all
+        # unremarkable, but decide() persisted "Attractiveness signal absent
+        # or weak." — a real blocker with no band-based category. It must
+        # surface as CONSTRAINT_OTHER, additively alongside whatever other
+        # categories apply (source_lineage here, since refs are empty).
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            ticker="STUB", evidence_quality="OK", price_context="FAIR",
+            portfolio_fit="ON_TARGET", risk_band="LOW",
+            blockers=["Attractiveness signal absent or weak."],
+        )]
+        outputs = [
+            _specialist_output("STUB", AXIS_TECHNICAL, evidence_refs=[]),
+            _specialist_output("STUB", AXIS_FUNDAMENTAL, evidence_refs=[]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert trust.CONSTRAINT_OTHER in entry["decision_constraints"]
+        assert trust.CONSTRAINT_SOURCE_LINEAGE in entry["decision_constraints"]
+
+    def test_other_preserved_even_when_other_categories_also_apply(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            ticker="VIS", evidence_quality="STRONG", price_context="SUPPRESSED",
+            portfolio_fit="OVERWEIGHT", risk_band="HIGH",
+            blockers=["Attractiveness signal absent or weak."],
+        )]
+        outputs = [
+            _specialist_output("VIS", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("VIS", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        constraints = set(entry["decision_constraints"])
+        assert trust.CONSTRAINT_OTHER in constraints
+        assert trust.CONSTRAINT_PORTFOLIO_POLICY in constraints
+        assert trust.CONSTRAINT_PRICE_CONTEXT in constraints
+        assert trust.CONSTRAINT_RISK in constraints

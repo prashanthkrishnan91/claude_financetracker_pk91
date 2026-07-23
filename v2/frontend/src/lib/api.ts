@@ -488,11 +488,32 @@ export interface IntelV3HeldCard {
      * so a suppressed price context or a portfolio-policy constraint is never
      * relabeled "Evidence blocked".
      */
-    source_lineage?: { has_source_refs: boolean } | null;
-    /** "not_required" | "succeeded" | "failed" | "pending" */
+    /** ``status`` is authoritative (full/partial/missing/unknown — full
+     * required for source_validated); ``has_source_refs`` is a legacy
+     * convenience boolean (true only when status is "full"). */
+    source_lineage?: { status: "full" | "partial" | "missing" | "unknown"; has_source_refs: boolean } | null;
+    /** "not_required" | "succeeded" | "failed" | "pending" | "unknown"
+     * ("unknown" only from the fail-closed read-time overlay — never claims
+     * "not_required" when the underlying task rows couldn't be read). */
     conflict_review_status?: string | null;
     /** Deterministic categories: evidence_quality | source_lineage | price_context | portfolio_policy | risk | conflict_review | other */
     decision_constraints?: string[] | null;
+    /** Per-ticker trust_status from run_trust_contract_v1.ticker_trust
+     * (healthy/limited/blocked/unknown) — NOT the unrelated top-level
+     * IntelV3SnapshotDiagnostics.trust_status (trusted/partial_trust/
+     * uncertified) below. The authoritative source for portfolio-summary
+     * bucketing so the Advisor summary, cards and drawer always agree. */
+    trust_status?: "healthy" | "limited" | "blocked" | "not_applicable" | "unknown" | null;
+    /** Raw persisted decision bands — used only to pick band-accurate
+     * wording (e.g. SUPPRESSED vs FULL/EXPENSIVE price context), never a
+     * second source of trust-status truth. */
+    decision_bands?: {
+      evidence_quality?: string | null;
+      price_context?: string | null;
+      portfolio_fit?: string | null;
+      risk_band?: string | null;
+      attractiveness?: string | null;
+    } | null;
     /** Stage 9I — asset intelligence context from composer. Explanatory only; never overrides visible action. */
     asset_intelligence_context?: {
       role_lens: string;
@@ -538,11 +559,21 @@ export interface IntelV3SessionCoverage {
  * persisted" is never treated as synonymous with "analysis trusted" —
  * overall_status can be "blocked" even when session_coverage is complete. */
 export interface IntelV3RunTrustAxisCoverage {
+  /** Aggregate (required + optional) — kept for chips that don't need the split. */
   expected_count: number;
   succeeded_count: number;
   missing_count: number;
   failed_count: number;
   not_applicable_count: number;
+  /** Required-vs-optional split — the authority for overall_status. */
+  required_expected_count: number;
+  required_succeeded_count: number;
+  required_missing_count: number;
+  required_failed_count: number;
+  optional_expected_count: number;
+  optional_succeeded_count: number;
+  optional_missing_count: number;
+  optional_failed_count: number;
 }
 
 export interface IntelV3RunTrustConflictReviewCoverage {
@@ -559,19 +590,40 @@ export interface IntelV3RunTrustConflictReviewCoverage {
 export interface IntelV3RunTrustSourceLineage {
   outputs_with_source_refs: number;
   outputs_missing_source_refs: number;
+  /** Back-compat: any-lineage-anywhere ticker lists. */
   tickers_with_lineage: string[];
   tickers_missing_lineage: string[];
+  /** Explicit full/partial/missing ticker lists — the authority. */
+  tickers_full_lineage: string[];
+  tickers_partial_lineage: string[];
+  tickers_missing_lineage_full: string[];
+}
+
+export interface IntelV3RunTrustDecisionBands {
+  evidence_quality: string | null;
+  price_context: string | null;
+  portfolio_fit: string | null;
+  risk_band: string | null;
+  attractiveness: string | null;
 }
 
 export interface IntelV3RunTrustTickerEntry {
   ticker: string;
   state: string;
+  /** healthy/limited/blocked/unknown — the authority the Advisor summary,
+   * holding cards and drawer all read (never a second, independently-
+   * computed frontend heuristic). */
+  trust_status: "healthy" | "limited" | "blocked" | "unknown";
   axis_status: Record<string, string>;
   axis_readiness: Record<string, string>;
+  required_axis_gap: boolean;
+  optional_axis_gap: boolean;
   conflict_review_status: string;
-  has_source_lineage: boolean;
+  /** full | partial | missing */
+  lineage_status: "full" | "partial" | "missing";
   source_validated: boolean;
   decision_constraints: string[];
+  decision_bands: IntelV3RunTrustDecisionBands;
 }
 
 export interface IntelV3RunTrustContract {

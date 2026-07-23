@@ -132,9 +132,13 @@ class TestGoldenRun:
         assert recorder.tickers_called() == set(GOLDEN_34)
 
         # ── EXACT LLM accounting: each (ticker, axis) analyzed exactly once ──
+        # `_make_supervisor` leaves intel_v3_distributed_specialist_model at
+        # its default (Haiku), so the scheduler chunks specialist batches at
+        # intel_v3_distributed_haiku_max_specialist_batch (2), not the
+        # unrelated intel_v3_distributed_max_specialist_batch=5 ceiling.
         analyzed: dict[str, list[str]] = {}
         for call in llm.calls:
-            assert len(call["tickers"]) <= 5, "batch size exceeded"
+            assert len(call["tickers"]) <= 2, "Haiku batch size exceeded"
             for ticker in call["tickers"]:
                 analyzed.setdefault(call["axis"], []).append(ticker)
         for axis, tickers in analyzed.items():
@@ -152,8 +156,9 @@ class TestGoldenRun:
         assert sorted(analyzed["crypto_market"]) == sorted(GOLDEN_CRYPTO)
         assert "risk_filing" not in analyzed  # no SEC evidence → no LLM call
         assert "review" not in analyzed       # aligned outputs → no review
-        # Exact batching: ceil(28/5)*3 + 1*3 + 1 = 22 total LLM calls.
-        assert len(llm.calls) == 22
+        # Exact batching at the Haiku cap: ceil(28/2)*3 + ceil(4/2)*3 + ceil(2/2)*1
+        # = 42 + 6 + 1 = 49 total LLM calls.
+        assert len(llm.calls) == 49
 
         # ── Batches were asset-compatible ────────────────────────────────────
         for task in client.rows("intel_run_tasks"):
@@ -184,7 +189,7 @@ class TestGoldenRun:
         # ── Cost metrics persisted ───────────────────────────────────────────
         metrics = session["metrics"]
         assert metrics["provider_calls"] == expected_calls
-        assert metrics["llm_calls"] == 22
+        assert metrics["llm_calls"] == 49
         assert passes < 30
 
 

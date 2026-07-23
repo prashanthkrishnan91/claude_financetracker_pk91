@@ -512,6 +512,14 @@ class Settings(BaseSettings):
     intel_v3_distributed_task_lease_seconds: int = 300
     intel_v3_distributed_max_task_attempts: int = 3
 
+    # Haiku-specific specialist batch cap. Standard specialist analysis routes
+    # to Haiku (see intel_v3_distributed_specialist_model below) — a smaller
+    # per-call ticker count keeps compact-JSON output reliable at bounded
+    # token budgets. This only ever narrows the batch further; it can never
+    # exceed intel_v3_distributed_max_specialist_batch, the unrelated
+    # architectural ceiling for any other model.
+    intel_v3_distributed_haiku_max_specialist_batch: int = 2
+
     # Model cost routing (distributed Run Intel ONLY — legacy agent/background-
     # worker LLMClient defaults in services/agents/llm.py are untouched).
     # Standard specialist analysis routes to Haiku with no fallback: a failed

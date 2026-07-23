@@ -101,6 +101,7 @@ class LLMClient:
         metadata: Optional[dict[str, Any]] = None,
         reject_prose: bool = False,
         retry_truncated_response: bool = True,
+        primary_max_attempts: int = 4,
     ) -> dict[str, Any]:
         """Run a single prompt, parse JSON reply, return `{}` on total failure.
 
@@ -137,6 +138,15 @@ class LLMClient:
         truncation is recorded in ``metadata`` exactly as it always was,
         but neither the prompt nor the batch is repeated — `{}` is
         returned immediately for the caller's own repair logic to handle.
+
+        ``primary_max_attempts`` (default 4, legacy behavior): caps the
+        number of actual provider requests (`_single_call`) the PRIMARY
+        model's backoff loop may make for a rate-limit/transient failure
+        before giving up. Callers with their own outer retry authority
+        (e.g. a durable task's retry/backoff) must pass ``1`` so a single
+        `ask_json` call never silently makes more than one actual provider
+        request on transient failure — the caller's own retry loop, not
+        `ask_json`, owns trying again.
         """
         if not self.api_key:
             logger.warning("LLM call skipped — no anthropic_api_key configured")
@@ -151,6 +161,7 @@ class LLMClient:
             user=user,
             max_tokens=max_tokens,
             timeout_s=PRIMARY_TIMEOUT_S,
+            max_attempts=primary_max_attempts,
         )
         if text:
             logger.debug("raw_llm_response_preview model=%s preview=%r", self.model, text[:800])

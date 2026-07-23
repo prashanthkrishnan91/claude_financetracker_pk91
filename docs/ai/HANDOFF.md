@@ -222,12 +222,14 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
 - Distributed Run Intel model cost routing PR (2026-07-22): full backend suite green
   (8467 passed, 0 failed, includes 16 new focused tests); no frontend files changed.
 - Haiku specialist output completion fix PR #484 (2026-07-22): full backend suite green
-  (8498 passed, 0 failed, includes 31 new focused tests in
-  `test_specialist_output_completion_v1.py` — 27 from the initial patch plus 4 from the
-  release-blocker follow-up that counts actual provider requests against a real
-  `LLMClient`; the 34-holding golden run's exact LLM-call accounting moved from 22 to 49
-  calls to reflect the new default 2-ticker Haiku batch cap, same complete coverage); no
-  frontend files changed; no SQL.
+  (8500 passed, 0 failed, includes 33 new focused tests in
+  `test_specialist_output_completion_v1.py` — 27 from the initial patch, 4 from the first
+  release-blocker follow-up (counts actual provider requests against a real `LLMClient`),
+  2 from the second release-blocker follow-up (`primary_max_attempts=1` — a rate-limit/
+  transient failure now costs exactly one real `_single_call()`, not up to 4); the
+  34-holding golden run's exact LLM-call accounting moved from 22 to 49 calls to reflect
+  the new default 2-ticker Haiku batch cap, same complete coverage); no frontend files
+  changed; no SQL.
 
 ## SQL / env state
 
@@ -303,6 +305,23 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   ticker-level malformed JSON, and an already-validated peer ticker is never
   discarded or re-requested. 4 new tests use a REAL `LLMClient` with only
   `_single_call()` stubbed (never `ask_json()`) to count actual provider requests.
+  **Second release-blocker follow-up (same PR #484):** `retry_truncated_response=False`
+  closed the hidden truncation retry, but `_call_with_backoff`'s own `max_attempts`
+  still defaulted to 4 — a rate-limit/transient failure on one specialist `ask_json()`
+  call could still cost up to 4 actual `_single_call()` provider requests internally
+  before returning, since the prior rate-limit test only asserted the wrapper-level
+  `outcome.llm_calls == 1` and never counted real `_single_call()` invocations.
+  `ask_json()` gained `primary_max_attempts: int = 4` (legacy default, threaded into
+  the primary `_call_with_backoff(..., max_attempts=primary_max_attempts)` call only —
+  the truncation-retry and fallback-model backoff calls are untouched); specialist
+  calls now pass `primary_max_attempts=1`, so ANY provider-level failure (quota/auth,
+  rate-limit, transient, timeout) costs exactly one actual provider request per
+  `ask_json()` call — the durable task's own retry/backoff owns trying again, never
+  `LLMClient`'s internal loop. 2 more tests prove this: a legacy caller with the
+  default argument still gets up to 4 real backoff attempts, and a quota/auth failure
+  makes exactly 1 real `_single_call()` request (in addition to the existing
+  rate-limit/provider-failure tests, which now also assert the exact `_single_call()`
+  count, not just the wrapper-level `outcome.llm_calls`).
 - Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
   endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
 - `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`

@@ -305,6 +305,7 @@ class TestRestartRecovery:
         async def ask_json_before(
             system, user, max_tokens=1024, normalizer=None, metadata=None,
             reject_prose=False, retry_truncated_response=True,
+            primary_max_attempts=4,
         ):
             if isinstance(metadata, dict):
                 metadata["model_used"] = llm_before.model
@@ -357,6 +358,7 @@ class TestRestartRecovery:
         async def ask_json_after(
             system, user, max_tokens=1024, normalizer=None, metadata=None,
             reject_prose=False, retry_truncated_response=True,
+            primary_max_attempts=4,
         ):
             if isinstance(metadata, dict):
                 metadata["model_used"] = llm_after.model

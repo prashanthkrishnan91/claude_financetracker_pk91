@@ -415,6 +415,13 @@ async def execute_specialist_task(
             # double an already-budgeted call, invisible to outcome.llm_calls
             # and to the ≤3-calls-per-two-ticker-task bound).
             retry_truncated_response=False,
+            # The DURABLE task's own retry/backoff owns retrying a transport
+            # failure (rate-limit/timeout/transient/quota/auth) — a single
+            # ask_json() call must cost exactly one actual provider call,
+            # never LLMClient's own internal 4-attempt backoff loop, or a
+            # single specialist call could burn up to 4 provider calls
+            # before the specialist-level provider-failure guard even runs.
+            primary_max_attempts=1,
         )
         model_used = call_meta.get("model_used")
         if model_used:

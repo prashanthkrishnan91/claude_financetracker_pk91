@@ -267,7 +267,8 @@ class TestPartialSuccessAndScopedRepair:
         async def flaky_ask_json(self, system, user, max_tokens=1024,
                                   normalizer=None, metadata=None,
                                   reject_prose=False,
-                                  retry_truncated_response=True):
+                                  retry_truncated_response=True,
+                                  primary_max_attempts=4):
             state["n"] += 1
             if state["n"] == 1:
                 # Initial batch call: both tickers missing/truncated.
@@ -281,6 +282,7 @@ class TestPartialSuccessAndScopedRepair:
                 self, system, user, max_tokens=max_tokens, normalizer=normalizer,
                 metadata=metadata, reject_prose=reject_prose,
                 retry_truncated_response=retry_truncated_response,
+                primary_max_attempts=primary_max_attempts,
             )
 
         monkeypatch.setattr(FakeLLM, "ask_json", flaky_ask_json)
@@ -690,6 +692,12 @@ class TestProviderFailureRepairGuard:
             "ticker-level repair call"
         )
         assert outcome.llm_calls == 1
+        assert len(stub.calls) == 1, (
+            "a specialist ask_json() call must cost exactly ONE actual "
+            "provider request on a rate-limit/transient failure — "
+            "primary_max_attempts=1 hands retry authority to the durable "
+            "task, not LLMClient's own 4-attempt backoff loop"
+        )
         assert outcome.quota_or_auth_failures == 0
         assert outcome.error == "specialist_provider_call_failed"
         assert outcome.final_state == store.TASK_FAILED_RETRYABLE
@@ -729,6 +737,11 @@ class TestProviderFailureRepairGuard:
         assert outcome.malformed == ["MSFT"]
         assert outcome.repair_calls == 1
         assert outcome.llm_calls == 2
+        assert len(stub.calls) == 2, (
+            "exactly two actual provider requests total: the initial batch "
+            "call plus ONE failed repair attempt — primary_max_attempts=1 "
+            "means the failed repair never retries internally"
+        )
         assert outcome.error is None
         assert outcome.final_state == TASK_DEGRADED
         assert outcome.quota_or_auth_failures == 0
@@ -736,3 +749,59 @@ class TestProviderFailureRepairGuard:
         # MSFT repair's (failing) provider calls.
         for call in stub.calls[1:]:
             assert "AAPL" not in call["user"]
+
+    @pytest.mark.asyncio
+    async def test_quota_failure_makes_exactly_one_actual_provider_request(
+        self, monkeypatch
+    ):
+        client = FakeSupabase()
+        await _session_with_ready_bundles(client, monkeypatch, ["AAPL"])
+        session = client.rows("intel_run_sessions")[0]
+        scheduler.run_scheduler_pass(client, session=session)
+        task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_SPECIALIST_ANALYSIS
+            and t["lane"] == AXIS_FUNDAMENTAL
+        )
+        task = claim_task_row(client, task)
+
+        stub = _SingleCallStub([
+            Exception("authentication_error: insufficient_quota, credit balance too low"),
+        ])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        outcome = await execute_specialist_task(client, task=task, llm=llm)
+
+        assert len(stub.calls) == 1, (
+            "a quota/authentication failure must never be retried against "
+            "the same model — exactly one actual provider request"
+        )
+        assert outcome.repair_calls == 0
+        assert outcome.quota_or_auth_failures == 1
+        assert outcome.error == "specialist_provider_quota_or_auth_failure"
+        assert outcome.final_state == store.TASK_FAILED_RETRYABLE
+
+
+class TestLegacyCallerRetainsDefaultBackoff:
+    """`primary_max_attempts` defaults to 4 (legacy behavior) — only
+    distributed specialists opt into `primary_max_attempts=1`."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_default_keeps_multiple_backoff_attempts(
+        self, monkeypatch
+    ):
+        _patch_fast_backoff(monkeypatch)
+        stub = _SingleCallStub([
+            Exception("rate_limit_error: rate limited, slow down"),
+        ])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        result = await llm.ask_json("system", "user prompt", max_tokens=1000)
+
+        assert result == {}
+        assert len(stub.calls) == 4, (
+            "a legacy caller that does not pass primary_max_attempts must "
+            "retain the existing 4-attempt same-model backoff loop"
+        )

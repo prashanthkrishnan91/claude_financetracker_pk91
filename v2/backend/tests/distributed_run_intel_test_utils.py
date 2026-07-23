@@ -346,6 +346,7 @@ class FakeLLM:
         self, system: str, user: str, max_tokens: int = 1024,
         normalizer: Any = None, metadata: Optional[dict] = None,
         reject_prose: bool = False, retry_truncated_response: bool = True,
+        primary_max_attempts: int = 4,
     ) -> dict[str, Any]:
         axis = str((metadata or {}).get("axis") or "unknown")
         tickers = re.findall(r"Analyze these tickers: ([A-Z0-9+, .]+)\.", user)

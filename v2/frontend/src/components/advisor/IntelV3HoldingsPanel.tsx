@@ -322,12 +322,23 @@ function EvidenceSummaryBand({
             {sentiment.label}
           </span>
         </div>
-        {(!technicalUsable || !sentimentUsable) && (
+        {trustUnknown ? (
+          // Fail-closed read/reverification failure — we do NOT know that
+          // signals are merely thin, that fundamentals were reverified, or
+          // that the only impact is a confidence cap. Never reuse the
+          // established-thin-signal copy below for this state.
           <p className="text-[10px] text-text-muted leading-snug max-w-md">
-            The engine is conservative when supporting signals are thin. Recommendations
-            still reflect company fundamentals — missing signals cause confidence caps,
-            not false confidence.
+            Evidence-source status could not be re-verified. Support claims
+            are withheld until the durable run data can be read again.
           </p>
+        ) : (
+          (!technicalUsable || !sentimentUsable) && (
+            <p className="text-[10px] text-text-muted leading-snug max-w-md">
+              The engine is conservative when supporting signals are thin. Recommendations
+              still reflect company fundamentals — missing signals cause confidence caps,
+              not false confidence.
+            </p>
+          )
         )}
       </div>
     </div>

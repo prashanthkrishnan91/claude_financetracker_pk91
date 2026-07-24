@@ -224,6 +224,13 @@ def _axis_supplied_lanes(compact: dict[str, Any], axis: str) -> list[str]:
             supplied.add(LANE_SEC_COMPANY_FACTS)
         if _nonempty(sec.get(LANE_SEC_CATALYST)):
             supplied.add(LANE_SEC_CATALYST)
+    # AXIS_SENTIMENT carries SEC catalyst evidence in its own compact
+    # ``catalysts`` list rather than the ``sec`` dict (contract §2) — a
+    # substantive catalyst artifact there must count as SEC_CATALYST being
+    # supplied to this axis exactly as it would via the ``sec`` dict path.
+    catalysts = compact.get("catalysts")
+    if isinstance(catalysts, list) and any(_nonempty(c) for c in catalysts):
+        supplied.add(LANE_SEC_CATALYST)
     asset_specific = compact.get("asset_specific")
     if isinstance(asset_specific, dict):
         if _nonempty(asset_specific.get("etf_fund_data")):
@@ -271,19 +278,21 @@ def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
 
 
 def _payload_only(value: Any) -> Any:
-    """Drop artifact envelope noise, keep payload substance (bounded)."""
+    """Drop artifact envelope noise (internal storage identifiers such as
+    ``artifact_id``/``artifact_type``/``skill_pack``), keep payload substance
+    (bounded) — wherever an artifact-summary shape (a dict carrying a
+    ``payload`` key) appears: directly, nested inside a dict (e.g. the
+    per-lane ``sec``/``asset_specific`` maps), or as an item inside a list
+    (e.g. the ``catalysts`` list). Never sends internal artifact/database
+    identifiers to the specialist prompt."""
     if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if isinstance(item, dict) and "payload" in item:
-                out[key] = {
-                    "generated_at": item.get("generated_at"),
-                    "trust_level": item.get("trust_level"),
-                    "payload": item.get("payload"),
-                }
-            else:
-                out[key] = item
-        return out
+        if "payload" in value:
+            return {
+                "generated_at": value.get("generated_at"),
+                "trust_level": value.get("trust_level"),
+                "payload": value.get("payload"),
+            }
+        return {key: _payload_only(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_payload_only(v) for v in value][:3]
     return value
@@ -721,31 +730,13 @@ async def execute_review_task(
     # missing lanes + a bounded source projection), but is never asked to
     # invent or select a citation; the persisted review lineage below is
     # built deterministically from the same re-validated manifests, never
-    # from anything the LLM returns. Each input's manifest is independently
-    # re-derived (never trusted from its own persisted status) via
-    # ``parse_axis_manifest``.
-    prompt_outputs = []
-    for item in reviewed_inputs:
-        axis_name = item.get("axis")
-        manifest = source_lineage_v1.parse_axis_manifest(
-            item.get("evidence_refs"), expected_axis=axis_name, expected_ticker=ticker,
-        )
-        prompt_outputs.append({
-            "axis": axis_name,
-            "stance": item.get("stance"),
-            "score": item.get("score"),
-            "confidence": item.get("confidence"),
-            "key_findings": item.get("key_findings"),
-            "risks": item.get("risks"),
-            "lineage_status": (
-                manifest["status"] if manifest else source_lineage_v1.LINEAGE_MISSING
-            ),
-            "linked_lanes": manifest["linked_lanes"] if manifest else [],
-            "missing_ref_lanes": manifest["missing_ref_lanes"] if manifest else [],
-            "evidence_sources": source_lineage_v1.compact_projection(
-                manifest["refs"] if manifest else []
-            ),
-        })
+    # from anything the LLM returns. ONE normalized, bounded object drives
+    # BOTH the LLM prompt and the audit fingerprint (contract §5) — each
+    # input's manifest is independently re-derived (never trusted from its
+    # own persisted status) inside ``build_review_prompt_context``.
+    prompt_outputs = source_lineage_v1.build_review_prompt_context(
+        reviewed_inputs, ticker=ticker,
+    )
 
     outcome.llm_calls += 1
     call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}

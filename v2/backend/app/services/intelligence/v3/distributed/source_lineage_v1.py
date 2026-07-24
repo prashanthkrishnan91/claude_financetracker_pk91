@@ -90,6 +90,15 @@ _VOLATILE_OUTPUT_KEYS = frozenset({"as_of", "cache_hit"})
 MAX_REFS_PER_LANE = 8
 MAX_REFS_PER_MANIFEST = 24
 MAX_FREE_TEXT_CHARS = 200
+# Sanity ceiling for a persisted truncated_ref_count — real values are always
+# small (bounded by MAX_REFS_PER_LANE * lane count); anything absurdly large
+# is forged/corrupted, not a legitimate truncation count.
+_MAX_REASONABLE_TRUNCATED_REF_COUNT = 10_000
+# Same per-list cap the review prompt/system contract enforces
+# (specialist_agents_v1.SPECIALIST_SYSTEM_PROMPT) — the review reconciles
+# ALREADY-bounded specialist findings/risks, so the prompt/fingerprint view
+# applies the identical cap rather than a second, driftable one.
+_MAX_PROMPT_LIST_ITEMS = 2
 
 # Axis -> lanes that axis's compact prompt bundle actually reads (mirrors
 # specialist_agents_v1._compact_bundle_for_axis). Every axis's compact bundle
@@ -277,22 +286,6 @@ def bound_references(
     return deduped[:limit], len(deduped) - limit
 
 
-def compact_projection(
-    refs: Optional[list[dict[str, Any]]], *, limit: int = 8,
-) -> list[dict[str, Any]]:
-    """Bounded, prompt-safe projection: identity fields only, no payload —
-    never asks the LLM to invent or select a citation, only to see what
-    already backs its evidence. Never includes a source URL/excerpt."""
-    return [
-        {
-            "lane": ref.get("lane"),
-            "ref_type": ref.get("ref_type"),
-            "provider": ref.get("provider"),
-        }
-        for ref in dedupe_references(refs)[:limit]
-    ]
-
-
 def _sanitize_source_url(url: Any) -> Optional[str]:
     """Scheme+host+path only — drops query strings/fragments that may carry
     volatile tokens, so a stable document keeps a stable identity."""
@@ -305,6 +298,53 @@ def _sanitize_source_url(url: Any) -> Optional[str]:
         return _cap(f"{parts.scheme}://{parts.netloc}{parts.path}")
     except Exception:
         return None
+
+
+def _identity_token_for_ref(ref: dict[str, Any]) -> Optional[str]:
+    """A bounded, stable per-reference identity token for the prompt-safe
+    projection — never a raw URL/excerpt/secret. For an artifact source,
+    derived from whichever real external identity is available
+    (source_id > source_hash > sanitized source_url); two DIFFERENT external
+    filings under the same provider/lane always produce different tokens.
+    For a non-price provider observation, derived from ``output_digest`` (a
+    genuine evidence change changes the token). For the PRICE lane, no token
+    is produced at all — provider/lane identification is enough, so an
+    ordinary intraday tick never defeats reuse."""
+    if ref.get("ref_type") == REF_TYPE_RESEARCH_ARTIFACT_SOURCE:
+        raw = ref.get("source_id") or ref.get("source_hash") or _sanitize_source_url(
+            ref.get("source_url")
+        )
+        if not raw:
+            return None
+        return stable_fingerprint(str(raw))[:24]
+    if ref.get("ref_type") == REF_TYPE_PROVIDER_OBSERVATION:
+        if ref.get("lane") == LANE_PRICE:
+            return None
+        digest = ref.get("output_digest")
+        return stable_fingerprint(str(digest))[:24] if digest else None
+    return None
+
+
+def compact_projection(
+    refs: Optional[list[dict[str, Any]]], *, limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Bounded, prompt-safe projection: identity fields only, no payload —
+    never asks the LLM to invent or select a citation, only to see what
+    already backs its evidence. Never includes a source URL/excerpt/secret;
+    ``identity_token`` (when derivable) lets a reader recognize the SAME
+    underlying source across sessions without seeing its raw identity."""
+    out = []
+    for ref in dedupe_references(refs)[:limit]:
+        entry: dict[str, Any] = {
+            "lane": ref.get("lane"),
+            "ref_type": ref.get("ref_type"),
+            "provider": ref.get("provider"),
+        }
+        token = _identity_token_for_ref(ref)
+        if token:
+            entry["identity_token"] = token
+        out.append(entry)
+    return out
 
 
 def source_identity_projection(ref: dict[str, Any]) -> dict[str, Any]:
@@ -365,11 +405,31 @@ def fingerprint_source_refs(
 
 
 def _is_unique_list_of(values: Any, allowed: frozenset) -> bool:
+    """Fail closed for ANY malformed shape — never raises. A dict/list/None
+    element (unhashable, or simply not a valid member) makes the whole list
+    invalid rather than crashing the caller."""
     if not isinstance(values, list):
+        return False
+    if not all(isinstance(v, str) for v in values):
         return False
     if len(values) != len(set(values)):
         return False
     return all(v in allowed for v in values)
+
+
+def _validate_truncated_ref_count(evidence_refs: dict[str, Any]) -> tuple[bool, int]:
+    """Strict validation of a persisted ``truncated_ref_count``: absent/None
+    defaults to 0; booleans, non-ints, negatives and unreasonably large
+    values are all REJECTED (never silently coerced). Returns
+    ``(is_valid, value)``."""
+    raw = evidence_refs.get("truncated_ref_count")
+    if raw is None:
+        return True, 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return False, 0
+    if raw < 0 or raw > _MAX_REASONABLE_TRUNCATED_REF_COUNT:
+        return False, 0
+    return True, raw
 
 
 def _derive_axis_status(
@@ -438,14 +498,21 @@ def _validate_non_review_manifest(
     if expected_axis is not None and axis != expected_axis:
         return None
 
+    # Axis-specific enforcement: every lane this manifest touches must be one
+    # of THIS axis's own candidate lanes — a "technical" manifest can never
+    # legitimately carry a fundamentals/news/SEC lane, a "sentiment" manifest
+    # can never carry technicals/fundamentals, etc. Never the wider
+    # SUPPORTED_LANES set.
+    axis_lane_set = frozenset(AXIS_CANDIDATE_LANES.get(axis, ()))
+
     expected_lanes = evidence_refs.get("expected_lanes")
     linked_lanes = evidence_refs.get("linked_lanes")
     missing_ref_lanes = evidence_refs.get("missing_ref_lanes")
-    if not _is_unique_list_of(expected_lanes, SUPPORTED_LANES):
+    if not _is_unique_list_of(expected_lanes, axis_lane_set):
         return None
-    if not _is_unique_list_of(linked_lanes, SUPPORTED_LANES):
+    if not _is_unique_list_of(linked_lanes, axis_lane_set):
         return None
-    if not _is_unique_list_of(missing_ref_lanes, SUPPORTED_LANES):
+    if not _is_unique_list_of(missing_ref_lanes, axis_lane_set):
         return None
     linked_set, missing_set, expected_set = (
         set(linked_lanes), set(missing_ref_lanes), set(expected_lanes),
@@ -458,9 +525,15 @@ def _validate_non_review_manifest(
     raw_refs = evidence_refs.get("refs")
     if not isinstance(raw_refs, list):
         return None
+    if len(raw_refs) > MAX_REFS_PER_MANIFEST:
+        # Persisted manifests must already be bounded — a manifest claiming
+        # more raw refs than the storage bound allows is malformed.
+        return None
     valid_refs: list[dict[str, Any]] = []
     for ref in raw_refs:
         if not is_valid_reference(ref):
+            return None
+        if ref.get("lane") not in axis_lane_set:
             return None
         if ref.get("lane") not in linked_set:
             return None
@@ -476,10 +549,8 @@ def _validate_non_review_manifest(
     if persisted_status != derived_status:
         return None
 
-    truncated = evidence_refs.get("truncated_ref_count") or 0
-    try:
-        truncated = max(0, int(truncated))
-    except (TypeError, ValueError):
+    truncated_ok, truncated = _validate_truncated_ref_count(evidence_refs)
+    if not truncated_ok:
         return None
 
     return {
@@ -500,17 +571,46 @@ def _validate_review_manifest(
     if evidence_refs.get("axis") != AXIS_REVIEW:
         return None
 
+    # input_axis_lineage is the ONE source of truth for derived_from_axes/
+    # missing_ref_axes/status below — none of those three may be
+    # independently hand-authored; every one is re-derived here and any
+    # persisted disagreement makes the whole manifest malformed.
+    input_axis_lineage = evidence_refs.get("input_axis_lineage")
+    if not isinstance(input_axis_lineage, list) or not input_axis_lineage:
+        return None
+    seen_axes: set[str] = set()
+    normalized_lineage: list[dict[str, str]] = []
+    for entry in input_axis_lineage:
+        if not isinstance(entry, dict):
+            return None
+        entry_axis = entry.get("axis")
+        entry_status = entry.get("status")
+        if entry_axis not in SUPPORTED_AXES:
+            return None
+        if entry_axis in seen_axes:
+            return None
+        if entry_status not in ALL_LINEAGE_STATUSES:
+            return None
+        seen_axes.add(entry_axis)
+        normalized_lineage.append({"axis": entry_axis, "status": entry_status})
+    normalized_lineage.sort(key=lambda e: e["axis"])
+
     derived_from_axes = evidence_refs.get("derived_from_axes")
     missing_ref_axes = evidence_refs.get("missing_ref_axes")
     if not _is_unique_list_of(derived_from_axes, SUPPORTED_AXES) or not derived_from_axes:
         return None
     if not _is_unique_list_of(missing_ref_axes, SUPPORTED_AXES):
         return None
-    if not set(missing_ref_axes).issubset(set(derived_from_axes)):
+    if set(derived_from_axes) != seen_axes:
+        return None
+    expected_missing = {e["axis"] for e in normalized_lineage if e["status"] != LINEAGE_FULL}
+    if set(missing_ref_axes) != expected_missing:
         return None
 
     raw_refs = evidence_refs.get("refs")
     if not isinstance(raw_refs, list):
+        return None
+    if len(raw_refs) > MAX_REFS_PER_MANIFEST:
         return None
     valid_refs: list[dict[str, Any]] = []
     for ref in raw_refs:
@@ -530,21 +630,57 @@ def _validate_review_manifest(
     if persisted_status != derived_status:
         return None
 
-    truncated = evidence_refs.get("truncated_ref_count") or 0
-    try:
-        truncated = max(0, int(truncated))
-    except (TypeError, ValueError):
+    truncated_ok, truncated = _validate_truncated_ref_count(evidence_refs)
+    if not truncated_ok:
         return None
 
     return {
         "schema_version": SCHEMA_VERSION,
         "axis": AXIS_REVIEW,
+        "input_axis_lineage": normalized_lineage,
         "derived_from_axes": sorted(set(derived_from_axes)),
         "missing_ref_axes": sorted(set(missing_ref_axes)),
         "status": derived_status,
         "refs": dedupe_references(valid_refs),
         "truncated_ref_count": truncated,
     }
+
+
+def validate_review_against_current_outputs(
+    review_evidence_refs: Any, *, ticker: str,
+    current_non_review_outputs: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Cross-validates a persisted review manifest against the CURRENT valid
+    non-review specialist outputs for the same ticker (not merely the
+    review's own self-consistent structure). A review claiming it reconciled
+    a different axis set, or a different per-axis lineage status, than what
+    is CURRENTLY true for this ticker is stale/forged — read as missing
+    lineage, never full. ``current_non_review_outputs`` should already be the
+    caller's valid (score+confidence present) output rows for this ticker.
+    """
+    manifest = parse_axis_manifest(
+        review_evidence_refs, expected_axis=AXIS_REVIEW, expected_ticker=ticker,
+    )
+    if manifest is None:
+        return None
+    current_by_axis: dict[str, str] = {}
+    for output in current_non_review_outputs:
+        axis = output.get("axis")
+        if axis not in SUPPORTED_AXES:
+            continue
+        current_by_axis[axis] = output_lineage_status(
+            output.get("evidence_refs"), expected_axis=axis, expected_ticker=ticker,
+        )
+    if set(manifest.get("derived_from_axes") or []) != set(current_by_axis):
+        return None
+    claimed_by_axis = {
+        entry.get("axis"): entry.get("status")
+        for entry in (manifest.get("input_axis_lineage") or [])
+    }
+    for axis, current_status in current_by_axis.items():
+        if claimed_by_axis.get(axis) != current_status:
+            return None
+    return manifest
 
 
 def parse_axis_manifest(
@@ -603,15 +739,20 @@ def build_review_lineage_manifest(
     A review never fabricates a new source — it unions and deduplicates the
     valid external references of every non-review specialist input it
     reconciled (each input's OWN lineage independently re-validated, never
-    trusted from its persisted status). ``full`` only when every reviewed
-    input's own lineage was structurally ``full`` AND at least one valid
-    reference survives bounding.
+    trusted from its persisted status). ``input_axis_lineage`` is the ONE
+    source of truth for ``derived_from_axes``/``missing_ref_axes``/
+    ``status`` — none of those three is independently hand-authored.
+    ``full`` only when every reviewed input's own lineage was structurally
+    ``full`` AND at least one valid reference survives bounding.
     """
-    derived_from_axes = sorted({str(i.get("axis")) for i in reviewed_inputs if i.get("axis")})
-    missing_ref_axes: set[str] = set()
+    input_axis_lineage: list[dict[str, str]] = []
+    seen_axes: set[str] = set()
     all_refs: list[dict[str, Any]] = []
     for item in reviewed_inputs:
         axis = str(item.get("axis") or "")
+        if not axis or axis in seen_axes:
+            continue
+        seen_axes.add(axis)
         manifest = parse_axis_manifest(
             item.get("evidence_refs"),
             expected_axis=axis if axis in SUPPORTED_AXES else None,
@@ -621,8 +762,13 @@ def build_review_lineage_manifest(
         refs = manifest.get("refs") if manifest else []
         if refs:
             all_refs.extend(refs)
-        if status != LINEAGE_FULL and axis:
-            missing_ref_axes.add(axis)
+        input_axis_lineage.append({"axis": axis, "status": status})
+
+    input_axis_lineage.sort(key=lambda e: e["axis"])
+    derived_from_axes = sorted(e["axis"] for e in input_axis_lineage)
+    missing_ref_axes = sorted(
+        e["axis"] for e in input_axis_lineage if e["status"] != LINEAGE_FULL
+    )
 
     refs, truncated = bound_references(all_refs, MAX_REFS_PER_MANIFEST)
     if refs and not missing_ref_axes:
@@ -635,23 +781,83 @@ def build_review_lineage_manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "axis": AXIS_REVIEW,
+        "input_axis_lineage": input_axis_lineage,
         "derived_from_axes": derived_from_axes,
-        "missing_ref_axes": sorted(missing_ref_axes),
+        "missing_ref_axes": missing_ref_axes,
         "status": status,
         "refs": refs,
         "truncated_ref_count": truncated,
     }
 
 
+def build_review_prompt_context(
+    reviewed_inputs: list[dict[str, Any]], *, ticker: str,
+) -> list[dict[str, Any]]:
+    """The ONE normalized, bounded list used for BOTH the review LLM prompt
+    (``json.dumps``) and ``review_input_fingerprint`` — no independent
+    re-sorting or alternate representation anywhere else in the codebase.
+
+    Filters to valid (score+confidence present) non-review inputs, dedupes to
+    one entry per axis, sorted deterministically BY AXIS (so the database's
+    row-return order never affects the prompt or its fingerprint). Each
+    axis's own manifest is independently re-validated here (never trusted
+    from its persisted status). Findings/risks are bounded to the same
+    per-list cap the actual specialist prompt enforces, with their original
+    (semantic) order preserved — never re-sorted.
+    """
+    seen_axes: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in reviewed_inputs:
+        axis = str(item.get("axis") or "")
+        if (
+            not axis or axis in seen_axes
+            or item.get("score") is None or item.get("confidence") is None
+        ):
+            continue
+        seen_axes.add(axis)
+        deduped.append(item)
+
+    context: list[dict[str, Any]] = []
+    for item in sorted(deduped, key=lambda i: str(i.get("axis") or "")):
+        axis = str(item.get("axis") or "")
+        manifest = parse_axis_manifest(
+            item.get("evidence_refs"),
+            expected_axis=axis if axis in SUPPORTED_AXES else None,
+            expected_ticker=ticker,
+        )
+        status = manifest.get("status") if manifest else LINEAGE_MISSING
+        linked_lanes = list(manifest.get("linked_lanes") or []) if manifest else []
+        missing_ref_lanes = list(manifest.get("missing_ref_lanes") or []) if manifest else []
+        refs = manifest.get("refs") if manifest else []
+        findings = [str(f) for f in (item.get("key_findings") or [])][:_MAX_PROMPT_LIST_ITEMS]
+        risks = [str(r) for r in (item.get("risks") or [])][:_MAX_PROMPT_LIST_ITEMS]
+        context.append({
+            "axis": axis,
+            "stance": item.get("stance"),
+            "score": item.get("score"),
+            "confidence": item.get("confidence"),
+            "key_findings": findings,
+            "risks": risks,
+            "lineage_status": status,
+            "linked_lanes": linked_lanes,
+            "missing_ref_lanes": missing_ref_lanes,
+            "evidence_sources": compact_projection(refs),
+        })
+    return context
+
+
 def review_input_fingerprint(
     prompt_inputs: list[dict[str, Any]], *, ticker: str, prompt_version: str,
 ) -> str:
     """Deterministic fingerprint of the EXACT bounded prompt input a review
-    saw (see ``specialist_agents_v1.execute_review_task``) — replaces the
-    previous always-empty ``input_fingerprint`` string. Changes when any
-    reviewed finding, risk, score, confidence, lineage status, missing lane
-    or source identity visible to the review changes; stable to input
-    ORDER (sorted) and to the ticker/prompt_version staying the same.
+    saw (see ``build_review_prompt_context``) — replaces the previous
+    always-empty ``input_fingerprint`` string. Changes when any reviewed
+    finding, risk, score, confidence, lineage status, missing lane or source
+    identity visible to the review changes; stable to input ORDER (the
+    entries are independently re-sorted here too) and to the ticker/
+    prompt_version staying the same. Finding/risk order WITHIN one axis is
+    preserved (never re-sorted) — only DB row order across axes is
+    order-independent.
     """
     normalized = sorted(
         (
@@ -659,13 +865,13 @@ def review_input_fingerprint(
             item.get("stance"),
             item.get("score"),
             item.get("confidence"),
-            tuple(sorted(str(f) for f in (item.get("key_findings") or []))),
-            tuple(sorted(str(r) for r in (item.get("risks") or []))),
+            tuple(str(f) for f in (item.get("key_findings") or [])),
+            tuple(str(r) for r in (item.get("risks") or [])),
             str(item.get("lineage_status") or ""),
             tuple(sorted(item.get("linked_lanes") or [])),
             tuple(sorted(item.get("missing_ref_lanes") or [])),
             tuple(sorted(
-                (s.get("lane"), s.get("ref_type"), s.get("provider"))
+                (s.get("lane"), s.get("ref_type"), s.get("provider"), s.get("identity_token"))
                 for s in (item.get("evidence_sources") or [])
             )),
         )

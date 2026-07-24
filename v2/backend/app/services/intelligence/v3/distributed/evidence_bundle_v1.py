@@ -5,11 +5,26 @@ normalized evidence bundle (the ONLY input specialists see) from:
 
   * the frozen ``intel_run_tickers`` scope row;
   * the terminal lane-task outputs (durable ``intel_run_tasks.output``);
-  * owner-scoped, active ``research_artifacts`` payload summaries for
-    artifact-backed lanes;
+  * owner-scoped, active, non-invalidated, contract-matched, substantive
+    ``research_artifacts`` payload summaries for artifact-backed lanes;
   * the session's portfolio/macro context task outputs.
 
 Zero provider calls, zero LLM calls — pure DB reads + normalization.
+
+Two explicit concepts (never conflated):
+
+  * TERMINAL lane outcome — what the collector task itself reported
+    (``states``/``outputs`` below): succeeded/degraded/missing.
+  * EFFECTIVE evidence lanes (``usable_lanes`` on the returned bundle) —
+    lanes whose evidence was actually ESTABLISHED: a terminal success, AND,
+    for artifact-backed lanes, a parent ``research_artifacts`` row that is
+    owned by this bundle's user, correctly scoped, active, not invalidated,
+    matches the lane's own adapter contract (artifact_type/skill_pack/
+    scope_kind), and carries real lane-specific extracted evidence (not
+    merely governance metadata or a zero-observation/zero-catalyst/
+    zero-holdings payload). A terminal success whose artifact fails any of
+    these checks is DEGRADED, not usable — it is never described as
+    evidence supplied to the LLM, and never sources a reference either.
 """
 from __future__ import annotations
 
@@ -23,6 +38,7 @@ from .task_contracts_v1 import (
     LANE_CRYPTO_MARKET,
     LANE_ETF_FUND_DATA,
     LANE_FUNDAMENTALS,
+    LANE_MACRO,
     LANE_NEWS_SENTIMENT,
     LANE_PRICE,
     LANE_SEC_CATALYST,
@@ -45,8 +61,8 @@ logger = logging.getLogger(__name__)
 # own durable task output.
 _ARTIFACT_LANES = (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST, LANE_ETF_FUND_DATA)
 _ARTIFACT_COLUMNS = (
-    "id,user_id,ticker,artifact_type,skill_pack,generated_at,freshness_status,"
-    "confidence_or_trust_level,payload,is_active"
+    "id,user_id,ticker,artifact_type,skill_pack,scope_kind,generated_at,"
+    "freshness_status,confidence_or_trust_level,payload,is_active,invalidated_at"
 )
 _ARTIFACT_SOURCE_COLUMNS = (
     "id,artifact_id,user_id,provider_name,provider_version,source_kind,source_id,"
@@ -85,27 +101,97 @@ def _bulk_read_artifacts(
         return {}
 
 
+def _artifact_contract_for_lane(lane: str) -> Optional[dict[str, Optional[str]]]:
+    """Expected ``{artifact_type, skill_pack, scope_kind}`` for one
+    artifact-backed lane, derived from that lane's OWN existing adapter
+    constants — never a parallel/guessed contract. A None value for one key
+    means that particular check does not apply to this lane."""
+    if lane == LANE_SEC_COMPANY_FACTS:
+        from ...research_workers.sec_companyfacts_adapter_v1 import (
+            _ARTIFACT_TYPE as artifact_type,
+            _SCOPE_KIND as scope_kind,
+            _SKILL_PACK as skill_pack,
+        )
+        return {"artifact_type": artifact_type, "skill_pack": skill_pack, "scope_kind": scope_kind}
+    if lane == LANE_SEC_CATALYST:
+        from ...research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_ARTIFACT_TYPE as artifact_type,
+            SEC_CATALYST_SKILL_PACK as skill_pack,
+            _SCOPE_KIND as scope_kind,
+        )
+        return {"artifact_type": artifact_type, "skill_pack": skill_pack, "scope_kind": scope_kind}
+    if lane == LANE_ETF_FUND_DATA:
+        from ...research_workers.etf_nport_adapter_v1 import (
+            _ARTIFACT_TYPE as artifact_type,
+            _SCOPE_KIND as scope_kind,
+            _SKILL_PACK as skill_pack,
+        )
+        return {"artifact_type": artifact_type, "skill_pack": skill_pack, "scope_kind": scope_kind}
+    if lane == LANE_MACRO:
+        from ...research_workers.fred_macro_adapter_v1 import _SCOPE_KIND as scope_kind
+        return {"artifact_type": None, "skill_pack": None, "scope_kind": scope_kind}
+    return None
+
+
+def _is_substantive_artifact_payload(lane: str, payload: dict[str, Any]) -> bool:
+    """Lane-specific substantive-evidence predicate over the artifact's OWN
+    existing adapter payload shape. Governance-only fields
+    (``source_credibility_assessment``/``contradiction_assessment``/
+    ``evidence_completeness_assessment``/``truth_usability_assessment``) are
+    injected unconditionally onto EVERY artifact by
+    ``ResearchArtifactServiceV1`` regardless of lane, so their presence never
+    counts as substantive lane evidence — only real extracted data does."""
+    if not isinstance(payload, dict) or not payload:
+        return False
+    try:
+        if lane == LANE_SEC_COMPANY_FACTS:
+            return int(payload.get("observation_count") or 0) > 0
+        if lane == LANE_SEC_CATALYST:
+            return int(payload.get("catalyst_count") or 0) > 0
+        if lane == LANE_ETF_FUND_DATA:
+            return int(payload.get("holdings_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _validate_artifact_row(
     row: Optional[dict[str, Any]], *, user_id: str, ticker: Optional[str] = None,
-) -> bool:
-    """Ownership + ticker-scope + substantive-payload gate.
-
-    A task with an artifact_id but no owned/readable/substantive artifact
+    lane: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """Ownership + ticker-scope + active + not-invalidated + adapter-contract
+    + substantive-payload gate. Returns ``(is_effective, degraded_reason)`` —
+    reason is a bounded, deterministic string identifying WHY validation
+    failed (None when it passed). A task with an artifact_id but a failing
     parent must never be described as evidence supplied to the LLM, and
     never source either a display summary or a source reference.
     ``ticker=None`` means the artifact is portfolio-scope (macro) — no
     per-ticker check applies.
     """
     if not row:
-        return False
+        return False, "artifact_missing"
     if str(row.get("user_id") or "") != str(user_id or ""):
-        return False
+        return False, "artifact_wrong_user"
     if row.get("is_active") is False:
-        return False
+        return False, "artifact_inactive"
+    if row.get("invalidated_at"):
+        return False, "artifact_invalidated"
     if ticker is not None and str(row.get("ticker") or "").upper() != str(ticker).upper():
-        return False
+        return False, "artifact_wrong_ticker"
+    contract = _artifact_contract_for_lane(lane) if lane else None
+    if contract:
+        if contract.get("scope_kind") and row.get("scope_kind") != contract["scope_kind"]:
+            return False, "artifact_wrong_scope"
+        if contract.get("artifact_type") and row.get("artifact_type") != contract["artifact_type"]:
+            return False, "artifact_wrong_type"
+        if contract.get("skill_pack") and row.get("skill_pack") != contract["skill_pack"]:
+            return False, "artifact_wrong_skill_pack"
     payload = row.get("payload")
-    return isinstance(payload, dict) and bool(payload)
+    if not isinstance(payload, dict) or not payload:
+        return False, "artifact_empty_payload"
+    if lane and not _is_substantive_artifact_payload(lane, payload):
+        return False, "artifact_not_substantive"
+    return True, None
 
 
 def _artifact_summary_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -155,8 +241,11 @@ def _bulk_read_artifact_sources(
 # Volatile keys stripped recursively from the fingerprint source: timestamps
 # and cache markers change on every fetch even when the analytical substance
 # is identical, and would make cross-session LLM reuse (contract §14) dead.
+# ``artifact_id`` is an internal storage locator (see ``_artifact_summary_from_row``)
+# — replacing one internal artifact row with another that carries the SAME
+# external evidence must never change the fingerprint.
 _VOLATILE_FINGERPRINT_KEYS = frozenset(
-    {"as_of", "cache_hit", "generated_at", "fetched_at", "task_id", "observed_at"}
+    {"as_of", "cache_hit", "generated_at", "fetched_at", "task_id", "observed_at", "artifact_id"}
 )
 
 
@@ -175,13 +264,14 @@ def _strip_volatile(value):
 def _fingerprint_source(bundle: dict[str, Any]) -> dict[str, Any]:
     """The analytically-significant subset of the bundle.
 
-    Excluded: session identity, timestamps/cache markers (recursively), the
-    intraday `market` price section (its 15-minute TTL would invalidate every
-    fingerprint immediately — the technical lane's daily history carries the
-    price signal specialists reason over), mark-to-market portfolio values,
-    and the RAW source-reference structures (they carry internal replay
-    locators — task_id/artifact_id/artifact_source_id — and, for the price
-    lane, a digest of the volatile intraday price itself; see
+    Excluded: session identity, timestamps/cache markers AND internal
+    storage identifiers (recursively — see ``_VOLATILE_FINGERPRINT_KEYS``),
+    the intraday `market` price section (its 15-minute TTL would invalidate
+    every fingerprint immediately — the technical lane's daily history
+    carries the price signal specialists reason over), mark-to-market
+    portfolio values, and the RAW source-reference structures (they carry
+    internal replay locators — task_id/artifact_id/artifact_source_id — and,
+    for the price lane, a digest of the volatile intraday price itself; see
     ``source_lineage_v1.fingerprint_source_refs``). Included portfolio
     context: weight rounded to the whole percent, prior action and tax
     summary — the inputs that actually change analysis. Included source
@@ -245,27 +335,15 @@ def build_evidence_bundle(
         if isinstance(output, dict):
             outputs[lane] = output
 
-    usable_lanes = [
+    # TERMINAL lane outcome: task succeeded, and (for artifact lanes) an
+    # artifact_id was produced at all. This is NOT yet "effective evidence" —
+    # see the module docstring.
+    raw_usable_lanes = [
         lane for lane, state in states.items()
         if state == TASK_SUCCEEDED
         and isinstance(outputs.get(lane), dict)
-        # An artifact lane that succeeded but produced no artifact is not usable.
         and (outputs[lane].get("artifact_id") is not None
              if "artifact_id" in outputs.get(lane, {}) else True)
-    ]
-    degraded_lanes = sorted(
-        lane for lane, state in states.items()
-        if state == TASK_DEGRADED or (
-            state == TASK_SUCCEEDED and lane not in usable_lanes
-        )
-    )
-    missing_lanes = sorted(
-        lane for lane, state in states.items()
-        if state not in (TASK_SUCCEEDED, TASK_DEGRADED)
-    )
-    required_missing = [
-        lane for lane in required_lanes_for_asset(asset_type)
-        if lane not in usable_lanes
     ]
 
     # Session-level context outputs.
@@ -284,18 +362,19 @@ def build_evidence_bundle(
             macro_task_output = output
 
     # ── ONE bulk parent-artifact read for every artifact this ticker bundle
-    # needs — macro (portfolio-scope) + SEC/ETF lanes usable this run —
-    # scoped to the owning user. Reused for BOTH the display summaries below
-    # AND the source-reference gating (never a second/N+1 query per lane). ──
+    # needs — macro (portfolio-scope) + SEC/ETF lanes with a terminal-success
+    # artifact_id — scoped to the owning user. Reused for BOTH the display
+    # summaries below AND the source-reference gating (never a second/N+1
+    # query per lane). ──────────────────────────────────────────────────────
     macro_artifact_id = str((macro_task_output or {}).get("artifact_id") or "") or None
     sec_artifact_id_by_lane = {
         lane: str((outputs.get(lane) or {}).get("artifact_id") or "") or None
         for lane in (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST)
-        if lane in usable_lanes
+        if lane in raw_usable_lanes
     }
     etf_artifact_id = (
         str((outputs.get(LANE_ETF_FUND_DATA) or {}).get("artifact_id") or "") or None
-        if asset_type == "etf" and LANE_ETF_FUND_DATA in usable_lanes
+        if asset_type == "etf" and LANE_ETF_FUND_DATA in raw_usable_lanes
         else None
     )
     artifact_rows = _bulk_read_artifacts(
@@ -305,43 +384,82 @@ def build_evidence_bundle(
     )
 
     macro_row = artifact_rows.get(macro_artifact_id) if macro_artifact_id else None
-    macro_summary = (
-        _artifact_summary_from_row(macro_row)
-        if _validate_artifact_row(macro_row, user_id=user_id)
-        else None
+    macro_is_valid, _macro_reason = _validate_artifact_row(
+        macro_row, user_id=user_id, lane=LANE_MACRO,
     )
+    macro_summary = _artifact_summary_from_row(macro_row) if macro_is_valid else None
 
-    # lane -> artifact_id, ONLY for artifacts that passed ownership/ticker/
-    # active/substantive-payload validation. Everything downstream (bundle
-    # summaries, source-reference generation) is built exclusively from this
-    # validated set — a wrong-user/wrong-ticker/empty artifact never leaks
-    # provenance into the bundle, the prompt, or a persisted reference.
+    # lane -> artifact_id, ONLY for artifacts that passed the FULL effective-
+    # evidence gate (ownership/ticker/active/not-invalidated/contract/
+    # substantive). Everything downstream (bundle summaries, source-reference
+    # generation, usable_lanes) is built exclusively from this validated set
+    # — a wrong-user/wrong-ticker/invalidated/wrong-contract/non-substantive
+    # artifact never leaks provenance into the bundle, the prompt, or a
+    # persisted reference; it becomes a DEGRADED lane with a bounded reason
+    # instead (never a source_ref_gap — there is no usable evidence to have
+    # a citation gap over).
     validated_artifact_lane_ids: dict[str, str] = {}
+    artifact_degraded_reasons: dict[str, str] = {}
 
     sec: dict[str, Any] = {}
     for lane, artifact_id in sec_artifact_id_by_lane.items():
-        row = artifact_rows.get(artifact_id) if artifact_id else None
-        if artifact_id and _validate_artifact_row(row, user_id=user_id, ticker=ticker):
+        if not artifact_id:
+            continue
+        row = artifact_rows.get(artifact_id)
+        is_valid, reason = _validate_artifact_row(
+            row, user_id=user_id, ticker=ticker, lane=lane,
+        )
+        if is_valid:
             sec[lane] = _artifact_summary_from_row(row)
             validated_artifact_lane_ids[lane] = artifact_id
+        else:
+            artifact_degraded_reasons[lane] = reason or "artifact_invalid"
 
     asset_specific: dict[str, Any] = {}
     if etf_artifact_id:
         row = artifact_rows.get(etf_artifact_id)
-        if _validate_artifact_row(row, user_id=user_id, ticker=ticker):
+        is_valid, reason = _validate_artifact_row(
+            row, user_id=user_id, ticker=ticker, lane=LANE_ETF_FUND_DATA,
+        )
+        if is_valid:
             asset_specific["etf_fund_data"] = _artifact_summary_from_row(row)
             validated_artifact_lane_ids[LANE_ETF_FUND_DATA] = etf_artifact_id
+        else:
+            artifact_degraded_reasons[LANE_ETF_FUND_DATA] = reason or "artifact_invalid"
     if asset_type == "crypto":
         asset_specific["crypto_market"] = outputs.get(LANE_CRYPTO_MARKET) or {}
+
+    # EFFECTIVE evidence lanes: direct lanes pass through terminal success
+    # unchanged; artifact-backed lanes require the full validation above.
+    # This IS bundle.usable_lanes — the scheduler/specialist evidence
+    # authority — never the raw terminal list.
+    usable_lanes = [
+        lane for lane in raw_usable_lanes
+        if lane not in _ARTIFACT_LANES or lane in validated_artifact_lane_ids
+    ]
+    degraded_lanes = sorted(
+        lane for lane, state in states.items()
+        if state == TASK_DEGRADED or (
+            state == TASK_SUCCEEDED and lane not in usable_lanes
+        )
+    )
+    missing_lanes = sorted(
+        lane for lane, state in states.items()
+        if state not in (TASK_SUCCEEDED, TASK_DEGRADED)
+    )
+    required_missing = [
+        lane for lane in required_lanes_for_asset(asset_type)
+        if lane not in usable_lanes
+    ]
 
     # ── Versioned source-reference lineage (PR 2) ──────────────────────────
     # Direct lanes derive a provider_observation reference straight from
     # their own terminal task output; artifact-backed lanes derive
-    # research_artifact_source references ONLY from a validated parent
-    # artifact's canonical source rows (one bulk query). A usable lane with
-    # no valid reference is recorded as a gap — it never erases the evidence
-    # itself. Every lane's reference list is bounded+deduped deterministically
-    # (contract §4); truncation is disclosed, never silent.
+    # research_artifact_source references ONLY from an EFFECTIVE (validated)
+    # parent artifact's canonical source rows (one bulk query). An effective
+    # lane with no valid reference is recorded as a gap — it never erases the
+    # evidence itself. Every lane's reference list is bounded+deduped
+    # deterministically (contract §4); truncation is disclosed, never silent.
     source_refs_by_lane: dict[str, list[dict[str, Any]]] = {}
     source_ref_gaps: list[str] = []
     truncated_reference_count = 0
@@ -363,20 +481,16 @@ def build_evidence_bundle(
             source_ref_gaps.append(lane)
 
     artifact_usable_lanes = [lane for lane in usable_lanes if lane in _ARTIFACT_LANES]
-    if validated_artifact_lane_ids:
+    if artifact_usable_lanes:
         sources_by_artifact = _bulk_read_artifact_sources(
-            client, list(validated_artifact_lane_ids.values()), user_id=user_id,
+            client,
+            [validated_artifact_lane_ids[lane] for lane in artifact_usable_lanes],
+            user_id=user_id,
         )
     else:
         sources_by_artifact = {}
     for lane in artifact_usable_lanes:
-        artifact_id = validated_artifact_lane_ids.get(lane)
-        if artifact_id is None:
-            # Task succeeded with an artifact_id, but the parent artifact
-            # failed ownership/ticker/active/substantive-payload validation
-            # — a genuine lineage gap, never a fabricated reference.
-            source_ref_gaps.append(lane)
-            continue
+        artifact_id = validated_artifact_lane_ids[lane]
         rows = sources_by_artifact.get(artifact_id) or []
         refs = [
             r for r in (
@@ -471,6 +585,10 @@ def build_evidence_bundle(
             "degraded_lanes": degraded_lanes,
             "degradation_reasons": (
                 [f"required_lane_missing:{lane}" for lane in required_missing]
+                + [
+                    f"artifact_invalid:{lane}:{reason}"
+                    for lane, reason in sorted(artifact_degraded_reasons.items())
+                ]
             ),
         },
         # Claim fence: a bundle write may (re)build only a ticker that has not

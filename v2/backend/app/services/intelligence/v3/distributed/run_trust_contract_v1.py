@@ -178,25 +178,40 @@ def _is_valid_output(output: Optional[dict[str, Any]]) -> bool:
     return output.get("score") is not None and output.get("confidence") is not None
 
 
-def _output_lineage_status(output: dict[str, Any]) -> str:
+def _output_lineage_status(
+    output: dict[str, Any],
+    *,
+    ticker_outputs: Optional[list[dict[str, Any]]] = None,
+) -> str:
     """Structural, axis/ticker-aware lineage status for one persisted
     specialist/review output — validates against the output's OWN axis and
     ticker (a manifest claiming a different axis, or carrying a reference
-    for a different ticker, is rejected, not trusted)."""
+    for a different ticker, is rejected, not trusted).
+
+    A review output's lineage claim is additionally cross-validated against
+    the CURRENT valid non-review outputs for the same ticker
+    (``ticker_outputs``) — a review claiming it reconciled a different axis
+    set, or different per-axis lineage statuses, than what those outputs
+    presently show is treated as missing lineage, never full."""
+    axis = output.get("axis")
+    ticker = output.get("ticker")
+    if axis == AXIS_REVIEW:
+        current_non_review = [
+            o
+            for o in (ticker_outputs or [])
+            if o is not output and o.get("axis") != AXIS_REVIEW
+        ]
+        manifest = source_lineage_v1.validate_review_against_current_outputs(
+            output.get("evidence_refs"),
+            ticker=ticker,
+            current_non_review_outputs=current_non_review,
+        )
+        return manifest.get("status") if manifest else source_lineage_v1.LINEAGE_MISSING
     return source_lineage_v1.output_lineage_status(
         output.get("evidence_refs"),
-        expected_axis=output.get("axis"),
-        expected_ticker=output.get("ticker"),
+        expected_axis=axis,
+        expected_ticker=ticker,
     )
-
-
-def _has_min_source_lineage(output: dict[str, Any]) -> bool:
-    """Structural validation via ``source_lineage_v1`` — a versioned,
-    validated axis-lineage manifest with status full/partial (i.e. at least
-    one real external reference). Malformed objects and legacy opaque
-    strings (pre-PR-2 ``output_ref`` values) are never truthy merely for
-    being nonempty."""
-    return _output_lineage_status(output) != source_lineage_v1.LINEAGE_MISSING
 
 
 def classify_decision_constraints(
@@ -364,7 +379,7 @@ def _lineage_status_for_outputs(outputs: list[dict[str, Any]]) -> str:
     """
     if not outputs:
         return LINEAGE_MISSING
-    statuses = [_output_lineage_status(o) for o in outputs]
+    statuses = [_output_lineage_status(o, ticker_outputs=outputs) for o in outputs]
     if all(s == source_lineage_v1.LINEAGE_FULL for s in statuses):
         return LINEAGE_FULL
     if any(
@@ -565,11 +580,11 @@ def build_run_trust_contract(
     # NOT full lineage, even though it is not "missing" either).
     outputs_full_lineage = sum(
         1 for outs in valid_outputs_by_ticker_all_axes.values()
-        for o in outs if _output_lineage_status(o) == LINEAGE_FULL
+        for o in outs if _output_lineage_status(o, ticker_outputs=outs) == LINEAGE_FULL
     )
     outputs_partial_lineage = sum(
         1 for outs in valid_outputs_by_ticker_all_axes.values()
-        for o in outs if _output_lineage_status(o) == LINEAGE_PARTIAL
+        for o in outs if _output_lineage_status(o, ticker_outputs=outs) == LINEAGE_PARTIAL
     )
     total_valid_outputs = sum(len(outs) for outs in valid_outputs_by_ticker_all_axes.values())
     outputs_missing_lineage = total_valid_outputs - outputs_full_lineage - outputs_partial_lineage

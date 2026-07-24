@@ -553,6 +553,12 @@ export interface PortfolioEvidenceSummary {
   safeCount: number;
   limitedCount: number;
   blockedCount: number;
+  /** Backend-authoritative trust_status="unknown" (fail-closed overlay —
+   * durable state could not be re-verified). Kept separate from
+   * blockedCount: "blocked" means a real, established limitation; "unknown"
+   * means the holding's trust simply couldn't be checked this read. Never
+   * classify one as the other. */
+  unknownCount: number;
   convictionCappedCount: number;
   technicalUsableCount: number;
   sentimentUsableCount: number;
@@ -569,6 +575,7 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
   let safeCount = 0;
   let limitedCount = 0;
   let blockedCount = 0;
+  let unknownCount = 0;
   let convictionCappedCount = 0;
   let technicalUsableCount = 0;
   let sentimentUsableCount = 0;
@@ -586,7 +593,16 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
     // Falls back to the per-card evidence-band heuristic only for legacy/
     // non-distributed cards that carry no trust_status at all.
     if (trustStatus === "healthy") safeCount++;
-    else if (trustStatus === "blocked" || trustStatus === "unknown") blockedCount++;
+    else if (trustStatus === "blocked") blockedCount++;
+    else if (trustStatus === "unknown") {
+      // Distinct from "blocked" — a real, established limitation is not the
+      // same claim as "this holding's trust could not be re-verified this
+      // read". The fail-closed overlay leaves the old evidence_explanation
+      // payload untouched for audit purposes, but it is stale — never fold
+      // it into the usable-signal counts below as if it were reverified.
+      unknownCount++;
+      continue;
+    }
     else if (trustStatus === "limited") limitedCount++;
     else if (!ex) {
       limitedCount++;
@@ -611,6 +627,7 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
     safeCount,
     limitedCount,
     blockedCount,
+    unknownCount,
     convictionCappedCount,
     technicalUsableCount,
     sentimentUsableCount,

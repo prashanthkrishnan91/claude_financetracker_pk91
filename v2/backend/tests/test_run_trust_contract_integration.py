@@ -299,6 +299,12 @@ def _assert_failed_closed(payload: dict, tickers: list[str]) -> None:
     assert contract["overall_status"] == trust.STATUS_UNKNOWN
     assert payload["source_health"]["status"] == trust.STATUS_UNKNOWN
     assert payload["portfolio_command_center"]["source_health"]["status"] == trust.STATUS_UNKNOWN
+    # Distinguishes THIS "unknown" (a read/reverification failure) from a
+    # successful read that genuinely found zero specialist outputs — never
+    # the same reason text as that case.
+    reason = payload["source_health"]["reason"]
+    assert "could not be re-verified" in reason
+    assert "zero outputs" not in reason
     cards = {c["ticker"]: c for c in payload["current_holdings"]}
     for ticker in tickers:
         ddp = cards[ticker]["detail_drawer_payload"]

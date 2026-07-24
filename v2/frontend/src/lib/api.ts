@@ -642,7 +642,11 @@ export interface IntelV3RunTrustContract {
   axis_coverage: Record<string, IntelV3RunTrustAxisCoverage>;
   conflict_review_coverage: IntelV3RunTrustConflictReviewCoverage;
   source_lineage: IntelV3RunTrustSourceLineage;
-  source_health: { status: string };
+  /** ``reason`` (optional, plain English) distinguishes a successful read
+   * that genuinely found zero valid specialist outputs from a fail-closed
+   * read/reverification failure — both share status="unknown" but mean
+   * different things, and the frontend must never guess which one it is. */
+  source_health: { status: string; reason?: string };
   ticker_trust: IntelV3RunTrustTickerEntry[];
   blocking_reasons: string[];
   warnings: string[];
@@ -654,7 +658,11 @@ export interface IntelV3Snapshot {
   run_id: string;
   generated_at: string;
   is_stale: boolean;
-  source_health: { status: string };
+  /** ``reason`` (optional, plain English) distinguishes a successful read
+   * that genuinely found zero valid specialist outputs from a fail-closed
+   * read/reverification failure — both share status="unknown" but mean
+   * different things, and the frontend must never guess which one it is. */
+  source_health: { status: string; reason?: string };
   portfolio_command_center: {
     total_holdings: number;
     buy_count: number;
@@ -663,7 +671,11 @@ export interface IntelV3Snapshot {
     sell_count: number;
     high_conviction: number;
     thin_evidence: number;
-    source_health: { status: string };
+    /** ``reason`` (optional, plain English) distinguishes a successful read
+   * that genuinely found zero valid specialist outputs from a fail-closed
+   * read/reverification failure — both share status="unknown" but mean
+   * different things, and the frontend must never guess which one it is. */
+  source_health: { status: string; reason?: string };
   };
   action_counts: Record<IntelV3Action, number>;
   evidence_band_counts: Record<IntelV3EvidenceBand, number>;

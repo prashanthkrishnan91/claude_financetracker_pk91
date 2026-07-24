@@ -367,6 +367,20 @@ describe("buildSafetyDisplay", () => {
     const d = buildSafetyDisplay(makeExplanation({ action_blocks: ["buy_blocked_thin_evidence"] }));
     expect(d.tier).toBe("blocked");
   });
+
+  it("empty decisionConstraints array never manufactures 'Other constraint noted'", () => {
+    // Release-blocker requirement: a clean, fully healthy decision returns
+    // decision_constraints=[] from the backend — buildSafetyDisplay must
+    // never invent an "other" limitation for it.
+    const d = buildSafetyDisplay(
+      makeExplanation({
+        action_blocks: [], safe_for_visible_decision: true,
+        primary_evidence_status: "READY", corroboration_gap: false,
+      }),
+      [],
+    );
+    expect(d.label).not.toBe("Other constraint noted");
+  });
 });
 
 describe("decisionConstraintToLabel / allDecisionConstraintLabels", () => {
@@ -462,6 +476,31 @@ describe("buildPortfolioEvidenceSummary", () => {
     const s = buildPortfolioEvidenceSummary([card]);
     expect(s.blockedCount).toBe(1);
     expect(s.safeCount).toBe(0);
+  });
+
+  it("trust_status='unknown' card → counted in unknownCount, NEVER blockedCount", () => {
+    // Release-blocker requirement: "blocked" (a real, established
+    // limitation) and "unknown" (trust could not be re-verified this read)
+    // must never share a bucket — they are different claims.
+    const card = makeCard();
+    card.detail_drawer_payload.trust_status = "unknown";
+    const s = buildPortfolioEvidenceSummary([card]);
+    expect(s.unknownCount).toBe(1);
+    expect(s.blockedCount).toBe(0);
+    expect(s.safeCount).toBe(0);
+    expect(s.limitedCount).toBe(0);
+  });
+
+  it("trust_status='unknown' card → its stale evidence_explanation is NOT folded into usable-signal counts", () => {
+    // The fail-closed overlay leaves the OLD evidence_explanation payload
+    // untouched for audit purposes — it must never be counted as if it
+    // were reverified current truth.
+    const card = makeCard({ technical_signals_status: "READY", sentiment_status: "READY" });
+    card.detail_drawer_payload.trust_status = "unknown";
+    const s = buildPortfolioEvidenceSummary([card]);
+    expect(s.technicalUsableCount).toBe(0);
+    expect(s.sentimentUsableCount).toBe(0);
+    expect(s.cardsWithExplanation).toBe(0);
   });
 
   it("safe card with corroboration → counted in safeCount", () => {

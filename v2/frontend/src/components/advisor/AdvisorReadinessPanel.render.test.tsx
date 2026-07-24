@@ -246,3 +246,72 @@ describe("AdvisorReadinessPanel — completed-with-gaps snapshot", () => {
     expect(pill.className).not.toContain("text-action-sell");
   });
 });
+
+// ── Fail-closed "unknown" trust overlay — truthful render, release-blocker ───
+
+function makeUnknownOverlaySnapshot(): IntelV3Snapshot {
+  const reason = "Session row could not be found — trust status could not be re-verified.";
+  return {
+    ...makeSnapshot(),
+    source_health: { status: "unknown", reason },
+    run_trust_contract: {
+      schema_version: "run_trust_contract_v1",
+      run_session_id: "sess-unknown",
+      generated_at: new Date().toISOString(),
+      overall_status: "unknown",
+      session_coverage: {
+        frozen_holding_count: 0, decided_count: 0, no_call_count: 0,
+        failed_count: 0, unaccounted_count: 0, publication_complete: false,
+      },
+      axis_coverage: {},
+      conflict_review_coverage: {
+        required_count: 0, succeeded_count: 0, failed_count: 0, pending_count: 0,
+        required_tickers: [], succeeded_tickers: [], failed_tickers: [], pending_tickers: [],
+      },
+      source_lineage: {
+        outputs_with_source_refs: 0, outputs_missing_source_refs: 0,
+        tickers_with_lineage: [], tickers_missing_lineage: [],
+        tickers_full_lineage: [], tickers_partial_lineage: [], tickers_missing_lineage_full: [],
+      },
+      source_health: { status: "unknown", reason },
+      ticker_trust: [],
+      blocking_reasons: [reason],
+      warnings: [reason],
+    },
+  } as unknown as IntelV3Snapshot;
+}
+
+describe("AdvisorReadinessPanel — fail-closed unknown trust overlay renders truthfully", () => {
+  it("renders 'Analysis trust: Unknown' and every line as 'could not be re-verified', no placeholder-derived claims", () => {
+    const model = deriveAdvisorReadiness(
+      { snapshot: makeUnknownOverlaySnapshot(), isLoading: false, isError: false },
+      IDLE_RUN,
+      null,
+    );
+    const client = new QueryClient();
+    act(() => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <AdvisorReadinessPanel model={model} onRun={() => {}} lastRunResult={null} />
+        </QueryClientProvider>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Analysis trust: Unknown");
+    expect(text).toContain("Session coverage could not be re-verified");
+    expect(text).toContain("Specialist-axis coverage could not be re-verified");
+    expect(text).toContain("Conflict-review coverage could not be re-verified");
+    expect(text).toContain("Source lineage could not be re-verified");
+    // Release-blocker requirement: none of these false, placeholder-derived
+    // claims may ever render for a fail-closed unknown overlay.
+    expect(text).not.toContain("0 of 0");
+    expect(text).not.toContain("No conflict reviews were required");
+    expect(text).not.toContain("No specialist axes applied");
+    expect(text).not.toContain("no specialist outputs recorded");
+    // Source health row uses the backend's plain-English reason, not the
+    // old hardcoded "no specialist outputs were recorded" guess.
+    expect(text).toContain("Session row could not be found");
+    expect(text).not.toContain("no specialist outputs were recorded");
+  });
+});

@@ -239,8 +239,11 @@ def classify_decision_constraints(
         if not matched:
             categories.add(CONSTRAINT_OTHER)
 
-    if not categories:
-        categories.add(CONSTRAINT_OTHER)
+    # CONSTRAINT_OTHER is added ONLY by the blocker-parsing loop above, when
+    # a REAL persisted blocker doesn't match a known category. A clean
+    # decision with no persisted blockers and no band-based constraint must
+    # return an empty list — fabricating "other" from an empty category set
+    # would manufacture a limitation that doesn't exist.
     return sorted(categories)
 
 
@@ -545,12 +548,24 @@ def build_run_trust_contract(
 
     if total_valid_outputs == 0:
         source_health_status = STATUS_UNKNOWN
+        # Distinguishes a SUCCESSFUL read that genuinely found zero valid
+        # specialist outputs from a fail-closed read failure
+        # (unknown_overlay_contract below, which carries its own reason) —
+        # both produce status="unknown" but mean different things.
+        source_health_reason = (
+            "No specialist outputs were recorded for this session yet — "
+            "source health could not be established from zero outputs."
+        )
+        source_health = {"status": source_health_status, "reason": source_health_reason}
     elif outputs_with_refs == 0:
         source_health_status = STATUS_BLOCKED
+        source_health = {"status": source_health_status}
     elif outputs_missing_refs > 0:
         source_health_status = STATUS_LIMITED
+        source_health = {"status": source_health_status}
     else:
         source_health_status = STATUS_HEALTHY
+        source_health = {"status": source_health_status}
 
     source_lineage = {
         "outputs_with_source_refs": outputs_with_refs,
@@ -563,7 +578,6 @@ def build_run_trust_contract(
         "tickers_partial_lineage": lineage_partial_tickers,
         "tickers_missing_lineage_full": lineage_missing_tickers,
     }
-    source_health = {"status": source_health_status}
     any_required_lineage_missing = bool(lineage_missing_tickers)
     any_lineage_partial = bool(lineage_partial_tickers)
 
@@ -779,7 +793,7 @@ def unknown_overlay_contract(
             "tickers_partial_lineage": [],
             "tickers_missing_lineage_full": [],
         },
-        "source_health": {"status": STATUS_UNKNOWN},
+        "source_health": {"status": STATUS_UNKNOWN, "reason": reason},
         "ticker_trust": [],
         "blocking_reasons": [reason],
         "warnings": [reason],

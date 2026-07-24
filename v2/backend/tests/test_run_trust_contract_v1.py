@@ -653,6 +653,25 @@ class TestSourceLineageFullPartialMissing:
         assert entry["lineage_status"] == trust.LINEAGE_PARTIAL
         assert entry["source_validated"] is False
 
+    def test_zero_valid_outputs_source_health_carries_a_distinguishing_reason(self):
+        # A SUCCESSFUL read that genuinely found zero valid specialist
+        # outputs must carry a reason distinguishing it from a fail-closed
+        # read-failure "unknown" (unknown_overlay_contract) — both share
+        # status="unknown" but mean different things.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=[],
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_UNKNOWN
+        reason = contract["source_health"]["reason"]
+        assert "zero outputs" in reason
+        # Must read distinctly from the fail-closed read-failure overlay's
+        # reason wording (see test_run_trust_contract_integration.py) — a
+        # successful read finding zero outputs is not "could not be
+        # re-verified".
+        assert "could not be re-verified" not in reason
+
 
 class TestDecisionConstraintTruth:
     def test_underweight_never_a_portfolio_policy_limitation(self):
@@ -753,3 +772,73 @@ class TestDecisionConstraintTruth:
         assert trust.CONSTRAINT_PORTFOLIO_POLICY in constraints
         assert trust.CONSTRAINT_PRICE_CONTEXT in constraints
         assert trust.CONSTRAINT_RISK in constraints
+
+    def test_clean_healthy_decision_has_no_fabricated_other(self):
+        # A fully sourced, fully healthy holding: all required AND optional
+        # axes complete, no review required, FAIR price context, ON_TARGET
+        # portfolio fit, LOW risk, blockers=[]. Release-blocker requirement:
+        # a clean decision must return decision_constraints=[] — "other"
+        # must never be fabricated merely because no other category applies.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            evidence_quality="STRONG", price_context="FAIR",
+            portfolio_fit="ON_TARGET", risk_band="LOW", blockers=[],
+        )]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_SENTIMENT, evidence_refs=["r3"]),
+            _specialist_output("AAA", AXIS_RISK_FILING, evidence_refs=["r4"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["trust_status"] == trust.STATUS_HEALTHY
+        assert entry["decision_constraints"] == []
+        assert entry["source_validated"] is True
+
+    def test_clean_healthy_decision_with_underweight_fit_also_empty(self):
+        # UNDERWEIGHT is room-to-add, not a limitation — a clean UNDERWEIGHT
+        # holding must also return decision_constraints=[], same as ON_TARGET.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            evidence_quality="STRONG", price_context="FAIR",
+            portfolio_fit="UNDERWEIGHT", risk_band="LOW", blockers=[],
+        )]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_SENTIMENT, evidence_refs=["r3"]),
+            _specialist_output("AAA", AXIS_RISK_FILING, evidence_refs=["r4"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["trust_status"] == trust.STATUS_HEALTHY
+        assert entry["decision_constraints"] == []
+        assert entry["source_validated"] is True
+
+    def test_unmatched_blocker_alone_adds_only_other(self):
+        # Otherwise-clean state (full lineage, FAIR price, ON_TARGET fit, LOW
+        # risk) plus one real unmatched blocker: decision_constraints must
+        # contain ONLY "other" — the blocker doesn't fabricate any other
+        # category, and "other" isn't accompanied by a spurious one either.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(
+            evidence_quality="STRONG", price_context="FAIR",
+            portfolio_fit="ON_TARGET", risk_band="LOW",
+            blockers=["Attractiveness signal absent or weak."],
+        )]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+            _specialist_output("AAA", AXIS_SENTIMENT, evidence_refs=["r3"]),
+            _specialist_output("AAA", AXIS_RISK_FILING, evidence_refs=["r4"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["decision_constraints"] == [trust.CONSTRAINT_OTHER]

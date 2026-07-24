@@ -1068,6 +1068,79 @@ describe("deriveRunTrustSummary", () => {
     expect(summary.sourceLineageLine).toContain("Source lineage established");
     expect(summary.conflictReviewLine).not.toContain("failed");
   });
+
+  // Fail-closed "unknown" (overall_status="unknown") — every count field on
+  // the contract is a zero/empty PLACEHOLDER (unknown_overlay_contract),
+  // never an established fact. Release-blocker requirement: none of these
+  // four lines may print a false claim derived from those placeholders.
+  function makeUnknownOverlayContract(
+    reason = "Session row could not be found — trust status could not be re-verified.",
+  ): IntelV3RunTrustContract {
+    return makeRunTrustContract({
+      overall_status: "unknown",
+      session_coverage: {
+        frozen_holding_count: 0, decided_count: 0, no_call_count: 0,
+        failed_count: 0, unaccounted_count: 0, publication_complete: false,
+      },
+      axis_coverage: {},
+      conflict_review_coverage: {
+        required_count: 0, succeeded_count: 0, failed_count: 0, pending_count: 0,
+        required_tickers: [], succeeded_tickers: [], failed_tickers: [], pending_tickers: [],
+      },
+      source_lineage: {
+        outputs_with_source_refs: 0, outputs_missing_source_refs: 0,
+        tickers_with_lineage: [], tickers_missing_lineage: [],
+        tickers_full_lineage: [], tickers_partial_lineage: [], tickers_missing_lineage_full: [],
+      },
+      source_health: { status: "unknown", reason },
+      ticker_trust: [],
+      blocking_reasons: [reason],
+      warnings: [reason],
+    });
+  }
+
+  it("unknown overlay → every line says 'could not be re-verified', never a placeholder-derived claim", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.overallStatus).toBe("unknown");
+    expect(summary.sessionCoverageLine).toContain("could not be re-verified");
+    expect(summary.axisCoverageLine).toContain("could not be re-verified");
+    expect(summary.conflictReviewLine).toContain("could not be re-verified");
+    expect(summary.sourceLineageLine).toContain("could not be re-verified");
+  });
+
+  it("unknown overlay → never claims '0 of 0 holdings decided'", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.sessionCoverageLine).not.toContain("0 of 0");
+  });
+
+  it("unknown overlay → never claims 'no conflict reviews were required'", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.conflictReviewLine).not.toContain("No conflict reviews were required");
+  });
+
+  it("unknown overlay → never claims 'no specialist axes applied' or 'not applicable'", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.axisCoverageLine).not.toContain("No specialist axes applied");
+    expect(summary.axisCoverageLine.toLowerCase()).not.toContain("not applicable");
+  });
+
+  it("unknown overlay → never claims 'no specialist outputs recorded' as a re-verified fact", () => {
+    const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.sourceLineageLine).not.toContain("no specialist outputs recorded");
+  });
+
+  it("unknown overlay → session coverage line surfaces the backend's plain-English reason", () => {
+    const snap = makeSnapshot({
+      run_trust_contract: makeUnknownOverlayContract("Task rows read back empty — trust status could not be re-verified."),
+    });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.sessionCoverageLine).toContain("Task rows read back empty");
+  });
 });
 
 // snapshot_source_health row must never read a bare "—" for the new
@@ -1095,6 +1168,33 @@ describe("deriveTruthRows — snapshot source health explicit vocabulary", () =>
     expect(row.status).toBe("unavailable");
     expect(row.detail).not.toContain("not a recognized status");
     expect(row.detail).toContain("unknown");
+  });
+
+  it('"unknown" WITH a backend reason → uses the reason verbatim, never the hardcoded zero-outputs guess', () => {
+    // Release-blocker requirement: "unknown" covers two different meanings
+    // (genuinely zero outputs vs. a fail-closed read/reverification
+    // failure) — when the backend supplies a distinguishing reason, it must
+    // be used, not overridden by a hardcoded assumption about which case it is.
+    const snap = makeSnapshot({
+      source_health: {
+        status: "unknown",
+        reason: "Session row could not be found — trust status could not be re-verified.",
+      },
+    });
+    const rows = deriveTruthRows(snap, "certified");
+    const row = rows.find((r) => r.key === "snapshot_source_health")!;
+    expect(row.detail).toBe(
+      "Session row could not be found — trust status could not be re-verified.",
+    );
+    expect(row.detail).not.toContain("no specialist outputs were recorded");
+  });
+
+  it('"unknown" WITHOUT a reason → honest "verification failed" fallback, never the old zero-outputs claim', () => {
+    const snap = makeSnapshot({ source_health: { status: "unknown" } });
+    const rows = deriveTruthRows(snap, "certified");
+    const row = rows.find((r) => r.key === "snapshot_source_health")!;
+    expect(row.detail).toContain("verification failed");
+    expect(row.detail).not.toContain("no specialist outputs were recorded");
   });
 });
 

@@ -202,6 +202,7 @@ function axisCoverageLabel(
 function EvidenceSummaryBand({
   cards,
   axisCoverage,
+  trustUnknown,
 }: {
   cards: IntelV3HeldCard[];
   /** run_trust_contract_v1.axis_coverage — authoritative counts derived
@@ -209,6 +210,13 @@ function EvidenceSummaryBand({
    * Absent on legacy/non-distributed snapshots (falls back to per-card
    * evidence_explanation counts). */
   axisCoverage?: Record<string, IntelV3RunTrustAxisCoverage>;
+  /** True when run_trust_contract_v1.overall_status === "unknown" (the
+   * fail-closed read/reverification-failure overlay). axis_coverage is an
+   * empty placeholder in this case, NOT a verified "zero axes applied"
+   * fact — technical/sentiment/company-data chips must say so honestly
+   * instead of reading as "not applicable" or reusing stale per-card
+   * readiness values as if they were reverified. */
+  trustUnknown?: boolean;
 }) {
   const hasAnyExplanation = cards.some(
     (c) => c.detail_drawer_payload?.evidence_explanation != null
@@ -217,11 +225,15 @@ function EvidenceSummaryBand({
   if (!hasAnyExplanation && !axisCoverage) return null;
 
   const summary = buildPortfolioEvidenceSummary(cards);
-  const technical = axisCoverage
+  const technical = trustUnknown
+    ? { label: "Price signals could not be verified", usable: false }
+    : axisCoverage
     ? axisCoverageLabel(axisCoverage["technical"], "Price signals")
     : { label: summary.technicalUsableCount > 0 ? "Price signals contributing" : "Price signals not yet usable",
         usable: summary.technicalUsableCount > 0 };
-  const sentiment = axisCoverage
+  const sentiment = trustUnknown
+    ? { label: "News & sentiment could not be verified", usable: false }
+    : axisCoverage
     ? axisCoverageLabel(axisCoverage["sentiment"], "News & sentiment")
     : { label: summary.sentimentUsableCount > 0 ? "News & sentiment contributing" : "News & sentiment not yet usable",
         usable: summary.sentimentUsableCount > 0 };
@@ -229,14 +241,16 @@ function EvidenceSummaryBand({
   const sentimentUsable = sentiment.usable;
 
   const { fundamentalsUsableCount, cardsWithExplanation } = summary;
-  const companyDataLabel =
-    fundamentalsUsableCount === 0
+  const companyDataLabel = trustUnknown
+    ? "Company data could not be verified"
+    : fundamentalsUsableCount === 0
       ? "Some company data missing or blocked"
       : fundamentalsUsableCount === cardsWithExplanation
       ? "Company data available"
       : `Company data usable for ${fundamentalsUsableCount}/${cardsWithExplanation}`;
-  const companyDataStyle =
-    fundamentalsUsableCount === 0
+  const companyDataStyle = trustUnknown
+    ? "border-border bg-surface-elevated text-text-muted"
+    : fundamentalsUsableCount === 0
       ? "border-action-trim/30 bg-action-trim/10 text-action-trim"
       : "border-action-buy/30 bg-action-buy/10 text-action-buy";
 
@@ -266,6 +280,12 @@ function EvidenceSummaryBand({
           <div className="flex items-baseline gap-1">
             <span className="text-sm font-bold text-action-trim">{summary.blockedCount}</span>
             <span className="text-xs text-text-muted">data issues</span>
+          </div>
+        )}
+        {summary.unknownCount > 0 && (
+          <div className="flex items-baseline gap-1">
+            <span className="text-sm font-bold text-text-muted">{summary.unknownCount}</span>
+            <span className="text-xs text-text-muted">trust unknown</span>
           </div>
         )}
         {summary.convictionCappedCount > 0 && (
@@ -435,7 +455,11 @@ export function IntelV3HoldingsPanel({
       <PortfolioOverview snapshot={snapshot} onDataHealth={() => setDataHealthOpen(true)} />
 
       {/* Evidence quality summary (when governance data is present) */}
-      <EvidenceSummaryBand cards={allCards} axisCoverage={snapshot.run_trust_contract?.axis_coverage} />
+      <EvidenceSummaryBand
+        cards={allCards}
+        axisCoverage={snapshot.run_trust_contract?.axis_coverage}
+        trustUnknown={snapshot.run_trust_contract?.overall_status === "unknown"}
+      />
 
       {/* Action filter rail — LOCKED: ALL/BUY/HOLD/TRIM/SELL only */}
       <FilterRail filter={filter} setFilter={setFilter} counts={counts} />

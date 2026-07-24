@@ -473,11 +473,20 @@ function deriveSnapshotSourceHealthRow(snapshot: IntelV3Snapshot | null): Adviso
     };
   }
   if (raw === "unknown") {
+    // "unknown" covers two different meanings — a successful read that
+    // genuinely found zero specialist outputs, or a fail-closed read/
+    // reverification failure. Never guess which one it is: use the
+    // backend's plain-English reason when present, and fall back to an
+    // honest "could not be verified" (never the old hardcoded claim that
+    // assumed the zero-outputs case) when it isn't.
+    const reason = snapshot.source_health?.reason;
     return {
       key: "snapshot_source_health",
       label: "Snapshot source health",
       status: "unavailable",
-      detail: "Source health unknown — no specialist outputs were recorded this run.",
+      detail:
+        reason ??
+        "Source health unknown because verification failed — trust status could not be re-verified.",
     };
   }
   return {
@@ -541,6 +550,26 @@ export function deriveRunTrustSummary(
 ): AdvisorAnalysisTrustSummary | null {
   const contract = snapshot?.run_trust_contract;
   if (!contract) return null;
+
+  // Fail-closed "unknown" (durable state could not be read/re-verified) —
+  // every field below is a placeholder zero/empty, NOT a verified fact.
+  // Never print "0 of 0 holdings decided", "no conflict reviews were
+  // required", "no specialist axes applied" or "no outputs recorded" here —
+  // those are true claims about an ESTABLISHED empty state, not this one.
+  if (contract.overall_status === "unknown") {
+    const reason = contract.source_health?.reason ?? contract.blocking_reasons[0] ?? null;
+    return {
+      overallStatus: "unknown",
+      sessionCoverageLine: reason
+        ? `Session coverage could not be re-verified — ${reason}`
+        : "Session coverage could not be re-verified for this run.",
+      axisCoverageLine: "Specialist-axis coverage could not be re-verified for this run.",
+      conflictReviewLine: "Conflict-review coverage could not be re-verified for this run.",
+      sourceLineageLine: "Source lineage could not be re-verified for this run.",
+      blockingReasons: contract.blocking_reasons,
+      warnings: contract.warnings,
+    };
+  }
 
   const cov = contract.session_coverage;
   const sessionCoverageLine =

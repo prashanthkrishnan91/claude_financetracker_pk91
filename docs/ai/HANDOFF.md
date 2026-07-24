@@ -142,7 +142,7 @@ slices ahead of it.
    path (a real read against the existing production session with a stale/
    missing task graph) is still required after deployment — it has not yet
    been exercised against live production data.
-2. **Source quality / source-reference generation — IN PROGRESS — PR #__PR_NUMBER__.**
+2. **Source quality / source-reference generation — IN PROGRESS — PR #486.**
    New pure module `source_lineage_v1.py`
    (`v2/backend/app/services/intelligence/v3/distributed/source_lineage_v1.py`):
    versioned, structured source references (`provider_observation` for direct

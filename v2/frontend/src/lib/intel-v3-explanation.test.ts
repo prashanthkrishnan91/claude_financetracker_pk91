@@ -19,6 +19,8 @@ import {
   buildPortfolioEvidenceSummary,
   buildSupportingEvidenceSentences,
   buildIncompleteEvidenceSentences,
+  decisionConstraintToLabel,
+  allDecisionConstraintLabels,
   RAW_KEYS_BANNED,
 } from "./intel-v3-explanation";
 import type { IntelV3EvidenceExplanation, IntelV3HeldCard } from "./api";
@@ -317,6 +319,96 @@ describe("buildSafetyDisplay", () => {
     }));
     expect(d.tier).toBe("limited");
   });
+
+  // ── run_trust_contract_v1 decisionConstraints — production-shaped proofs ────
+  // Regression coverage for the reported bug: "current UI calls every
+  // nonempty decision blocker 'Evidence blocked'". When decisionConstraints
+  // is provided, ONLY an evidence_quality constraint is "blocked" — every
+  // other category (price_context/portfolio_policy/risk/source_lineage/
+  // conflict_review) is real but never relabeled an evidence failure.
+
+  it("AMD/TSM-style: price_context only → not evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["price_context"]);
+    expect(d.tier).not.toBe("blocked");
+    expect(d.label).not.toBe("Evidence blocked");
+    expect(d.label).toBe("Price context limited");
+  });
+
+  it("NVDA-style: portfolio_policy only → not evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["portfolio_policy"]);
+    expect(d.tier).not.toBe("blocked");
+    expect(d.label).not.toBe("Evidence blocked");
+    expect(d.label).toBe("Portfolio policy constraint");
+  });
+
+  it("CRM/GOOGL/NFLX-style: conflict_review failure → limited, not blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["conflict_review", "source_lineage"]);
+    expect(d.tier).toBe("limited");
+    expect(d.label).toBe("Conflict review not resolved");
+  });
+
+  it("a real evidence_quality constraint still shows Evidence blocked", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: [] }), ["evidence_quality", "price_context"]);
+    expect(d.tier).toBe("blocked");
+    expect(d.label).toBe("Evidence blocked");
+  });
+
+  it("empty decisionConstraints array falls back to the underlying evidence-band logic, not blocked", () => {
+    const d = buildSafetyDisplay(
+      makeExplanation({ action_blocks: ["some_legacy_block"], safe_for_visible_decision: true, primary_evidence_status: "READY", corroboration_gap: false }),
+      [],
+    );
+    // decisionConstraints=[] means "no real constraint categories" — must not
+    // fall back to the raw action_blocks heuristic that caused the bug.
+    expect(d.tier).not.toBe("blocked");
+  });
+
+  it("undefined decisionConstraints preserves legacy action_blocks behavior", () => {
+    const d = buildSafetyDisplay(makeExplanation({ action_blocks: ["buy_blocked_thin_evidence"] }));
+    expect(d.tier).toBe("blocked");
+  });
+
+  it("empty decisionConstraints array never manufactures 'Other constraint noted'", () => {
+    // Release-blocker requirement: a clean, fully healthy decision returns
+    // decision_constraints=[] from the backend — buildSafetyDisplay must
+    // never invent an "other" limitation for it.
+    const d = buildSafetyDisplay(
+      makeExplanation({
+        action_blocks: [], safe_for_visible_decision: true,
+        primary_evidence_status: "READY", corroboration_gap: false,
+      }),
+      [],
+    );
+    expect(d.label).not.toBe("Other constraint noted");
+  });
+});
+
+describe("decisionConstraintToLabel / allDecisionConstraintLabels", () => {
+  it("returns null for empty/undefined categories", () => {
+    expect(decisionConstraintToLabel(undefined)).toBeNull();
+    expect(decisionConstraintToLabel([])).toBeNull();
+    expect(allDecisionConstraintLabels(undefined)).toEqual([]);
+  });
+
+  it("BLSH-style: portfolio_policy AND conflict_review show as two distinct labels", () => {
+    const labels = allDecisionConstraintLabels(["portfolio_policy", "conflict_review"]);
+    expect(labels).toHaveLength(2);
+    expect(labels.map((l) => l.label)).toContain("Portfolio policy constraint");
+    expect(labels.map((l) => l.label)).toContain("Conflict review not resolved");
+    // Never merged into one generic label.
+    expect(new Set(labels.map((l) => l.label)).size).toBe(2);
+  });
+
+  it("priority order surfaces evidence_quality first when present", () => {
+    const top = decisionConstraintToLabel(["portfolio_policy", "evidence_quality"]);
+    expect(top?.label).toBe("Evidence blocked");
+  });
+
+  it("'other' category is preserved, not silently dropped — a real persisted blocker deserves visibility", () => {
+    const labels = allDecisionConstraintLabels(["other"]);
+    expect(labels).toHaveLength(1);
+    expect(labels[0].label).toBe("Other constraint noted");
+  });
 });
 
 // ── buildPortfolioEvidenceSummary ─────────────────────────────────────────────
@@ -384,6 +476,31 @@ describe("buildPortfolioEvidenceSummary", () => {
     const s = buildPortfolioEvidenceSummary([card]);
     expect(s.blockedCount).toBe(1);
     expect(s.safeCount).toBe(0);
+  });
+
+  it("trust_status='unknown' card → counted in unknownCount, NEVER blockedCount", () => {
+    // Release-blocker requirement: "blocked" (a real, established
+    // limitation) and "unknown" (trust could not be re-verified this read)
+    // must never share a bucket — they are different claims.
+    const card = makeCard();
+    card.detail_drawer_payload.trust_status = "unknown";
+    const s = buildPortfolioEvidenceSummary([card]);
+    expect(s.unknownCount).toBe(1);
+    expect(s.blockedCount).toBe(0);
+    expect(s.safeCount).toBe(0);
+    expect(s.limitedCount).toBe(0);
+  });
+
+  it("trust_status='unknown' card → its stale evidence_explanation is NOT folded into usable-signal counts", () => {
+    // The fail-closed overlay leaves the OLD evidence_explanation payload
+    // untouched for audit purposes — it must never be counted as if it
+    // were reverified current truth.
+    const card = makeCard({ technical_signals_status: "READY", sentiment_status: "READY" });
+    card.detail_drawer_payload.trust_status = "unknown";
+    const s = buildPortfolioEvidenceSummary([card]);
+    expect(s.technicalUsableCount).toBe(0);
+    expect(s.sentimentUsableCount).toBe(0);
+    expect(s.cardsWithExplanation).toBe(0);
   });
 
   it("safe card with corroboration → counted in safeCount", () => {

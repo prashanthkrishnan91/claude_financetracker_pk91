@@ -46,7 +46,10 @@ from ..decision_contracts import (
     RiskBand,
 )
 from ..snapshot_builder import build_snapshot
+from . import run_trust_contract_v1 as trust
 from .task_contracts_v1 import (
+    AXIS_SENTIMENT,
+    AXIS_TECHNICAL,
     SESSION_COMPLETED,
     SESSION_COMPLETED_WITH_GAPS,
     TICKER_DECIDED,
@@ -176,6 +179,7 @@ def build_session_snapshot_payload(
     session: dict[str, Any],
     ticker_rows: list[dict[str, Any]],
     specialist_outputs: list[dict[str, Any]],
+    tasks: Optional[list[dict[str, Any]]] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """Assemble the complete session-native snapshot payload.
@@ -183,6 +187,12 @@ def build_session_snapshot_payload(
     Decided cards come exclusively from persisted deterministic decisions;
     NO CALL / failed tickers appear ONLY in the coverage-gap accounting —
     never as action cards, never backfilled from an older session.
+
+    Also computes the pure ``run_trust_contract_v1`` projection over the same
+    rows and carries it verbatim on the payload (``run_trust_contract``) —
+    session-native publication and read-time enrichment of a pre-existing
+    snapshot both call the SAME projection, so trust is never derived twice
+    with different rules.
     """
     now = now or datetime.now(timezone.utc)
     session_id = str(session.get("id"))
@@ -192,6 +202,18 @@ def build_session_snapshot_payload(
             "frozen_scope_not_terminal:"
             + ",".join(coverage["unaccounted_tickers"])
         )
+
+    trust_contract = trust.build_run_trust_contract(
+        session=session,
+        ticker_rows=ticker_rows,
+        tasks=tasks or [],
+        specialist_outputs=specialist_outputs,
+        now=now,
+    )
+    ticker_trust_by_ticker = {
+        str(entry.get("ticker") or ""): entry
+        for entry in trust_contract.get("ticker_trust") or []
+    }
 
     decisions: list[DecisionOutputV3] = []
     card_metas: list[dict[str, Any]] = []
@@ -210,6 +232,8 @@ def build_session_snapshot_payload(
         record = row.get("decision") or {}
         decisions.append(rebuild_decision_output(ticker, record))
         bundle = row.get("evidence_bundle") or {}
+        trust_entry = ticker_trust_by_ticker.get(ticker, {})
+        axis_readiness = trust_entry.get("axis_readiness") or {}
         card_metas.append({
             "ticker": ticker,
             "name": ticker,
@@ -218,19 +242,40 @@ def build_session_snapshot_payload(
             ),
             "thesis_state": "intact",
             # Session provenance for the drawer: explanations come from THIS
-            # session's specialist outputs and evidence bundle only.
-            "research_axis_readiness": {},
+            # session's specialist outputs and evidence bundle only. Real
+            # per-axis readiness (never the {} placeholder) — a successful
+            # technical/sentiment output can no longer render as MISSING.
+            "research_axis_readiness": {
+                "technical_signals": axis_readiness.get(AXIS_TECHNICAL),
+                "sentiment": axis_readiness.get(AXIS_SENTIMENT),
+            },
             "session_specialist_axes": sorted({
                 str(o.get("axis") or "")
                 for o in outputs_by_ticker.get(ticker, [])
             }),
             "session_evidence_refs": list(bundle.get("source_refs") or []),
+            # Trust-contract signals for the card detail drawer — kept
+            # separate from the evidence-band-only legacy committee logic.
+            "session_lineage_status": trust_entry.get(
+                "lineage_status", trust.LINEAGE_MISSING
+            ),
+            "session_conflict_review_status": trust_entry.get(
+                "conflict_review_status", trust.REVIEW_NOT_REQUIRED
+            ),
+            "session_decision_constraints": trust_entry.get(
+                "decision_constraints", []
+            ),
+            "session_trust_status": trust_entry.get(
+                "trust_status", trust.STATUS_UNKNOWN
+            ),
+            "session_decision_bands": trust_entry.get("decision_bands", {}),
         })
 
     payload = build_snapshot(
         run_id=session_id,
         decisions=decisions,
         card_metas=card_metas,
+        source_health=trust_contract.get("source_health"),
         warnings=(
             [
                 f"{len(coverage['gaps'])} holding(s) could not be analyzed "
@@ -239,6 +284,7 @@ def build_session_snapshot_payload(
             if coverage["gaps"] else []
         ),
     )
+    payload["run_trust_contract"] = trust_contract
 
     has_gaps = bool(coverage["no_call_count"] or coverage["failed_count"])
     snapshot_source = (

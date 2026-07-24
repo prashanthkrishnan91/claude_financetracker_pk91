@@ -30,7 +30,12 @@ import { IntelV3Card } from "@/components/cards/IntelV3Card";
 import { IntelV3Drawer } from "@/components/cards/IntelV3Drawer";
 import { DataHealthDrawer } from "@/components/cards/DataHealthDrawer";
 import { Spinner } from "@/components/ui/Spinner";
-import type { IntelV3HeldCard, IntelV3Action, IntelV3Snapshot } from "@/lib/api";
+import type {
+  IntelV3HeldCard,
+  IntelV3Action,
+  IntelV3Snapshot,
+  IntelV3RunTrustAxisCoverage,
+} from "@/lib/api";
 
 // LOCKED: Intel v3 visible filter contract — ALL / BUY / HOLD / TRIM / SELL only.
 // Never expand or rename. Radar/posture labels must not appear here.
@@ -172,26 +177,80 @@ function WhatChangedStrip({ items }: { items: string[] }) {
 
 // ── Evidence Summary Band ─────────────────────────────────────────────────────
 
-function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
+/** Honest "X/Y contributing" label from the trust contract's authoritative
+ * axis coverage — replaces the old boolean-only "contributing" / "not yet
+ * usable" chip text with real counts when the contract is present. */
+function axisCoverageLabel(
+  counts: IntelV3RunTrustAxisCoverage | undefined,
+  laneLabel: string,
+): { label: string; usable: boolean } {
+  if (!counts || counts.expected_count === 0) {
+    return { label: `${laneLabel} not applicable`, usable: false };
+  }
+  if (counts.succeeded_count === 0) {
+    return { label: `${laneLabel} not yet usable`, usable: false };
+  }
+  if (counts.succeeded_count === counts.expected_count) {
+    return { label: `${laneLabel} contributing (${counts.succeeded_count}/${counts.expected_count})`, usable: true };
+  }
+  return {
+    label: `${laneLabel} contributing for ${counts.succeeded_count}/${counts.expected_count}`,
+    usable: true,
+  };
+}
+
+function EvidenceSummaryBand({
+  cards,
+  axisCoverage,
+  trustUnknown,
+}: {
+  cards: IntelV3HeldCard[];
+  /** run_trust_contract_v1.axis_coverage — authoritative counts derived
+   * from durable specialist outputs/tasks, not card-level heuristics.
+   * Absent on legacy/non-distributed snapshots (falls back to per-card
+   * evidence_explanation counts). */
+  axisCoverage?: Record<string, IntelV3RunTrustAxisCoverage>;
+  /** True when run_trust_contract_v1.overall_status === "unknown" (the
+   * fail-closed read/reverification-failure overlay). axis_coverage is an
+   * empty placeholder in this case, NOT a verified "zero axes applied"
+   * fact — technical/sentiment/company-data chips must say so honestly
+   * instead of reading as "not applicable" or reusing stale per-card
+   * readiness values as if they were reverified. */
+  trustUnknown?: boolean;
+}) {
   const hasAnyExplanation = cards.some(
     (c) => c.detail_drawer_payload?.evidence_explanation != null
   );
 
-  if (!hasAnyExplanation) return null;
+  if (!hasAnyExplanation && !axisCoverage) return null;
 
   const summary = buildPortfolioEvidenceSummary(cards);
-  const technicalUsable = summary.technicalUsableCount > 0;
-  const sentimentUsable = summary.sentimentUsableCount > 0;
+  const technical = trustUnknown
+    ? { label: "Price signals could not be verified", usable: false }
+    : axisCoverage
+    ? axisCoverageLabel(axisCoverage["technical"], "Price signals")
+    : { label: summary.technicalUsableCount > 0 ? "Price signals contributing" : "Price signals not yet usable",
+        usable: summary.technicalUsableCount > 0 };
+  const sentiment = trustUnknown
+    ? { label: "News & sentiment could not be verified", usable: false }
+    : axisCoverage
+    ? axisCoverageLabel(axisCoverage["sentiment"], "News & sentiment")
+    : { label: summary.sentimentUsableCount > 0 ? "News & sentiment contributing" : "News & sentiment not yet usable",
+        usable: summary.sentimentUsableCount > 0 };
+  const technicalUsable = technical.usable;
+  const sentimentUsable = sentiment.usable;
 
   const { fundamentalsUsableCount, cardsWithExplanation } = summary;
-  const companyDataLabel =
-    fundamentalsUsableCount === 0
+  const companyDataLabel = trustUnknown
+    ? "Company data could not be verified"
+    : fundamentalsUsableCount === 0
       ? "Some company data missing or blocked"
       : fundamentalsUsableCount === cardsWithExplanation
       ? "Company data available"
       : `Company data usable for ${fundamentalsUsableCount}/${cardsWithExplanation}`;
-  const companyDataStyle =
-    fundamentalsUsableCount === 0
+  const companyDataStyle = trustUnknown
+    ? "border-border bg-surface-elevated text-text-muted"
+    : fundamentalsUsableCount === 0
       ? "border-action-trim/30 bg-action-trim/10 text-action-trim"
       : "border-action-buy/30 bg-action-buy/10 text-action-buy";
 
@@ -223,6 +282,12 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
             <span className="text-xs text-text-muted">data issues</span>
           </div>
         )}
+        {summary.unknownCount > 0 && (
+          <div className="flex items-baseline gap-1">
+            <span className="text-sm font-bold text-text-muted">{summary.unknownCount}</span>
+            <span className="text-xs text-text-muted">trust unknown</span>
+          </div>
+        )}
         {summary.convictionCappedCount > 0 && (
           <div className="flex items-baseline gap-1 ml-auto">
             <span className="text-sm font-semibold text-text-muted">{summary.convictionCappedCount}</span>
@@ -246,7 +311,7 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
               ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
               : "border-border bg-surface-elevated text-text-muted"
           )}>
-            {technicalUsable ? "Price signals contributing" : "Price signals not yet usable"}
+            {technical.label}
           </span>
           <span className={cn(
             "text-[11px] px-2 py-0.5 rounded border font-medium",
@@ -254,15 +319,26 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
               ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
               : "border-border bg-surface-elevated text-text-muted"
           )}>
-            {sentimentUsable ? "News & sentiment contributing" : "News & sentiment not yet usable"}
+            {sentiment.label}
           </span>
         </div>
-        {(!technicalUsable || !sentimentUsable) && (
+        {trustUnknown ? (
+          // Fail-closed read/reverification failure — we do NOT know that
+          // signals are merely thin, that fundamentals were reverified, or
+          // that the only impact is a confidence cap. Never reuse the
+          // established-thin-signal copy below for this state.
           <p className="text-[10px] text-text-muted leading-snug max-w-md">
-            The engine is conservative when supporting signals are thin. Recommendations
-            still reflect company fundamentals — missing signals cause confidence caps,
-            not false confidence.
+            Evidence-source status could not be re-verified. Support claims
+            are withheld until the durable run data can be read again.
           </p>
+        ) : (
+          (!technicalUsable || !sentimentUsable) && (
+            <p className="text-[10px] text-text-muted leading-snug max-w-md">
+              The engine is conservative when supporting signals are thin. Recommendations
+              still reflect company fundamentals — missing signals cause confidence caps,
+              not false confidence.
+            </p>
+          )
         )}
       </div>
     </div>
@@ -390,7 +466,11 @@ export function IntelV3HoldingsPanel({
       <PortfolioOverview snapshot={snapshot} onDataHealth={() => setDataHealthOpen(true)} />
 
       {/* Evidence quality summary (when governance data is present) */}
-      <EvidenceSummaryBand cards={allCards} />
+      <EvidenceSummaryBand
+        cards={allCards}
+        axisCoverage={snapshot.run_trust_contract?.axis_coverage}
+        trustUnknown={snapshot.run_trust_contract?.overall_status === "unknown"}
+      />
 
       {/* Action filter rail — LOCKED: ALL/BUY/HOLD/TRIM/SELL only */}
       <FilterRail filter={filter} setFilter={setFilter} counts={counts} />

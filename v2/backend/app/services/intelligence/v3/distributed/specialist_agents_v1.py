@@ -33,6 +33,14 @@ from .task_contracts_v1 import (
     AXIS_RISK_FILING,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
+    LANE_CRYPTO_MARKET,
+    LANE_ETF_FUND_DATA,
+    LANE_FUNDAMENTALS,
+    LANE_NEWS_SENTIMENT,
+    LANE_PRICE,
+    LANE_SEC_CATALYST,
+    LANE_SEC_COMPANY_FACTS,
+    LANE_TECHNICALS,
     TASK_DEGRADED,
     TASK_SUCCEEDED,
 )
@@ -183,17 +191,83 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
     elif axis == AXIS_CRYPTO_MARKET:
         base["asset_specific"] = bundle.get("asset_specific")
         base["technical"] = bundle.get("technical")
+    return base
+
+
+def _nonempty(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(v not in (None, "", [], {}) for v in value.values())
+    if isinstance(value, list):
+        return bool(value)
+    return value not in (None, "", [], {})
+
+
+def _axis_supplied_lanes(compact: dict[str, Any], axis: str) -> list[str]:
+    """The exact nonempty external-evidence lanes actually represented in
+    THIS axis's own compact bundle (contract §2) — never derived from the
+    bundle-wide ``usable_lanes`` list, and never a superset of what the axis
+    itself was actually given (e.g. ``risk_filing``'s narrowed fundamental
+    subset counts only when THAT subset is nonempty, even if the full
+    fundamentals lane succeeded)."""
+    supplied: set[str] = set()
+    if _nonempty(compact.get("market")):
+        supplied.add(LANE_PRICE)
+    if _nonempty(compact.get("technical")):
+        supplied.add(LANE_TECHNICALS)
+    if _nonempty(compact.get("fundamental")) or _nonempty(compact.get("valuation")):
+        supplied.add(LANE_FUNDAMENTALS)
+    if _nonempty(compact.get("sentiment")):
+        supplied.add(LANE_NEWS_SENTIMENT)
+    sec = compact.get("sec")
+    if isinstance(sec, dict):
+        if _nonempty(sec.get(LANE_SEC_COMPANY_FACTS)):
+            supplied.add(LANE_SEC_COMPANY_FACTS)
+        if _nonempty(sec.get(LANE_SEC_CATALYST)):
+            supplied.add(LANE_SEC_CATALYST)
+    asset_specific = compact.get("asset_specific")
+    if isinstance(asset_specific, dict):
+        if _nonempty(asset_specific.get("etf_fund_data")):
+            supplied.add(LANE_ETF_FUND_DATA)
+        if _nonempty(asset_specific.get("crypto_market")):
+            supplied.add(LANE_CRYPTO_MARKET)
+
+    candidate = set(source_lineage_v1.AXIS_CANDIDATE_LANES.get(axis, ()))
+    return sorted(supplied & candidate)
+
+
+def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
+    """Single shared source of truth for "what evidence was actually
+    supplied to this axis" (contract §2). Used IDENTICALLY by prompt
+    construction, persisted ``evidence_refs``, cross-session reuse
+    rebinding, and the bounded prompt-safe source projection — nobody
+    derives supplied lanes or a lineage manifest any other way.
+
+    Artifact-backed lanes only ever appear in ``compact_bundle`` (and
+    therefore only ever count as supplied) when ``evidence_bundle_v1`` has
+    already validated the parent artifact's ownership/ticker-scope/active/
+    substantive-payload status — this function trusts that gate and never
+    re-reads the database itself.
+    """
+    compact = _compact_bundle_for_axis(bundle, axis)
+    supplied_lanes = _axis_supplied_lanes(compact, axis)
+    manifest = source_lineage_v1.build_axis_lineage_manifest(
+        axis=axis,
+        source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
+        supplied_lanes=supplied_lanes,
+    )
     # Compact, bounded source projection (contract §3) — lets the analysis
     # see the provenance of the evidence it was actually given. Deterministic
     # code output only; the LLM is never asked to invent or select a
     # citation.
-    manifest = source_lineage_v1.build_axis_lineage_manifest(
-        axis=axis,
-        source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
-        usable_lanes=bundle.get("usable_lanes") or [],
+    compact_with_sources = dict(compact)
+    compact_with_sources["evidence_sources"] = source_lineage_v1.compact_projection(
+        manifest["refs"]
     )
-    base["evidence_sources"] = source_lineage_v1.compact_projection(manifest["refs"])
-    return base
+    return {
+        "compact_bundle": compact_with_sources,
+        "supplied_lanes": supplied_lanes,
+        "manifest": manifest,
+    }
 
 
 def _payload_only(value: Any) -> Any:
@@ -259,7 +333,7 @@ def _build_user_prompt(axis: str, bundles: list[dict[str, Any]]) -> str:
 
     focus = _AXIS_FOCUS.get(axis, axis)
     compact = [
-        _compact_bundle_for_axis(bundle, axis) for bundle in bundles
+        axis_evidence_context(bundle, axis)["compact_bundle"] for bundle in bundles
     ]
     tickers = [str(b.get("ticker")) for b in compact]
     return (
@@ -389,14 +463,11 @@ async def execute_specialist_task(
                 reusable.get("run_session_id")
             ) != session_id:
                 # Analytical fields only carry over; evidence_refs is REBUILT
-                # from THIS session's own bundle lineage — a reused result
-                # must never carry forward a prior session's (possibly
-                # stale) source references (contract §4).
-                rebuilt_refs = source_lineage_v1.build_axis_lineage_manifest(
-                    axis=axis,
-                    source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
-                    usable_lanes=bundle.get("usable_lanes") or [],
-                )
+                # from THIS session's own bundle lineage via the SAME shared
+                # helper the initial analysis and prompt use — a reused
+                # result must never carry forward a prior session's
+                # (possibly stale) source references (contract §4).
+                rebuilt_refs = axis_evidence_context(bundle, axis)["manifest"]
                 store.upsert_specialist_output(
                     client,
                     run_session_id=session_id,
@@ -551,11 +622,7 @@ async def execute_specialist_task(
         if result is None:
             outcome.malformed.append(ticker)
             continue
-        axis_lineage = source_lineage_v1.build_axis_lineage_manifest(
-            axis=axis,
-            source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
-            usable_lanes=bundle.get("usable_lanes") or [],
-        )
+        axis_lineage = axis_evidence_context(bundle, axis)["manifest"]
         persisted = store.upsert_specialist_output(
             client,
             run_session_id=session_id,
@@ -623,6 +690,13 @@ async def execute_review_task(
         outcome.error = "claim_lost"
         return outcome
 
+    # Only VALID specialist rows (score AND confidence both present) are
+    # reviewable inputs — the same validity gate ``aggregate_advisory_signal``
+    # and the trust contract use. A row that never produced a usable
+    # score/confidence contributes nothing to reconcile (contract §5).
+    def _is_valid_specialist_row(o: dict[str, Any]) -> bool:
+        return o.get("score") is not None and o.get("confidence") is not None
+
     reviewed_inputs = [
         {
             "axis": o.get("axis"),
@@ -636,33 +710,42 @@ async def execute_review_task(
         for o in store.list_specialist_outputs(
             client, run_session_id=session_id, ticker=ticker,
         )
-        if o.get("axis") != AXIS_REVIEW
+        if o.get("axis") != AXIS_REVIEW and _is_valid_specialist_row(o)
     ]
     if len(reviewed_inputs) < 1:
         outcome.skipped_insufficient.append(ticker)
         return outcome
 
     # Bounded, prompt-safe view for the LLM (contract §5) — the reviewer sees
-    # WHICH sources back each specialist view, but is never asked to invent
-    # or select a citation; the persisted review lineage below is built
-    # deterministically from the full manifests, not from anything the LLM
-    # returns.
-    prompt_outputs = [
-        {
-            "axis": item.get("axis"),
+    # WHICH sources back each specialist view (lineage status + linked/
+    # missing lanes + a bounded source projection), but is never asked to
+    # invent or select a citation; the persisted review lineage below is
+    # built deterministically from the same re-validated manifests, never
+    # from anything the LLM returns. Each input's manifest is independently
+    # re-derived (never trusted from its own persisted status) via
+    # ``parse_axis_manifest``.
+    prompt_outputs = []
+    for item in reviewed_inputs:
+        axis_name = item.get("axis")
+        manifest = source_lineage_v1.parse_axis_manifest(
+            item.get("evidence_refs"), expected_axis=axis_name, expected_ticker=ticker,
+        )
+        prompt_outputs.append({
+            "axis": axis_name,
             "stance": item.get("stance"),
             "score": item.get("score"),
             "confidence": item.get("confidence"),
             "key_findings": item.get("key_findings"),
             "risks": item.get("risks"),
-            "evidence_sources": source_lineage_v1.compact_projection(
-                (source_lineage_v1.parse_axis_manifest(item.get("evidence_refs")) or {}).get(
-                    "refs", []
-                )
+            "lineage_status": (
+                manifest["status"] if manifest else source_lineage_v1.LINEAGE_MISSING
             ),
-        }
-        for item in reviewed_inputs
-    ]
+            "linked_lanes": manifest["linked_lanes"] if manifest else [],
+            "missing_ref_lanes": manifest["missing_ref_lanes"] if manifest else [],
+            "evidence_sources": source_lineage_v1.compact_projection(
+                manifest["refs"] if manifest else []
+            ),
+        })
 
     outcome.llm_calls += 1
     call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}
@@ -694,9 +777,16 @@ async def execute_review_task(
     )
     # A review never fabricates a new source — its lineage is deterministic
     # code output derived from the exact inputs it reconciled (contract §5),
-    # never anything the LLM response itself carries.
-    review_lineage = source_lineage_v1.build_review_lineage_manifest(reviewed_inputs)
-    review_fingerprint = source_lineage_v1.review_input_fingerprint(reviewed_inputs)
+    # never anything the LLM response itself carries. The audit fingerprint
+    # is built from the EXACT bounded/normalized prompt input the LLM saw
+    # (findings, risks, score, confidence, lineage status, missing lanes,
+    # source identity) plus ticker + prompt version — never the empty string.
+    review_lineage = source_lineage_v1.build_review_lineage_manifest(
+        reviewed_inputs, ticker=ticker,
+    )
+    review_fingerprint = source_lineage_v1.review_input_fingerprint(
+        prompt_outputs, ticker=ticker, prompt_version=PROMPT_VERSION,
+    )
     persisted = store.upsert_specialist_output(
         client,
         run_session_id=session_id,

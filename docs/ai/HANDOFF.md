@@ -1,9 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-24 (Run Intel source-reference lineage PR 2/7 — makes
-`evidence_bundle.source_refs`/specialist `evidence_refs`/review `evidence_refs`
-genuinely source-linked instead of PR 1's honest "0 of N". See the locked
-seven-PR sequence below — this entry is PR 2.)
+Last updated: 2026-07-24 (Run Intel source-reference lineage PR 2/7, patched
+same-PR — makes `evidence_bundle.source_refs`/specialist `evidence_refs`/
+review `evidence_refs` genuinely source-linked instead of PR 1's honest
+"0 of N", then closes six release-blocker semantic gaps in that same PR:
+strict derived manifest validation, axis-supplied-evidence precision +
+artifact ownership scoping, fingerprint correctness, bounded reference
+storage, review input filtering + an audit fingerprint, and source-health
+full/partial/missing semantics. See the locked seven-PR sequence below —
+this entry is PR 2.)
 
 Previously (2026-07-23, Run Intel trust contract PR 1/7 — production session
 `a51e977b-561a-4e98-baa8-59ad56a877ff` audit found 31/31 decided but 0 evidence
@@ -184,18 +189,82 @@ slices ahead of it.
    instead of an always-empty list. No SQL, no new provider, no new env var,
    zero additional provider/LLM calls, `decision_policy_v1.decide()`
    untouched. **Runtime caveat:** fixture/unit/integration test validation is
-   complete (8580 backend tests passed, 0 failed); production verification
-   that a fresh Run Intel run now genuinely produces nonzero source-linked
-   lineage is deferred to the final fresh Run Intel certification run (PR 7)
-   so Anthropic funds aren't spent on a dedicated verification run after
-   every recovery PR.
+   complete; production verification that a fresh Run Intel run now
+   genuinely produces nonzero source-linked lineage is deferred to the final
+   fresh Run Intel certification run (PR 7) so Anthropic funds aren't spent
+   on a dedicated verification run after every recovery PR.
+
+   **Same-PR patch (six release-blocker semantic defects, still PR #486):**
+   (1) `parse_axis_manifest` no longer trusts a persisted `status` field — it
+   independently re-derives status from the manifest's own lane/reference
+   structure (unique/disjoint/union-consistent lanes, every reference
+   structurally valid + lane-consistent + ticker-matched when asked, every
+   linked lane backed by a reference); a self-reported status that disagrees
+   with the derived one makes the WHOLE manifest malformed (`missing`
+   everywhere) — proven with explicit "claims full but isn't" tests (empty
+   refs, unrelated-lane ref, wrong-ticker ref, a missing expected lane, a
+   review claiming full with nonempty `missing_ref_axes`). (2) A new shared
+   `specialist_agents_v1.axis_evidence_context()` helper is the ONE source of
+   truth for "evidence actually supplied to this axis" (used identically by
+   the prompt, persisted `evidence_refs`, reuse rebinding, and the source
+   projection) — derived from the axis's own compact-bundle content, never
+   the bundle-wide `usable_lanes` list; artifact-backed lanes only count as
+   supplied once `evidence_bundle_v1` has verified the parent
+   `research_artifacts` row's ownership (`user_id`), ticker scope, active
+   status and a nonempty payload — a wrong-user/wrong-ticker/empty-payload
+   artifact never leaks into the bundle, prompt or persisted reference. (3)
+   The bundle `input_fingerprint` no longer hashes raw reference objects
+   (which carried `task_id`/`artifact_id`/`artifact_source_id` and, for the
+   PRICE lane specifically, a digest of the volatile intraday price) —
+   `source_lineage_v1.fingerprint_source_refs`/`source_identity_projection`
+   build a canonical, session/task-independent per-lane identity projection
+   instead, so an ordinary price tick alone no longer invalidates every
+   specialist's cross-session reuse while a genuine technical/fundamental/
+   news/crypto/artifact evidence or provider/source-identity change still
+   does. (4) Artifact parent + source-row reads are both scoped to the
+   ticker bundle's `user_id` and bulked to one query each (the same
+   validated parent rows are reused for the SEC/ETF/macro display summaries,
+   closing a prior N+1); every reference list is bounded (8/lane, 24/
+   axis-or-review-manifest, deterministic sort before truncation, an
+   additive `truncated_ref_count`, free-text fields capped at 200 chars, no
+   source URLs/excerpts/full reference objects logged). (5) Conflict review
+   now reconciles ONLY valid (score+confidence present) specialist rows; the
+   bounded prompt input carries lineage status/linked/missing lanes per
+   axis; the persisted `input_fingerprint` is built from the EXACT bounded
+   prompt input (order-independent) plus ticker+prompt_version — changes
+   with any reviewed finding/risk/score/confidence/lineage-status/missing-
+   lane/source-identity change; review model/token-budget/retry/call-count
+   are untouched (still PR 3's scope). (6) `run_trust_contract_v1` tracks
+   full/partial/missing OUTPUT counts separately
+   (`outputs_full_lineage`/`outputs_partial_lineage`/`outputs_missing_lineage`,
+   additive alongside the preserved `outputs_with_source_refs`/
+   `outputs_missing_source_refs`) — `source_health` is `healthy` ONLY when
+   every valid output is full, `limited` for any partial output or a
+   full+missing mix, `blocked` when none are sourced; an all-partial run can
+   no longer misread as healthy (the exact release-blocker this patch
+   fixes). Same invariants preserved throughout: zero new provider/LLM
+   calls, no SQL, no env vars, no frontend files, `decision_policy_v1`/
+   visible actions unchanged. Full backend suite: **8619 passed, 0 failed**
+   (up from 8580 pre-patch; +39 net new focused tests across
+   `test_source_lineage_v1.py` and `test_run_trust_contract_v1.py` covering
+   every explicit scenario above). Production source-lineage behavior
+   remains NOT runtime-proven — same PR 7 deferral as above.
 3. Conflict-review reliability — NOT STARTED. Owns why 5 of 7 reviews failed
    (prompts, model routing, retry behavior) — PR 1 explicitly does not touch
    review prompts/routing/retries, only surfaces the failures truthfully.
-4. Currency normalization — NOT STARTED.
+4. **Evidence normalization and relevance — NOT STARTED** (renamed from
+   "Currency normalization" to state its full locked scope up front).
+   Reserves: currency/unit normalization; ADR/reporting-currency handling;
+   ticker relevance filtering for news/sentiment; valid publication
+   timestamps and freshness; rejection of unrelated or timestamp-zero news
+   items. None of this is implemented by PR 2 — PR 2's `provider_observation`
+   references record whatever timestamp/ticker the provider output already
+   carried, they do not validate or filter it.
 5. Financial-truth refresh — NOT STARTED.
 6. Repeat-run reliability — NOT STARTED.
-7. Performance — NOT STARTED.
+7. Performance — NOT STARTED. Followed by the single final production
+   certification run (after PR 7) that is the only place this sequence
+   claims live production success.
 
 ## The decision spine (one spine, no competitors)
 
@@ -393,16 +462,41 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   25 new), `tsc --noEmit` clean, `next build` green (same placeholder
   `NEXT_PUBLIC_*` env vars as prior PRs needed to prerender locally — sandbox-only).
   No SQL.
-- Run Intel source-reference lineage PR 2/7 (2026-07-24): full backend suite green
-  (8580 passed, 0 failed — Tier 3, cross-cutting: new `source_lineage_v1.py` module
-  consumed by `evidence_bundle_v1.py`, `specialist_agents_v1.py` and
-  `run_trust_contract_v1.py`; 29 new focused tests in `test_source_lineage_v1.py`
-  plus manifest-shape updates to `test_run_trust_contract_v1.py`'s fixture helper).
-  No frontend files changed (verified: `session_evidence_refs` and the
-  `outputs_with_source_refs`/`has_source_refs` fields the frontend actually reads
-  are unaffected string/count vocabulary, never the raw reference arrays) — no
-  frontend test run needed. No SQL, no new provider, no new env var, zero
-  additional provider/LLM calls.
+- Run Intel source-reference lineage PR 2/7 (2026-07-24, initial slice): full
+  backend suite green (8580 passed, 0 failed — Tier 3, cross-cutting: new
+  `source_lineage_v1.py` module consumed by `evidence_bundle_v1.py`,
+  `specialist_agents_v1.py` and `run_trust_contract_v1.py`; 29 new focused
+  tests in `test_source_lineage_v1.py` plus manifest-shape updates to
+  `test_run_trust_contract_v1.py`'s fixture helper). No frontend files
+  changed. No SQL, no new provider, no new env var, zero additional
+  provider/LLM calls.
+- Run Intel source-reference lineage PR 2/7 (2026-07-24, same-PR patch —
+  six release-blocker semantic defects): full backend suite green (8619
+  passed, 0 failed — same Tier 3 justification; +39 net new focused tests
+  across `test_source_lineage_v1.py` — strict "never full" manifest-validation
+  proofs, artifact-ownership/wrong-user/wrong-ticker/empty-payload gap
+  proofs, fingerprint source-identity-projection proofs (price digest
+  excluded, other lanes retained, gaps retained), bounded-reference-storage
+  proofs (per-lane/per-manifest caps + free-text capping),
+  review-input-fingerprint sensitivity proofs — and `test_run_trust_contract_v1.py`
+  (`TestSourceHealthSemantics`: all-partial-never-healthy, all-full-healthy,
+  all-missing-blocked, mixed-limited, zero-outputs-unknown, ticker-level
+  full-requires-every-output-full preserved). `test_distributed_golden_run.py`
+  (exact provider/LLM call accounting) and
+  `test_distributed_durability_fixes.py::TestD4FingerprintStability` (the
+  pre-existing intraday-noise/analytical-change fingerprint proofs) both
+  still green, confirming zero call-count regressions and no loss of the
+  original fingerprint-stability guarantee. Still no frontend files changed
+  (verified: `session_evidence_refs` and the
+  `outputs_with_source_refs`/`has_source_refs` fields the frontend actually
+  reads are unaffected string/count vocabulary, never the raw reference
+  arrays or the new `outputs_full_lineage`/`outputs_partial_lineage`/
+  `outputs_missing_lineage` diagnostic counts) — no frontend test run
+  needed. No SQL, no new provider, no new env var, zero additional
+  provider/LLM calls. `ai_pr_readiness_check.py --base-ref origin/main`:
+  pass-with-advisory-warnings (10 files / ~1679 lines vs. the Level 1 soft
+  limits — expected for a same-PR fix of six identified semantic defects in
+  one cross-cutting module, not scope creep); `certify_v4_1.py`: all PASS.
 
 ## SQL / env state
 

@@ -161,7 +161,7 @@ def test_axis_lineage_manifest_partial_when_one_supplied_lane_unreferenced():
     manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_TECHNICAL,
         source_refs_by_lane={LANE_PRICE: [price_ref]},
-        usable_lanes=[LANE_PRICE, LANE_TECHNICALS],
+        supplied_lanes=[LANE_PRICE, LANE_TECHNICALS],
     )
     assert manifest["status"] == lineage.LINEAGE_PARTIAL
     assert manifest["linked_lanes"] == [LANE_PRICE]
@@ -180,14 +180,14 @@ def test_axis_lineage_manifest_full_when_every_supplied_lane_referenced():
     manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_TECHNICAL,
         source_refs_by_lane={LANE_PRICE: [price_ref], LANE_TECHNICALS: [tech_ref]},
-        usable_lanes=[LANE_PRICE, LANE_TECHNICALS],
+        supplied_lanes=[LANE_PRICE, LANE_TECHNICALS],
     )
     assert manifest["status"] == lineage.LINEAGE_FULL
 
 
 def test_axis_lineage_manifest_missing_when_no_candidate_lane_usable():
     manifest = lineage.build_axis_lineage_manifest(
-        axis=AXIS_TECHNICAL, source_refs_by_lane={}, usable_lanes=[],
+        axis=AXIS_TECHNICAL, source_refs_by_lane={}, supplied_lanes=[],
     )
     assert manifest["status"] == lineage.LINEAGE_MISSING
     assert manifest["expected_lanes"] == []
@@ -200,6 +200,102 @@ def test_parse_axis_manifest_rejects_legacy_and_malformed():
     assert lineage.parse_axis_manifest({"status": "full"}) is None  # no schema_version
 
 
+class TestStrictManifestValidationNeverFull:
+    """Explicit proofs that a manifest claiming ``full`` while its own
+    structure disagrees is always rejected (derived to ``missing``) — the
+    persisted ``status`` field is NEVER trusted at face value."""
+
+    def test_full_status_with_empty_refs_is_missing(self):
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL, "refs": [],
+        }
+        assert lineage.parse_axis_manifest(manifest) is None
+        assert lineage.output_lineage_status(manifest) == lineage.LINEAGE_MISSING
+
+    def test_full_status_with_unrelated_lane_reference_is_missing(self):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+            output={"last": 1, "source": "yfinance", "as_of": "x"},
+        )
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL,
+            "refs": [ref],  # ref's own lane (technicals) isn't in linked_lanes
+        }
+        assert lineage.parse_axis_manifest(manifest, expected_ticker="AAA") is None
+
+    def test_full_status_with_invalid_reference_is_missing(self):
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL,
+            "refs": ["not-a-structured-reference"],
+        }
+        assert lineage.parse_axis_manifest(manifest) is None
+
+    def test_full_status_with_wrong_ticker_reference_is_missing(self):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="ZZZ", task_id="t1",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL, "refs": [ref],
+        }
+        assert lineage.parse_axis_manifest(manifest, expected_ticker="AAA") is None
+        # No expected_ticker given — still structurally valid (ticker check
+        # only applies when the caller asks for it).
+        assert lineage.parse_axis_manifest(manifest) is not None
+
+    def test_full_status_with_missing_expected_lane_is_missing(self):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t1",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            # technicals is claimed expected but never appears in linked OR
+            # missing — union(linked, missing) != expected.
+            "expected_lanes": [LANE_PRICE, LANE_TECHNICALS],
+            "linked_lanes": [LANE_PRICE], "missing_ref_lanes": [],
+            "status": lineage.LINEAGE_FULL, "refs": [ref],
+        }
+        assert lineage.parse_axis_manifest(manifest, expected_ticker="AAA") is None
+
+    def test_review_full_status_with_nonempty_missing_ref_axes_is_missing(self):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t1",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_REVIEW,
+            "derived_from_axes": [AXIS_TECHNICAL, AXIS_FUNDAMENTAL],
+            "missing_ref_axes": [AXIS_FUNDAMENTAL],
+            "status": lineage.LINEAGE_FULL,
+            "refs": [ref],
+        }
+        assert lineage.parse_axis_manifest(manifest, expected_ticker="AAA") is None
+        assert lineage.output_lineage_status(
+            manifest, expected_axis=AXIS_REVIEW, expected_ticker="AAA",
+        ) == lineage.LINEAGE_MISSING
+
+    def test_wrong_expected_axis_is_missing(self):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t1",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
+            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL, "refs": [ref],
+        }
+        assert lineage.parse_axis_manifest(manifest, expected_axis=AXIS_FUNDAMENTAL) is None
+
+
 def test_review_lineage_manifest_full_only_when_every_input_full():
     full_manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_TECHNICAL,
@@ -207,23 +303,37 @@ def test_review_lineage_manifest_full_only_when_every_input_full():
             lane=LANE_PRICE, ticker="AAA", task_id="t1",
             output={"price": 1, "source": "yfinance", "as_of": "x"},
         )]},
-        usable_lanes=[LANE_PRICE],
+        supplied_lanes=[LANE_PRICE],
     )
-    partial_manifest = dict(full_manifest)
-    partial_manifest["status"] = lineage.LINEAGE_PARTIAL
+    # A genuinely PARTIAL manifest (self-consistent — one supplied lane
+    # referenced, one not) — flipping only the "status" label of an
+    # otherwise-full manifest would now be rejected as malformed (structural
+    # status is independently re-derived, never trusted).
+    partial_manifest = lineage.build_axis_lineage_manifest(
+        axis=AXIS_FUNDAMENTAL,
+        source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t2",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )]},
+        supplied_lanes=[LANE_PRICE, LANE_FUNDAMENTALS],
+    )
+    assert partial_manifest["status"] == lineage.LINEAGE_PARTIAL
 
-    review = lineage.build_review_lineage_manifest([
-        {"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest},
-        {"axis": AXIS_FUNDAMENTAL, "evidence_refs": partial_manifest},
-    ])
+    review = lineage.build_review_lineage_manifest(
+        [
+            {"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest},
+            {"axis": AXIS_FUNDAMENTAL, "evidence_refs": partial_manifest},
+        ],
+        ticker="AAA",
+    )
     assert review["status"] == lineage.LINEAGE_PARTIAL
     assert AXIS_FUNDAMENTAL in review["missing_ref_axes"]
     assert review["derived_from_axes"] == [AXIS_FUNDAMENTAL, AXIS_TECHNICAL]
     assert review["refs"]  # inherits the technical axis's valid reference
 
-    review_all_full = lineage.build_review_lineage_manifest([
-        {"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest},
-    ])
+    review_all_full = lineage.build_review_lineage_manifest(
+        [{"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest}], ticker="AAA",
+    )
     assert review_all_full["status"] == lineage.LINEAGE_FULL
     assert review_all_full["missing_ref_axes"] == []
 
@@ -235,20 +345,26 @@ def test_review_never_writes_evidence_refs_empty_when_sourced_inputs_exist():
             lane=LANE_PRICE, ticker="AAA", task_id="t1",
             output={"price": 1, "source": "yfinance", "as_of": "x"},
         )]},
-        usable_lanes=[LANE_PRICE],
+        supplied_lanes=[LANE_PRICE],
     )
     review = lineage.build_review_lineage_manifest(
-        [{"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest}]
+        [{"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest}], ticker="AAA",
     )
     assert review["refs"] != []
 
 
 def test_review_input_fingerprint_is_deterministic_and_nonempty():
-    inputs = [{"axis": AXIS_TECHNICAL, "stance": "positive", "score": 0.5,
-               "confidence": 0.8, "evidence_refs": None}]
-    fp1 = lineage.review_input_fingerprint(inputs)
-    fp2 = lineage.review_input_fingerprint(inputs)
+    inputs = [{
+        "axis": AXIS_TECHNICAL, "stance": "positive", "score": 0.5,
+        "confidence": 0.8, "key_findings": ["f"], "risks": [],
+        "lineage_status": lineage.LINEAGE_FULL, "linked_lanes": [LANE_PRICE],
+        "missing_ref_lanes": [], "evidence_sources": [],
+    }]
+    fp1 = lineage.review_input_fingerprint(inputs, ticker="AAA", prompt_version="v2")
+    fp2 = lineage.review_input_fingerprint(inputs, ticker="AAA", prompt_version="v2")
     assert fp1 and fp1 == fp2
+    fp3 = lineage.review_input_fingerprint(inputs, ticker="BBB", prompt_version="v2")
+    assert fp3 != fp1  # ticker is part of the fingerprint
 
 
 # ── Bundle-level integration: direct lanes via real collectors ──────────────
@@ -461,17 +577,29 @@ class TestArtifactBackedLaneLineage:
             "asset_type": asset_type, "state": state, "output": output,
         }).execute()
 
+    def _seed_artifact(
+        self, client: FakeSupabase, *, artifact_id, ticker, user_id=USER,
+        payload=None, is_active=True,
+    ):
+        client.table("research_artifacts").insert({
+            "id": artifact_id, "user_id": user_id, "ticker": ticker,
+            "artifact_type": "sec_company_facts", "skill_pack": "test",
+            "payload": payload if payload is not None else {"fact": "value"},
+            "is_active": is_active,
+        }).execute()
+
     def test_artifact_with_source_rows_creates_research_artifact_source_refs(self):
         client = FakeSupabase()
         session_id = self._seed_ticker_and_session(client, "AAPL")
         artifact_id = str(uuid.uuid4())
+        self._seed_artifact(client, artifact_id=artifact_id, ticker="AAPL")
         self._insert_lane_task(
             client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
             asset_type="equity", state=TASK_SUCCEEDED,
             output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
         )
         client.table("research_artifact_sources").insert({
-            "id": str(uuid.uuid4()), "artifact_id": artifact_id,
+            "id": str(uuid.uuid4()), "artifact_id": artifact_id, "user_id": USER,
             "provider_name": "sec_edgar", "source_kind": "sec_filing",
             "source_id": "0001234567-26-000001",
         }).execute()
@@ -484,11 +612,100 @@ class TestArtifactBackedLaneLineage:
         assert refs[0]["ref_type"] == lineage.REF_TYPE_RESEARCH_ARTIFACT_SOURCE
         assert refs[0]["provider"] == "sec_edgar"
         assert LANE_SEC_COMPANY_FACTS not in bundle["source_ref_gaps"]
+        assert bundle["sec"][LANE_SEC_COMPANY_FACTS]["payload"]
+
+    def test_succeeded_task_with_missing_artifact_parent_is_a_gap(self):
+        client = FakeSupabase()
+        session_id = self._seed_ticker_and_session(client, "AAPL")
+        artifact_id = str(uuid.uuid4())
+        # No research_artifacts row at all for this id.
+        self._insert_lane_task(
+            client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
+            asset_type="equity", state=TASK_SUCCEEDED,
+            output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
+        )
+        row = client.rows("intel_run_tickers")[0]
+        bundle = build_evidence_bundle(
+            client, session={"id": session_id}, ticker_row=row,
+        )
+        assert LANE_SEC_COMPANY_FACTS not in bundle["source_refs_by_lane"]
+        assert LANE_SEC_COMPANY_FACTS in bundle["source_ref_gaps"]
+        assert LANE_SEC_COMPANY_FACTS not in bundle["sec"]
+
+    def test_wrong_user_artifact_never_leaks_provenance(self):
+        client = FakeSupabase()
+        session_id = self._seed_ticker_and_session(client, "AAPL")
+        artifact_id = str(uuid.uuid4())
+        other_user = str(uuid.uuid4())
+        self._seed_artifact(
+            client, artifact_id=artifact_id, ticker="AAPL", user_id=other_user,
+        )
+        client.table("research_artifact_sources").insert({
+            "id": str(uuid.uuid4()), "artifact_id": artifact_id, "user_id": other_user,
+            "provider_name": "sec_edgar", "source_kind": "sec_filing",
+        }).execute()
+        self._insert_lane_task(
+            client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
+            asset_type="equity", state=TASK_SUCCEEDED,
+            output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
+        )
+        row = client.rows("intel_run_tickers")[0]
+        bundle = build_evidence_bundle(
+            client, session={"id": session_id}, ticker_row=row,
+        )
+        assert LANE_SEC_COMPANY_FACTS not in bundle["source_refs_by_lane"]
+        assert LANE_SEC_COMPANY_FACTS in bundle["source_ref_gaps"]
+        assert LANE_SEC_COMPANY_FACTS not in bundle["sec"]
+
+    def test_wrong_ticker_artifact_never_leaks_provenance(self):
+        client = FakeSupabase()
+        session_id = self._seed_ticker_and_session(client, "AAPL")
+        artifact_id = str(uuid.uuid4())
+        self._seed_artifact(client, artifact_id=artifact_id, ticker="MSFT")
+        client.table("research_artifact_sources").insert({
+            "id": str(uuid.uuid4()), "artifact_id": artifact_id, "user_id": USER,
+            "provider_name": "sec_edgar", "source_kind": "sec_filing",
+        }).execute()
+        self._insert_lane_task(
+            client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
+            asset_type="equity", state=TASK_SUCCEEDED,
+            output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
+        )
+        row = client.rows("intel_run_tickers")[0]
+        bundle = build_evidence_bundle(
+            client, session={"id": session_id}, ticker_row=row,
+        )
+        assert LANE_SEC_COMPANY_FACTS not in bundle["source_refs_by_lane"]
+        assert LANE_SEC_COMPANY_FACTS in bundle["source_ref_gaps"]
+        assert LANE_SEC_COMPANY_FACTS not in bundle["sec"]
+
+    def test_empty_artifact_payload_is_a_gap(self):
+        client = FakeSupabase()
+        session_id = self._seed_ticker_and_session(client, "AAPL")
+        artifact_id = str(uuid.uuid4())
+        self._seed_artifact(client, artifact_id=artifact_id, ticker="AAPL", payload={})
+        client.table("research_artifact_sources").insert({
+            "id": str(uuid.uuid4()), "artifact_id": artifact_id, "user_id": USER,
+            "provider_name": "sec_edgar", "source_kind": "sec_filing",
+        }).execute()
+        self._insert_lane_task(
+            client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
+            asset_type="equity", state=TASK_SUCCEEDED,
+            output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
+        )
+        row = client.rows("intel_run_tickers")[0]
+        bundle = build_evidence_bundle(
+            client, session={"id": session_id}, ticker_row=row,
+        )
+        assert LANE_SEC_COMPANY_FACTS not in bundle["source_refs_by_lane"]
+        assert LANE_SEC_COMPANY_FACTS in bundle["source_ref_gaps"]
+        assert LANE_SEC_COMPANY_FACTS not in bundle["sec"]
 
     def test_artifact_with_no_source_rows_is_a_gap_not_a_reference(self):
         client = FakeSupabase()
         session_id = self._seed_ticker_and_session(client, "AAPL")
         artifact_id = str(uuid.uuid4())
+        self._seed_artifact(client, artifact_id=artifact_id, ticker="AAPL")
         self._insert_lane_task(
             client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
             asset_type="equity", state=TASK_SUCCEEDED,
@@ -502,20 +719,24 @@ class TestArtifactBackedLaneLineage:
         assert LANE_SEC_COMPANY_FACTS not in bundle["source_refs_by_lane"]
         assert LANE_SEC_COMPANY_FACTS in bundle["source_ref_gaps"]
         # The evidence itself (sec summary payload) must still be usable —
-        # a lineage gap never erases otherwise-usable evidence.
+        # a lineage gap never erases otherwise-usable evidence — the
+        # SUBSTANTIVE artifact payload (owned + ticker-scoped + active) IS
+        # present in the bundle summary even without source rows.
         assert LANE_SEC_COMPANY_FACTS in bundle["usable_lanes"]
+        assert bundle["sec"][LANE_SEC_COMPANY_FACTS]["payload"]
 
     def test_artifact_source_read_failure_fails_closed_without_crashing(self):
         client = FakeSupabase()
         session_id = self._seed_ticker_and_session(client, "AAPL")
         artifact_id = str(uuid.uuid4())
+        self._seed_artifact(client, artifact_id=artifact_id, ticker="AAPL")
         self._insert_lane_task(
             client, session_id=session_id, ticker="AAPL", lane=LANE_SEC_COMPANY_FACTS,
             asset_type="equity", state=TASK_SUCCEEDED,
             output={"artifact_id": artifact_id, "as_of": "2026-07-24T00:00:00+00:00"},
         )
         client.table("research_artifact_sources").insert({
-            "id": str(uuid.uuid4()), "artifact_id": artifact_id,
+            "id": str(uuid.uuid4()), "artifact_id": artifact_id, "user_id": USER,
             "provider_name": "sec_edgar", "source_kind": "sec_filing",
         }).execute()
 
@@ -615,14 +836,17 @@ class TestSpecialistAxisLineage:
         self, monkeypatch,
     ):
         from app.services.intelligence.v3.distributed.specialist_agents_v1 import (
-            _compact_bundle_for_axis,
+            axis_evidence_context,
         )
 
         client = FakeSupabase()
         await _ready_bundle_session(client, monkeypatch, ["AAPL"])
         row = next(r for r in client.rows("intel_run_tickers") if r["ticker"] == "AAPL")
         bundle = row["evidence_bundle"]
-        compact = _compact_bundle_for_axis(bundle, AXIS_TECHNICAL)
+        context = axis_evidence_context(bundle, AXIS_TECHNICAL)
+        assert LANE_PRICE in context["supplied_lanes"]
+        assert LANE_TECHNICALS in context["supplied_lanes"]
+        compact = context["compact_bundle"]
         assert "evidence_sources" in compact
         assert compact["evidence_sources"]
         for source in compact["evidence_sources"]:
@@ -818,7 +1042,7 @@ class TestReviewLineage:
                 lane=LANE_PRICE, ticker="AAA", task_id="t1",
                 output={"price": 1, "source": "yfinance", "as_of": "x"},
             )]},
-            usable_lanes=[LANE_PRICE],
+            supplied_lanes=[LANE_PRICE],
         )
         session_id = str(uuid.uuid4())
         client.table("intel_run_sessions").insert({
@@ -853,3 +1077,349 @@ class TestReviewLineage:
             if o["axis"] == AXIS_REVIEW
         )
         assert review_output["evidence_refs"]["status"] == lineage.LINEAGE_PARTIAL
+
+    @pytest.mark.asyncio
+    async def test_invalid_specialist_rows_excluded_call_count_unchanged(self):
+        client = FakeSupabase()
+        session_id = str(uuid.uuid4())
+        client.table("intel_run_sessions").insert({
+            "id": session_id, "user_id": USER, "status": "running",
+            "workflow_version": 2,
+        }).execute()
+        # Valid row — included.
+        client.table("intel_run_specialist_outputs").insert({
+            "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+            "ticker": "AAA", "axis": AXIS_TECHNICAL, "score": 0.5, "confidence": 0.8,
+            "key_findings": ["f"], "risks": [], "evidence_refs": None,
+        }).execute()
+        # Invalid row (no confidence) — must be excluded from reconciliation.
+        client.table("intel_run_specialist_outputs").insert({
+            "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+            "ticker": "AAA", "axis": AXIS_FUNDAMENTAL, "score": 0.5, "confidence": None,
+            "key_findings": ["f"], "risks": [], "evidence_refs": None,
+        }).execute()
+        review_task = {
+            "id": str(uuid.uuid4()), "run_session_id": session_id,
+            "user_id": USER, "task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA",
+            "state": "claimed", "claim_owner": "test-worker",
+            "claim_token": str(uuid.uuid4()), "attempts": 1,
+        }
+        client.table("intel_run_tasks").insert(review_task).execute()
+        review_task = next(
+            t for t in client.rows("intel_run_tasks") if t["id"] == review_task["id"]
+        )
+        llm = FakeLLM()
+        outcome = await execute_review_task(client, task=review_task, llm=llm)
+        assert outcome.final_state == TASK_SUCCEEDED
+        # Review model/token-budget/retry/call-count contract is untouched —
+        # exactly one LLM call regardless of how many rows were filtered.
+        assert outcome.llm_calls == 1
+        review_output = next(
+            o for o in client.rows("intel_run_specialist_outputs")
+            if o["axis"] == AXIS_REVIEW
+        )
+        assert review_output["evidence_refs"]["derived_from_axes"] == [AXIS_TECHNICAL]
+
+
+# ── Fingerprint canonical source-identity projection (contract §3 patch) ────
+
+class TestFingerprintSourceIdentityProjection:
+    def test_price_lane_output_digest_excluded_from_projection(self):
+        ref_a = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t1",
+            output={"price": 100.0, "source": "yfinance", "as_of": "x"},
+        )
+        ref_b = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t2",
+            output={"price": 105.5, "source": "yfinance", "as_of": "y"},
+        )
+        proj_a = lineage.source_identity_projection(ref_a)
+        proj_b = lineage.source_identity_projection(ref_b)
+        assert "output_digest" not in proj_a
+        assert proj_a == proj_b
+
+    def test_other_lane_output_digest_retained_in_projection(self):
+        ref_a = lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+            output={"last": 100.0, "source": "yfinance", "as_of": "x"},
+        )
+        ref_b = lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAA", task_id="t2",
+            output={"last": 105.5, "source": "yfinance", "as_of": "y"},
+        )
+        proj_a = lineage.source_identity_projection(ref_a)
+        proj_b = lineage.source_identity_projection(ref_b)
+        assert "output_digest" in proj_a
+        assert proj_a != proj_b
+
+    def test_artifact_projection_ignores_internal_ids_keeps_external_identity(self):
+        ref_a = lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-1",
+            source_row={"id": "src-1", "provider_name": "sec_edgar",
+                        "source_id": "0001234567-26-000001"},
+        )
+        ref_b = lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-2",
+            source_row={"id": "src-2", "provider_name": "sec_edgar",
+                        "source_id": "0001234567-26-000001"},
+        )
+        proj_a = lineage.source_identity_projection(ref_a)
+        proj_b = lineage.source_identity_projection(ref_b)
+        assert proj_a == proj_b
+        assert "artifact_id" not in proj_a
+        assert "artifact_source_id" not in proj_a
+
+    def test_artifact_projection_changes_with_genuine_external_identity(self):
+        ref_a = lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-1",
+            source_row={"id": "src-1", "provider_name": "sec_edgar", "source_id": "AAA-FILING"},
+        )
+        ref_b = lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-1",
+            source_row={"id": "src-1", "provider_name": "sec_edgar", "source_id": "BBB-FILING"},
+        )
+        assert (
+            lineage.source_identity_projection(ref_a)
+            != lineage.source_identity_projection(ref_b)
+        )
+
+    def test_provider_change_alters_projection(self):
+        ref_a = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t1",
+            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        )
+        ref_b = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id="t2",
+            output={"price": 1, "source": "yfinance_v2", "as_of": "x"},
+        )
+        assert (
+            lineage.source_identity_projection(ref_a)
+            != lineage.source_identity_projection(ref_b)
+        )
+
+    def test_fingerprint_source_refs_retains_gaps(self):
+        proj_a = lineage.fingerprint_source_refs({}, [])
+        proj_b = lineage.fingerprint_source_refs({}, [LANE_NEWS_SENTIMENT])
+        assert proj_a != proj_b
+
+
+def _seed_session_and_ticker(client: FakeSupabase, ticker: str, asset_type: str = "equity") -> str:
+    session_id = str(uuid.uuid4())
+    client.table("intel_run_sessions").insert({
+        "id": session_id, "user_id": USER, "status": "running", "workflow_version": 2,
+    }).execute()
+    store.insert_ticker_rows(
+        client, run_session_id=session_id, user_id=USER,
+        rows=[{"ticker": ticker, "asset_type": asset_type}],
+    )
+    return session_id
+
+
+def _seed_direct_lane_task(client, *, session_id, ticker, lane, output):
+    client.table("intel_run_tasks").insert({
+        "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+        "task_type": TASK_COLLECT_EVIDENCE_LANE, "lane": lane, "ticker": ticker,
+        "asset_type": "equity", "state": TASK_SUCCEEDED, "output": output,
+    }).execute()
+
+
+def _seed_full_direct_bundle_inputs(
+    client, *, session_id, ticker, price_value=101.5, price_source="yfinance",
+    technicals_last=100.0, has_price_ref=True,
+):
+    price_output = {"pct_1d": 0.1, "as_of": "2026-07-24T00:00:00+00:00"}
+    if has_price_ref:
+        price_output["price"] = price_value
+        price_output["source"] = price_source
+    else:
+        price_output["price"] = price_value  # data present, but no attributable provider
+    _seed_direct_lane_task(
+        client, session_id=session_id, ticker=ticker, lane=LANE_PRICE, output=price_output,
+    )
+    _seed_direct_lane_task(
+        client, session_id=session_id, ticker=ticker, lane=LANE_TECHNICALS,
+        output={"last": technicals_last, "sma20": 99.0, "source": "yfinance",
+                "as_of": "2026-07-24T00:00:00+00:00"},
+    )
+    _seed_direct_lane_task(
+        client, session_id=session_id, ticker=ticker, lane=LANE_FUNDAMENTALS,
+        output={"pe": 21.0, "market_cap": 1_000_000_000.0, "source": "yfinance",
+                "as_of": "2026-07-24T00:00:00+00:00"},
+    )
+    _seed_direct_lane_task(
+        client, session_id=session_id, ticker=ticker, lane=LANE_NEWS_SENTIMENT,
+        output={"items": [{"headline": "x", "source": "yfinance", "datetime": 1}],
+                "source": "yfinance", "as_of": "2026-07-24T00:00:00+00:00"},
+    )
+
+
+def _build_bundle_with_direct_inputs(**seed_kwargs) -> dict:
+    client = FakeSupabase()
+    ticker = seed_kwargs.get("ticker", "AAA")
+    session_id = _seed_session_and_ticker(client, ticker)
+    _seed_full_direct_bundle_inputs(client, session_id=session_id, **seed_kwargs)
+    row = client.rows("intel_run_tickers")[0]
+    return build_evidence_bundle(client, session={"id": session_id}, ticker_row=row)
+
+
+class TestBundleFingerprintSourceIdentitySensitivity:
+    def test_price_value_change_alone_does_not_change_bundle_fingerprint(self):
+        bundle_a = _build_bundle_with_direct_inputs(ticker="AAA", price_value=101.5)
+        bundle_b = _build_bundle_with_direct_inputs(ticker="AAA", price_value=999.0)
+        assert bundle_a["input_fingerprint"] == bundle_b["input_fingerprint"]
+
+    def test_technicals_value_change_alters_bundle_fingerprint(self):
+        bundle_a = _build_bundle_with_direct_inputs(ticker="AAA", technicals_last=100.0)
+        bundle_b = _build_bundle_with_direct_inputs(ticker="AAA", technicals_last=999.0)
+        assert bundle_a["input_fingerprint"] != bundle_b["input_fingerprint"]
+
+    def test_price_provider_identity_change_alters_bundle_fingerprint(self):
+        bundle_a = _build_bundle_with_direct_inputs(ticker="AAA", price_source="yfinance")
+        bundle_b = _build_bundle_with_direct_inputs(ticker="AAA", price_source="yfinance_v2")
+        assert bundle_a["input_fingerprint"] != bundle_b["input_fingerprint"]
+
+    def test_sourced_vs_gap_price_evidence_alters_bundle_fingerprint(self):
+        bundle_a = _build_bundle_with_direct_inputs(ticker="AAA", has_price_ref=True)
+        bundle_b = _build_bundle_with_direct_inputs(ticker="AAA", has_price_ref=False)
+        assert LANE_PRICE in bundle_a["source_refs_by_lane"]
+        assert LANE_PRICE in bundle_b["source_ref_gaps"]
+        assert bundle_a["input_fingerprint"] != bundle_b["input_fingerprint"]
+
+
+# ── Bounded reference storage (contract §4 patch) ────────────────────────────
+
+class TestBoundedReferenceStorage:
+    def test_lane_references_bounded_with_truncation_disclosed(self):
+        many_rows = [
+            {"id": f"src-{i}", "provider_name": "sec_edgar", "source_id": f"doc-{i}"}
+            for i in range(12)
+        ]
+        refs = [
+            lineage.make_research_artifact_source_ref(
+                lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-1",
+                source_row=row,
+            )
+            for row in many_rows
+        ]
+        bounded, truncated = lineage.bound_references(refs, lineage.MAX_REFS_PER_LANE)
+        assert len(bounded) == lineage.MAX_REFS_PER_LANE
+        assert truncated == 12 - lineage.MAX_REFS_PER_LANE
+        assert bounded == lineage.dedupe_references(refs)[:lineage.MAX_REFS_PER_LANE]
+
+    def test_axis_manifest_bounded_to_24_and_round_trips(self):
+        source_refs_by_lane: dict[str, list] = {}
+        lanes = [LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST]
+        for lane_idx, lane in enumerate(lanes):
+            refs = []
+            for i in range(8):
+                if lane in (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST):
+                    refs.append(lineage.make_research_artifact_source_ref(
+                        lane=lane, ticker="AAA", artifact_id=f"art-{lane_idx}",
+                        source_row={"id": f"src-{lane_idx}-{i}", "provider_name": "sec_edgar"},
+                    ))
+                else:
+                    refs.append(lineage.make_provider_observation_ref(
+                        lane=lane, ticker="AAA", task_id=f"t-{lane_idx}-{i}",
+                        output={"value": i, "source": "yfinance", "as_of": "x"},
+                    ))
+            source_refs_by_lane[lane] = refs  # 8 per lane x 4 lanes = 32 raw refs
+        manifest = lineage.build_axis_lineage_manifest(
+            axis=AXIS_FUNDAMENTAL, source_refs_by_lane=source_refs_by_lane,
+            supplied_lanes=lanes,
+        )
+        assert len(manifest["refs"]) <= lineage.MAX_REFS_PER_MANIFEST
+        assert manifest["truncated_ref_count"] > 0
+        reparsed = lineage.parse_axis_manifest(
+            manifest, expected_axis=AXIS_FUNDAMENTAL, expected_ticker="AAA",
+        )
+        assert reparsed is not None
+        assert reparsed["status"] == manifest["status"]
+
+    def test_free_text_identifier_fields_are_capped(self):
+        huge = "x" * 5000
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_PRICE, ticker="AAA", task_id=huge,
+            output={"price": 1, "source": huge, "as_of": "x"},
+        )
+        assert len(ref["task_id"]) <= lineage.MAX_FREE_TEXT_CHARS
+        assert len(ref["provider"]) <= lineage.MAX_FREE_TEXT_CHARS
+
+        artifact_ref = lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_COMPANY_FACTS, ticker="AAA", artifact_id="art-1",
+            source_row={"id": "src-1", "provider_name": "sec_edgar", "source_url": huge},
+        )
+        assert len(artifact_ref["source_url"]) <= lineage.MAX_FREE_TEXT_CHARS
+
+
+# ── Review input-fingerprint sensitivity (contract §5 patch) ────────────────
+
+class TestReviewInputFingerprintSensitivity:
+    def _base_prompt_input(self) -> dict:
+        return {
+            "axis": AXIS_TECHNICAL, "stance": "positive", "score": 0.5, "confidence": 0.8,
+            "key_findings": ["f1"], "risks": ["r1"],
+            "lineage_status": lineage.LINEAGE_FULL, "linked_lanes": [LANE_PRICE],
+            "missing_ref_lanes": [],
+            "evidence_sources": [
+                {"lane": LANE_PRICE, "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
+                 "provider": "yfinance"},
+            ],
+        }
+
+    def test_finding_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, key_findings=["a different finding"])
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_risk_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, risks=["a different risk"])
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_score_or_confidence_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, confidence=0.1)
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_lineage_status_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, lineage_status=lineage.LINEAGE_PARTIAL)
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_missing_ref_lane_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, missing_ref_lanes=[LANE_TECHNICALS])
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_source_identity_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        changed = dict(base, evidence_sources=[
+            {"lane": LANE_PRICE, "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
+             "provider": "coingecko"},
+        ])
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
+        assert fp1 != fp2
+
+    def test_ordering_alone_does_not_alter_fingerprint(self):
+        a = self._base_prompt_input()
+        b = dict(self._base_prompt_input(), axis=AXIS_FUNDAMENTAL)
+        fp1 = lineage.review_input_fingerprint([a, b], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([b, a], ticker="AAA", prompt_version="v2")
+        assert fp1 == fp2
+
+    def test_prompt_version_change_alters_fingerprint(self):
+        base = self._base_prompt_input()
+        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
+        fp2 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v3")
+        assert fp1 != fp2

@@ -178,13 +178,25 @@ def _is_valid_output(output: Optional[dict[str, Any]]) -> bool:
     return output.get("score") is not None and output.get("confidence") is not None
 
 
-def _has_min_source_lineage(refs: Any) -> bool:
+def _output_lineage_status(output: dict[str, Any]) -> str:
+    """Structural, axis/ticker-aware lineage status for one persisted
+    specialist/review output — validates against the output's OWN axis and
+    ticker (a manifest claiming a different axis, or carrying a reference
+    for a different ticker, is rejected, not trusted)."""
+    return source_lineage_v1.output_lineage_status(
+        output.get("evidence_refs"),
+        expected_axis=output.get("axis"),
+        expected_ticker=output.get("ticker"),
+    )
+
+
+def _has_min_source_lineage(output: dict[str, Any]) -> bool:
     """Structural validation via ``source_lineage_v1`` — a versioned,
     validated axis-lineage manifest with status full/partial (i.e. at least
     one real external reference). Malformed objects and legacy opaque
     strings (pre-PR-2 ``output_ref`` values) are never truthy merely for
     being nonempty."""
-    return source_lineage_v1.output_lineage_status(refs) != source_lineage_v1.LINEAGE_MISSING
+    return _output_lineage_status(output) != source_lineage_v1.LINEAGE_MISSING
 
 
 def classify_decision_constraints(
@@ -352,10 +364,7 @@ def _lineage_status_for_outputs(outputs: list[dict[str, Any]]) -> str:
     """
     if not outputs:
         return LINEAGE_MISSING
-    statuses = [
-        source_lineage_v1.output_lineage_status(o.get("evidence_refs"))
-        for o in outputs
-    ]
+    statuses = [_output_lineage_status(o) for o in outputs]
     if all(s == source_lineage_v1.LINEAGE_FULL for s in statuses):
         return LINEAGE_FULL
     if any(
@@ -550,12 +559,25 @@ def build_run_trust_contract(
         t for t in decided_tickers if lineage_status_by_ticker.get(t) == LINEAGE_MISSING
     )
 
-    outputs_with_refs = sum(
+    # Full/partial/missing tracked SEPARATELY — an all-partial run must never
+    # collapse into "outputs_with_refs == total" and read as healthy (the
+    # release-blocker defect this patch fixes: partial output lineage is
+    # NOT full lineage, even though it is not "missing" either).
+    outputs_full_lineage = sum(
         1 for outs in valid_outputs_by_ticker_all_axes.values()
-        for o in outs if _has_min_source_lineage(o.get("evidence_refs"))
+        for o in outs if _output_lineage_status(o) == LINEAGE_FULL
+    )
+    outputs_partial_lineage = sum(
+        1 for outs in valid_outputs_by_ticker_all_axes.values()
+        for o in outs if _output_lineage_status(o) == LINEAGE_PARTIAL
     )
     total_valid_outputs = sum(len(outs) for outs in valid_outputs_by_ticker_all_axes.values())
-    outputs_missing_refs = total_valid_outputs - outputs_with_refs
+    outputs_missing_lineage = total_valid_outputs - outputs_full_lineage - outputs_partial_lineage
+    # Back-compat aggregate counts (existing response fields) — "with refs"
+    # means ANY nonmissing lineage (full or partial), matching the prior
+    # public meaning of this field.
+    outputs_with_refs = outputs_full_lineage + outputs_partial_lineage
+    outputs_missing_refs = outputs_missing_lineage
 
     if total_valid_outputs == 0:
         source_health_status = STATUS_UNKNOWN
@@ -568,19 +590,26 @@ def build_run_trust_contract(
             "source health could not be established from zero outputs."
         )
         source_health = {"status": source_health_status, "reason": source_health_reason}
-    elif outputs_with_refs == 0:
+    elif outputs_full_lineage == total_valid_outputs:
+        # EVERY valid decision-influencing output has structurally valid
+        # FULL lineage — the only condition that may ever read healthy.
+        source_health_status = STATUS_HEALTHY
+        source_health = {"status": source_health_status}
+    elif outputs_full_lineage == 0 and outputs_partial_lineage == 0:
+        # None sourced at all.
         source_health_status = STATUS_BLOCKED
         source_health = {"status": source_health_status}
-    elif outputs_missing_refs > 0:
-        source_health_status = STATUS_LIMITED
-        source_health = {"status": source_health_status}
     else:
-        source_health_status = STATUS_HEALTHY
+        # Any partial output, or a mix of full and missing — never healthy.
+        source_health_status = STATUS_LIMITED
         source_health = {"status": source_health_status}
 
     source_lineage = {
         "outputs_with_source_refs": outputs_with_refs,
         "outputs_missing_source_refs": outputs_missing_refs,
+        "outputs_full_lineage": outputs_full_lineage,
+        "outputs_partial_lineage": outputs_partial_lineage,
+        "outputs_missing_lineage": outputs_missing_lineage,
         # Back-compat ticker lists (nonempty lineage anywhere) — superseded
         # by the explicit full/partial/missing lists below for new readers.
         "tickers_with_lineage": lineage_full_tickers,
@@ -798,6 +827,9 @@ def unknown_overlay_contract(
         "source_lineage": {
             "outputs_with_source_refs": 0,
             "outputs_missing_source_refs": 0,
+            "outputs_full_lineage": 0,
+            "outputs_partial_lineage": 0,
+            "outputs_missing_lineage": 0,
             "tickers_with_lineage": [],
             "tickers_missing_lineage": [],
             "tickers_full_lineage": [],

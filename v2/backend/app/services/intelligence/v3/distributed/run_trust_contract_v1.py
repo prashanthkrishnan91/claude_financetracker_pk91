@@ -65,6 +65,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
 from .task_contracts_v1 import (
     AXIS_CRYPTO_MARKET,
@@ -133,11 +134,6 @@ TRACKED_AXES: tuple[str, ...] = (
     AXIS_CRYPTO_MARKET,
 )
 
-# A card is not "source validated" unless at least this many distinct source
-# references are present. PR 2 owns generating real references; this PR only
-# refuses to fabricate a validated label from evidence_band alone.
-MIN_SOURCE_REF_COUNT = 1
-
 # ── Decision-constraint categories (deterministic, non-exclusive) ────────────
 CONSTRAINT_EVIDENCE_QUALITY = "evidence_quality"
 CONSTRAINT_SOURCE_LINEAGE = "source_lineage"
@@ -183,12 +179,12 @@ def _is_valid_output(output: Optional[dict[str, Any]]) -> bool:
 
 
 def _has_min_source_lineage(refs: Any) -> bool:
-    if not refs:
-        return False
-    try:
-        return len([r for r in refs if r]) >= MIN_SOURCE_REF_COUNT
-    except TypeError:
-        return False
+    """Structural validation via ``source_lineage_v1`` — a versioned,
+    validated axis-lineage manifest with status full/partial (i.e. at least
+    one real external reference). Malformed objects and legacy opaque
+    strings (pre-PR-2 ``output_ref`` values) are never truthy merely for
+    being nonempty."""
+    return source_lineage_v1.output_lineage_status(refs) != source_lineage_v1.LINEAGE_MISSING
 
 
 def classify_decision_constraints(
@@ -345,14 +341,29 @@ def _readiness_label(status: str, confidence: Optional[float]) -> str:
 
 
 def _lineage_status_for_outputs(outputs: list[dict[str, Any]]) -> str:
+    """Per-ticker lineage over every decision-influencing output.
+
+    ``full`` only when EVERY output's own structural lineage is full;
+    ``partial`` when at least one output carries valid (full or partial)
+    lineage but not every output does; ``missing`` when none do. A
+    per-output ``full`` status already requires every evidence lane THAT
+    axis was actually given to carry a reference — this aggregation never
+    downgrades that by re-counting raw ref presence.
+    """
     if not outputs:
         return LINEAGE_MISSING
-    with_refs = sum(1 for o in outputs if _has_min_source_lineage(o.get("evidence_refs")))
-    if with_refs == 0:
-        return LINEAGE_MISSING
-    if with_refs == len(outputs):
+    statuses = [
+        source_lineage_v1.output_lineage_status(o.get("evidence_refs"))
+        for o in outputs
+    ]
+    if all(s == source_lineage_v1.LINEAGE_FULL for s in statuses):
         return LINEAGE_FULL
-    return LINEAGE_PARTIAL
+    if any(
+        s in (source_lineage_v1.LINEAGE_FULL, source_lineage_v1.LINEAGE_PARTIAL)
+        for s in statuses
+    ):
+        return LINEAGE_PARTIAL
+    return LINEAGE_MISSING
 
 
 def build_run_trust_contract(

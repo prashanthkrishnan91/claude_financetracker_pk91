@@ -32,6 +32,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.intelligence.v3.distributed import run_trust_contract_v1 as trust
+from app.services.intelligence.v3.distributed import source_lineage_v1 as lineage
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_ETF_EXPOSURE,
     AXIS_FUNDAMENTAL,
@@ -135,6 +136,29 @@ def _ticker_row(ticker: str) -> dict:
 
 
 def _specialist_output(ticker: str, axis: str, *, evidence_refs=None) -> dict:
+    """``evidence_refs`` truthy/falsy keeps the old call convention (hundreds
+    of call sites just signal "has a reference" vs "doesn't") while building
+    a schema-valid PR-2 axis-lineage manifest — ``run_trust_contract_v1``
+    now reads the manifest's own ``status`` field, never a raw truthy list.
+    """
+    has_ref = bool(evidence_refs)
+    manifest = {
+        "schema_version": lineage.SCHEMA_VERSION,
+        "axis": axis,
+        "expected_lanes": ["price"],
+        "linked_lanes": ["price"] if has_ref else [],
+        "missing_ref_lanes": [] if has_ref else ["price"],
+        "status": lineage.LINEAGE_FULL if has_ref else lineage.LINEAGE_MISSING,
+        "refs": (
+            [{
+                "schema_version": lineage.SCHEMA_VERSION,
+                "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
+                "lane": "price", "provider": "yfinance", "ticker": ticker,
+                "task_id": f"{ticker}-{axis}-task", "output_digest": "sha256:test",
+            }]
+            if has_ref else []
+        ),
+    }
     return {
         "ticker": ticker,
         "axis": axis,
@@ -144,7 +168,7 @@ def _specialist_output(ticker: str, axis: str, *, evidence_refs=None) -> dict:
         "risks": [],
         # Zero-reference outputs — matches production: 0 persisted specialist
         # outputs with nonempty evidence_refs.
-        "evidence_refs": list(evidence_refs or []),
+        "evidence_refs": manifest,
         "missing_evidence": [],
         "limitations": [],
         "model": "fake", "prompt_version": "test",

@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from ....agents.llm import NON_RETRYABLE_PROVIDER_CLASSES
 from . import run_task_store_v1 as store
+from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
 from .task_contracts_v1 import (
     ALLOWED_STANCES,
@@ -39,7 +40,10 @@ from .run_task_store_v1 import TASK_FAILED_RETRYABLE
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "distributed_specialist_v1"
+# v2: the prompt contract now carries a compact, bounded source projection
+# (contract §3) — a reused output from the v1 (unsourced) prompt contract
+# must never be treated as equivalent and is never reused (contract §4/§13).
+PROMPT_VERSION = "distributed_specialist_v2"
 # How long a specialist output stays reusable for an unchanged evidence
 # fingerprint (skips duplicate LLM calls across sessions).
 OUTPUT_VALID_HOURS = 24.0
@@ -179,6 +183,16 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
     elif axis == AXIS_CRYPTO_MARKET:
         base["asset_specific"] = bundle.get("asset_specific")
         base["technical"] = bundle.get("technical")
+    # Compact, bounded source projection (contract §3) — lets the analysis
+    # see the provenance of the evidence it was actually given. Deterministic
+    # code output only; the LLM is never asked to invent or select a
+    # citation.
+    manifest = source_lineage_v1.build_axis_lineage_manifest(
+        axis=axis,
+        source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
+        usable_lanes=bundle.get("usable_lanes") or [],
+    )
+    base["evidence_sources"] = source_lineage_v1.compact_projection(manifest["refs"])
     return base
 
 
@@ -357,7 +371,10 @@ async def execute_specialist_task(
         fingerprint = str(bundle.get("input_fingerprint") or "")
         fingerprints[ticker] = fingerprint
 
-        # Reuse an unchanged prior output instead of a new LLM call.
+        # Reuse an unchanged prior output instead of a new LLM call. Reuse
+        # requires the CURRENT prompt version — a row persisted under an
+        # older (unsourced) prompt contract never matches and is never
+        # reused (contract §4/§13).
         if fingerprint:
             reusable = store.find_reusable_specialist_output(
                 client,
@@ -365,11 +382,21 @@ async def execute_specialist_task(
                 ticker=ticker,
                 axis=axis,
                 input_fingerprint=fingerprint,
+                prompt_version=PROMPT_VERSION,
                 now=now,
             )
             if reusable is not None and str(
                 reusable.get("run_session_id")
             ) != session_id:
+                # Analytical fields only carry over; evidence_refs is REBUILT
+                # from THIS session's own bundle lineage — a reused result
+                # must never carry forward a prior session's (possibly
+                # stale) source references (contract §4).
+                rebuilt_refs = source_lineage_v1.build_axis_lineage_manifest(
+                    axis=axis,
+                    source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
+                    usable_lanes=bundle.get("usable_lanes") or [],
+                )
                 store.upsert_specialist_output(
                     client,
                     run_session_id=session_id,
@@ -380,11 +407,15 @@ async def execute_specialist_task(
                         key: reusable.get(key)
                         for key in (
                             "stance", "score", "confidence", "key_findings",
-                            "risks", "evidence_refs", "missing_evidence",
-                            "limitations", "valid_until", "model",
-                            "prompt_version", "input_fingerprint",
+                            "risks", "missing_evidence", "limitations",
+                            "valid_until", "model",
                         )
-                    } | {"batch_key": str(task.get("batch_key") or "")},
+                    } | {
+                        "evidence_refs": rebuilt_refs,
+                        "prompt_version": PROMPT_VERSION,
+                        "input_fingerprint": fingerprint,
+                        "batch_key": str(task.get("batch_key") or ""),
+                    },
                     now=now,
                 )
                 outcome.reused.append(ticker)
@@ -520,6 +551,11 @@ async def execute_specialist_task(
         if result is None:
             outcome.malformed.append(ticker)
             continue
+        axis_lineage = source_lineage_v1.build_axis_lineage_manifest(
+            axis=axis,
+            source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
+            usable_lanes=bundle.get("usable_lanes") or [],
+        )
         persisted = store.upsert_specialist_output(
             client,
             run_session_id=session_id,
@@ -532,7 +568,7 @@ async def execute_specialist_task(
                 "confidence": result["confidence"],
                 "key_findings": result["key_findings"],
                 "risks": result["risks"],
-                "evidence_refs": list(bundle.get("source_refs") or []),
+                "evidence_refs": axis_lineage,
                 "missing_evidence": result["missing_evidence"],
                 "limitations": result["limitations"],
                 "valid_until": valid_until,
@@ -587,7 +623,7 @@ async def execute_review_task(
         outcome.error = "claim_lost"
         return outcome
 
-    outputs = [
+    reviewed_inputs = [
         {
             "axis": o.get("axis"),
             "stance": o.get("stance"),
@@ -602,16 +638,38 @@ async def execute_review_task(
         )
         if o.get("axis") != AXIS_REVIEW
     ]
-    if len(outputs) < 1:
+    if len(reviewed_inputs) < 1:
         outcome.skipped_insufficient.append(ticker)
         return outcome
+
+    # Bounded, prompt-safe view for the LLM (contract §5) — the reviewer sees
+    # WHICH sources back each specialist view, but is never asked to invent
+    # or select a citation; the persisted review lineage below is built
+    # deterministically from the full manifests, not from anything the LLM
+    # returns.
+    prompt_outputs = [
+        {
+            "axis": item.get("axis"),
+            "stance": item.get("stance"),
+            "score": item.get("score"),
+            "confidence": item.get("confidence"),
+            "key_findings": item.get("key_findings"),
+            "risks": item.get("risks"),
+            "evidence_sources": source_lineage_v1.compact_projection(
+                (source_lineage_v1.parse_axis_manifest(item.get("evidence_refs")) or {}).get(
+                    "refs", []
+                )
+            ),
+        }
+        for item in reviewed_inputs
+    ]
 
     outcome.llm_calls += 1
     call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}
     response = await llm.ask_json(
         REVIEW_SYSTEM_PROMPT,
         f"Ticker: {ticker}\nSpecialist outputs (JSON):\n"
-        + json.dumps(outputs, default=str)[:30000],
+        + json.dumps(prompt_outputs, default=str)[:30000],
         max_tokens=500,
         metadata=call_meta,
     )
@@ -634,6 +692,11 @@ async def execute_review_task(
         outcome.models_used[-1] if outcome.models_used
         else getattr(llm, "primary_model", None) or "claude"
     )
+    # A review never fabricates a new source — its lineage is deterministic
+    # code output derived from the exact inputs it reconciled (contract §5),
+    # never anything the LLM response itself carries.
+    review_lineage = source_lineage_v1.build_review_lineage_manifest(reviewed_inputs)
+    review_fingerprint = source_lineage_v1.review_input_fingerprint(reviewed_inputs)
     persisted = store.upsert_specialist_output(
         client,
         run_session_id=session_id,
@@ -646,13 +709,13 @@ async def execute_review_task(
             "confidence": normalized["confidence"],
             "key_findings": normalized["key_findings"],
             "risks": normalized["risks"],
-            "evidence_refs": [],
+            "evidence_refs": review_lineage,
             "missing_evidence": normalized["missing_evidence"],
             "limitations": normalized["limitations"],
             "valid_until": (now + timedelta(hours=OUTPUT_VALID_HOURS)).isoformat(),
             "model": str(model_name),
             "prompt_version": PROMPT_VERSION,
-            "input_fingerprint": "",
+            "input_fingerprint": review_fingerprint,
             "batch_key": None,
         },
         now=now,

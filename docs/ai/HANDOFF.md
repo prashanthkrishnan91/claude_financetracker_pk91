@@ -1,12 +1,16 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-23 (Run Intel trust contract PR 1/7 — production session
+Last updated: 2026-07-24 (Run Intel source-reference lineage PR 2/7 — makes
+`evidence_bundle.source_refs`/specialist `evidence_refs`/review `evidence_refs`
+genuinely source-linked instead of PR 1's honest "0 of N". See the locked
+seven-PR sequence below — this entry is PR 2.)
+
+Previously (2026-07-23, Run Intel trust contract PR 1/7 — production session
 `a51e977b-561a-4e98-baa8-59ad56a877ff` audit found 31/31 decided but 0 evidence
 bundles/specialist outputs with source references, 5/7 required conflict reviews
 failed silently, `research_axis_readiness={}` mislabeled successful technical/
 sentiment outputs as unusable, and every nonempty decision blocker rendered as
-"Evidence blocked" regardless of category. See the locked seven-PR sequence
-below — this entry is PR 1.)
+"Evidence blocked" regardless of category.)
 
 Previously (2026-07-22, Haiku specialist output completion fix, PR #484 — production
 failure: session 7c4069a1-cc07-4c1e-a7d4-3bea67dd206d froze 31 holdings but completed 14
@@ -66,8 +70,8 @@ overweight constraint). This sequence is the active scope for Run Intel work
 until production certification passes; do not start unrelated Run Intel
 slices ahead of it.
 
-1. **Publish and display a truthful Run Intel trust contract — IN PROGRESS —
-   PR #485.** Becomes COMPLETED only after merge. New pure projection
+1. **Publish and display a truthful Run Intel trust contract — COMPLETED —
+   PR #485.** New pure projection
    `run_trust_contract_v1`
    (`v2/backend/app/services/intelligence/v3/distributed/run_trust_contract_v1.py`):
    session coverage; per-axis specialist coverage split into **required vs.
@@ -138,10 +142,53 @@ slices ahead of it.
    path (a real read against the existing production session with a stale/
    missing task graph) is still required after deployment — it has not yet
    been exercised against live production data.
-2. Source quality / source-reference generation — NOT STARTED. Owns making
-   `evidence_bundle.source_refs` / specialist `evidence_refs` actually
-   nonempty; PR 1's lineage fields will then reflect real coverage instead of
-   the current honest "0 of N" state.
+2. **Source quality / source-reference generation — IN PROGRESS — PR #__PR_NUMBER__.**
+   New pure module `source_lineage_v1.py`
+   (`v2/backend/app/services/intelligence/v3/distributed/source_lineage_v1.py`):
+   versioned, structured source references (`provider_observation` for direct
+   yfinance/CoinGecko lane task outputs; `research_artifact_source` for
+   canonical `research_artifact_sources` rows on SEC/ETF artifact-backed
+   lanes — an artifact id alone never counts), deterministic dedup, bounded
+   prompt-safe compact projection, per-axis lineage manifest construction
+   (full/partial/missing), and review-derived lineage. Legacy opaque strings
+   and malformed objects are structurally rejected, never truthy.
+   `evidence_bundle_v1.py` now derives `source_refs_by_lane`/`source_refs`/
+   `source_ref_gaps`/`quality.source_linked_lane_count`/`source_ref_count`
+   from the actual terminal lane task outputs (direct lanes) and a single
+   bulk `research_artifact_sources` query per ticker bundle (artifact lanes),
+   fails closed to a lineage gap (never a bundle crash or lost evidence) on a
+   source-row read failure, and strips `task_id`/`observed_at` from the
+   fingerprint (alongside the existing `as_of`/`cache_hit`/`generated_at`/
+   `fetched_at`) so a fresh session/task id never defeats cross-session
+   specialist reuse. `specialist_agents_v1.py`: each axis's persisted
+   `evidence_refs` is now an axis-scoped manifest derived from
+   `AXIS_CANDIDATE_LANES` ∩ the bundle's own usable lanes (no more copying
+   the whole-bundle ref list onto every axis); the compact prompt bundle
+   gained a bounded `evidence_sources` projection (identity fields only, no
+   citation invention); `PROMPT_VERSION` bumped to
+   `distributed_specialist_v2`; cross-session reuse
+   (`find_reusable_specialist_output`) now also requires an exact
+   `prompt_version` match (a legacy unsourced output is never reused) and
+   rebuilds `evidence_refs` from the CURRENT session's bundle lineage rather
+   than copying the reused row's (possibly stale) references; a successful
+   conflict review's `evidence_refs` is now a derived manifest that unions +
+   dedupes the valid references of every non-review input it reconciled
+   (full only when every reconciled input was itself full) with a
+   deterministic `input_fingerprint` (previously always `""`).
+   `run_trust_contract_v1._has_min_source_lineage`/`_lineage_status_for_outputs`
+   now validate the structural manifest via `source_lineage_v1` instead of a
+   raw truthy/nonempty-list count — malformed objects and legacy opaque
+   strings read as missing lineage, never as validated. Session-native
+   publication's `session_evidence_refs` is unchanged code (still
+   `bundle.source_refs`) but now carries genuine structured references
+   instead of an always-empty list. No SQL, no new provider, no new env var,
+   zero additional provider/LLM calls, `decision_policy_v1.decide()`
+   untouched. **Runtime caveat:** fixture/unit/integration test validation is
+   complete (8580 backend tests passed, 0 failed); production verification
+   that a fresh Run Intel run now genuinely produces nonzero source-linked
+   lineage is deferred to the final fresh Run Intel certification run (PR 7)
+   so Anthropic funds aren't spent on a dedicated verification run after
+   every recovery PR.
 3. Conflict-review reliability — NOT STARTED. Owns why 5 of 7 reviews failed
    (prompts, model routing, retry behavior) — PR 1 explicitly does not touch
    review prompts/routing/retries, only surfaces the failures truthfully.
@@ -346,6 +393,16 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   25 new), `tsc --noEmit` clean, `next build` green (same placeholder
   `NEXT_PUBLIC_*` env vars as prior PRs needed to prerender locally — sandbox-only).
   No SQL.
+- Run Intel source-reference lineage PR 2/7 (2026-07-24): full backend suite green
+  (8580 passed, 0 failed — Tier 3, cross-cutting: new `source_lineage_v1.py` module
+  consumed by `evidence_bundle_v1.py`, `specialist_agents_v1.py` and
+  `run_trust_contract_v1.py`; 29 new focused tests in `test_source_lineage_v1.py`
+  plus manifest-shape updates to `test_run_trust_contract_v1.py`'s fixture helper).
+  No frontend files changed (verified: `session_evidence_refs` and the
+  `outputs_with_source_refs`/`has_source_refs` fields the frontend actually reads
+  are unaffected string/count vocabulary, never the raw reference arrays) — no
+  frontend test run needed. No SQL, no new provider, no new env var, zero
+  additional provider/LLM calls.
 
 ## SQL / env state
 

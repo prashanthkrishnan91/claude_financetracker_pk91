@@ -837,19 +837,31 @@ def find_reusable_specialist_output(
     ticker: str,
     axis: str,
     input_fingerprint: str,
+    prompt_version: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> Optional[dict[str, Any]]:
     """A prior session's still-valid output for the same evidence fingerprint
-    (skips a duplicate LLM call). Returns None when none is reusable."""
+    (skips a duplicate LLM call). Returns None when none is reusable.
+
+    ``prompt_version``, when given, is required to match exactly — a row
+    persisted under an older prompt contract (e.g. one that never carried a
+    versioned source-lineage manifest) must never be reused as if it were
+    equivalent to a current-contract output.
+    """
     now_dt = _now(now)
     try:
-        res = (
+        query = (
             client.table(SPECIALIST_TABLE)
             .select("*")
             .eq("user_id", user_id)
             .eq("ticker", ticker)
             .eq("axis", axis)
             .eq("input_fingerprint", input_fingerprint)
+        )
+        if prompt_version is not None:
+            query = query.eq("prompt_version", prompt_version)
+        res = (
+            query
             .order("created_at", desc=True)
             .limit(5)
             .execute()

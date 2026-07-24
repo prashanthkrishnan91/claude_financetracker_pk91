@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from . import run_task_store_v1 as store
+from . import source_lineage_v1
 from .task_contracts_v1 import (
     LANE_CRYPTO_MARKET,
     LANE_ETF_FUND_DATA,
@@ -37,6 +38,42 @@ from .task_contracts_v1 import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Artifact-backed lanes derive lineage from research_artifact_sources rows;
+# every other lane derives a provider_observation reference directly from its
+# own durable task output.
+_ARTIFACT_LANES = (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST, LANE_ETF_FUND_DATA)
+_ARTIFACT_SOURCE_COLUMNS = (
+    "id,artifact_id,provider_name,provider_version,source_kind,source_id,"
+    "source_url,source_published_at,fetched_at,source_hash"
+)
+
+
+def _bulk_read_artifact_sources(
+    client: Any, artifact_ids: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """One query for every artifact-backed lane's canonical source rows in
+    this ticker's bundle. Fails closed to an empty mapping (a lineage gap,
+    never a bundle-construction crash) on a read failure."""
+    ids = sorted({str(a) for a in artifact_ids if a})
+    if not ids:
+        return {}
+    try:
+        res = (
+            client.table("research_artifact_sources")
+            .select(_ARTIFACT_SOURCE_COLUMNS)
+            .in_("artifact_id", ids)
+            .execute()
+        )
+        by_artifact: dict[str, list[dict[str, Any]]] = {}
+        for row in _rows(res):
+            by_artifact.setdefault(str(row.get("artifact_id") or ""), []).append(row)
+        return by_artifact
+    except Exception as exc:
+        logger.debug(
+            "bundle.artifact_sources_read_failed ids=%s err=%s", ids, exc,
+        )
+        return {}
 
 
 def _rows(res: Any) -> list[dict[str, Any]]:
@@ -79,8 +116,11 @@ def _artifact_summary(client: Any, artifact_id: Optional[str]) -> Optional[dict[
 # Volatile keys stripped recursively from the fingerprint source: timestamps
 # and cache markers change on every fetch even when the analytical substance
 # is identical, and would make cross-session LLM reuse (contract §14) dead.
+# ``task_id`` is stripped for the same reason — it's a fresh replay locator
+# minted on every task row (including a TTL cache-hit's own new task), never
+# a signal that the underlying evidence or source identity changed.
 _VOLATILE_FINGERPRINT_KEYS = frozenset(
-    {"as_of", "cache_hit", "generated_at", "fetched_at"}
+    {"as_of", "cache_hit", "generated_at", "fetched_at", "task_id", "observed_at"}
 )
 
 
@@ -148,16 +188,14 @@ def build_evidence_bundle(
     )
     outputs: dict[str, dict[str, Any]] = {}
     states: dict[str, str] = {}
-    source_refs: list[str] = []
+    task_ids: dict[str, str] = {}
     for task in lane_tasks:
         lane = str(task.get("lane") or "")
         states[lane] = str(task.get("state") or "")
+        task_ids[lane] = str(task.get("id") or "")
         output = task.get("output")
         if isinstance(output, dict):
             outputs[lane] = output
-        ref = task.get("output_ref")
-        if ref:
-            source_refs.append(str(ref))
 
     usable_lanes = [
         lane for lane, state in states.items()
@@ -181,6 +219,61 @@ def build_evidence_bundle(
         lane for lane in required_lanes_for_asset(asset_type)
         if lane not in usable_lanes
     ]
+
+    # ── Versioned source-reference lineage (PR 2) ──────────────────────────
+    # Direct lanes derive a provider_observation reference straight from
+    # their own terminal task output; artifact-backed lanes derive
+    # research_artifact_source references from one bulk query over the
+    # canonical source rows. A usable lane with no valid reference is
+    # recorded as a gap — it never erases the evidence itself.
+    source_refs_by_lane: dict[str, list[dict[str, Any]]] = {}
+    source_ref_gaps: list[str] = []
+
+    for lane in usable_lanes:
+        if lane in _ARTIFACT_LANES:
+            continue
+        ref = source_lineage_v1.make_provider_observation_ref(
+            lane=lane, ticker=ticker, task_id=task_ids.get(lane),
+            output=outputs.get(lane) or {},
+        )
+        if ref is not None:
+            source_refs_by_lane[lane] = [ref]
+        else:
+            source_ref_gaps.append(lane)
+
+    artifact_usable_lanes = [lane for lane in usable_lanes if lane in _ARTIFACT_LANES]
+    if artifact_usable_lanes:
+        artifact_id_by_lane = {
+            lane: str((outputs.get(lane) or {}).get("artifact_id") or "")
+            for lane in artifact_usable_lanes
+        }
+        sources_by_artifact = _bulk_read_artifact_sources(
+            client, list(artifact_id_by_lane.values())
+        )
+        for lane, artifact_id in artifact_id_by_lane.items():
+            rows = sources_by_artifact.get(artifact_id) or []
+            refs = [
+                r for r in (
+                    source_lineage_v1.make_research_artifact_source_ref(
+                        lane=lane, ticker=ticker, artifact_id=artifact_id,
+                        source_row=row,
+                    )
+                    for row in rows
+                ) if r is not None
+            ]
+            if refs:
+                source_refs_by_lane[lane] = refs
+            else:
+                source_ref_gaps.append(lane)
+
+    source_refs_by_lane = {
+        lane: source_lineage_v1.dedupe_references(refs)
+        for lane, refs in source_refs_by_lane.items()
+    }
+    source_refs = source_lineage_v1.dedupe_references(
+        [ref for refs in source_refs_by_lane.values() for ref in refs]
+    )
+    source_ref_gaps = sorted(source_ref_gaps)
 
     # Session-level context outputs.
     portfolio_context: dict[str, Any] = {}
@@ -249,7 +342,9 @@ def build_evidence_bundle(
         ),
         "macro": macro_summary,
         "asset_specific": asset_specific,
-        "source_refs": sorted(set(source_refs)),
+        "source_refs_by_lane": source_refs_by_lane,
+        "source_refs": source_refs,
+        "source_ref_gaps": source_ref_gaps,
         "usable_lanes": sorted(usable_lanes),
         "missing_lanes": missing_lanes,
         "degraded_lanes": degraded_lanes,
@@ -257,6 +352,8 @@ def build_evidence_bundle(
         "quality": {
             "usable_lane_count": len(usable_lanes),
             "total_lane_count": len(states),
+            "source_linked_lane_count": len(source_refs_by_lane),
+            "source_ref_count": len(source_refs),
         },
     }
     bundle["input_fingerprint"] = stable_fingerprint(

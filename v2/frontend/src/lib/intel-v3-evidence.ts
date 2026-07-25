@@ -50,22 +50,23 @@ export function sourceLineageToLabel(
   }
 }
 
-/** Per-card conflict-review status → plain-English label. Specialist
- * conflicts are resolved deterministically (no LLM review) — copy describes
- * conservative handling, never a "review" that "passed" or reached
- * "consensus". Never claims "no conflict was detected" for "unknown"
+/** Per-card conflict-review status → plain-English label. The status
+ * vocabulary is shared by historical LLM-reviewed holdings and new
+ * deterministically-resolved holdings, so this copy is method-neutral —
+ * true for either generation, never "review passed"/"AI review"/consensus
+ * language, and never claims "no conflict was detected" for "unknown"
  * (fail-closed read-time overlay) — that would silently re-introduce the
  * exact optimistic-default bug this exists to prevent. */
 export function conflictReviewStatusToLabel(status: string | null | undefined): string {
   switch (status) {
-    case "succeeded": return "Specialist disagreement was handled conservatively for this holding.";
-    case "failed":    return "Specialist disagreement could not be resolved safely.";
-    case "pending":   return "Specialist disagreement handling is still pending.";
-    case "unknown":   return "Conflict-handling status could not be re-verified for this holding.";
+    case "succeeded": return "Specialist signal handling completed for this holding.";
+    case "failed":    return "Specialist signal handling could not complete safely.";
+    case "pending":   return "Specialist signal handling is still pending.";
+    case "unknown":   return "Specialist signal handling status could not be re-verified for this holding.";
     case "not_required":
-      return "No specialist conflict was detected for this holding.";
+      return "No specialist conflict or low-confidence case was detected.";
     default:
-      return "Conflict-handling status unavailable for this holding.";
+      return "Specialist signal handling status unavailable for this holding.";
   }
 }
 

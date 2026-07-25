@@ -35,9 +35,12 @@ from app.services.intelligence.v3.distributed.publication_v1 import (
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_FUNDAMENTAL,
     AXIS_REVIEW,
+    AXIS_RISK_FILING,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
     TASK_PORTFOLIO_JOIN_PUBLISH,
+    TASK_REVIEW_CONFLICT,
+    TASK_SUCCEEDED,
     TASK_TICKER_DECISION,
     TICKER_DECIDED,
     TICKER_NO_CALL,
@@ -263,16 +266,101 @@ class TestDeterministicAuthority:
                     "conviction_level"):
             assert verdict.get(key)
 
+    @pytest.mark.asyncio
+    async def test_historical_llm_reviewed_decision_replays_from_persisted_audit_record(
+        self, monkeypatch
+    ):
+        """A ticker already TICKER_DECIDED under the legacy LLM-review era
+        must replay its PERSISTED action/verdict on retry — never
+        recomputed under current deterministic-conflict rules — even when
+        CURRENT specialist inputs would themselves trigger a fresh
+        conflict (material spread + major position)."""
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_specialist_outputs(
+            client, session_id, "AAPL", score=0.9, confidence=0.9,
+            axes=(AXIS_FUNDAMENTAL,),
+        )
+        _seed_specialist_outputs(
+            client, session_id, "AAPL", score=-0.9, confidence=0.9,
+            axes=(AXIS_TECHNICAL,),
+        )
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 45.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        run_id = str(uuid.uuid4())
+        existing_decision = {
+            "action": "BUY",
+            "agent_run_id": run_id,
+            "advisory_signal": {
+                "advisory_action": "BUY", "aggregate_score": 0.85,
+                "mean_confidence": 0.82,
+            },
+            "decision_input": {
+                "primary_driver": "Legacy review: durable fundamental strength confirmed",
+                "action_reason": "Historical review reconciled the technical weakness",
+                "risk_flag_text": "Historical filing risk noted by review",
+                "upstream_conviction": "HIGH",
+                "analyst_drivers": ["fundamental", "technical"],
+            },
+            "conviction": "HIGH",
+            "policy_schema_version": "v3.1",
+        }
+        client.table("intel_run_tickers").update({
+            "state": TICKER_DECIDED, "decision": existing_decision,
+        }).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        def _forbidden(*_a, **_k):
+            raise AssertionError("must not recompute a historical decision")
+
+        monkeypatch.setattr(decision_tasks_v1, "decide", _forbidden)
+        monkeypatch.setattr(decision_tasks_v1, "resolve_conflict_advisory", _forbidden)
+
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+
+        assert outcome.final_ticker_state == TICKER_DECIDED
+        assert outcome.decision == existing_decision
+        assert outcome.decision["action"] == "BUY", (
+            "a historical decision must never be newly neutralized"
+        )
+        recs = [r for r in client.rows("recommendations") if r["is_active"]]
+        assert len(recs) == 1
+        assert recs[0]["action"] == "BUY"
+        insight = client.rows("agent_insights")[0]
+        assert insight["suggested_action"] == "BUY"
+        verdict = insight["analyst_verdict"]
+        assert verdict["primary_driver"] == (
+            existing_decision["decision_input"]["primary_driver"]
+        )
+        assert verdict["conviction_level"] == "HIGH"
+
     def test_advisory_aggregation_is_pure_deterministic_math(self):
         outputs = [
-            {"score": 0.8, "confidence": 0.9},
-            {"score": 0.4, "confidence": 0.5},
+            {"axis": AXIS_FUNDAMENTAL, "score": 0.8, "confidence": 0.9},
+            {"axis": AXIS_TECHNICAL, "score": 0.4, "confidence": 0.5},
         ]
         first = aggregate_advisory_signal(outputs)
         second = aggregate_advisory_signal(list(reversed(outputs)))
         assert first == second
         assert first["advisory_action"] == "BUY"
         assert aggregate_advisory_signal([])["advisory_action"] is None
+
+    def test_advisory_aggregation_ignores_review_axis_even_if_passed_directly(self):
+        """Strict authority — AXIS_REVIEW is excluded even when a caller
+        mistakenly supplies the full output list (including a review row
+        with an extreme score that would otherwise dominate the average)."""
+        outputs = [
+            {"axis": AXIS_FUNDAMENTAL, "score": 0.6, "confidence": 0.9},
+            {"axis": AXIS_REVIEW, "score": -1.0, "confidence": 0.9},
+        ]
+        with_review = aggregate_advisory_signal(outputs)
+        without_review = aggregate_advisory_signal(outputs[:1])
+        assert with_review == without_review
+        assert with_review["advisory_action"] == "BUY"
 
     @pytest.mark.asyncio
     async def test_unclaimed_task_cannot_decide(self):
@@ -299,41 +387,56 @@ class TestDeterministicAuthority:
 
 
 def _seed_conflict_outputs(
-    client: FakeSupabase, session_id: str, ticker: str,
+    client: FakeSupabase, session_id: str, ticker: str, *, weight_pct: float,
+    axes: tuple = ((AXIS_FUNDAMENTAL, 0.8, 0.9), (AXIS_TECHNICAL, -0.8, 0.9)),
 ) -> list[dict]:
-    """Two materially conflicting non-review specialist rows."""
+    """Materially conflicting non-review specialist rows (one per ``axes``
+    ``(axis, score, confidence)`` tuple), PLUS a durable ``TASK_SUCCEEDED``
+    conflict task and a CURRENT, valid deterministic ``axis=review`` row —
+    built the exact same way ``execute_conflict_resolution_task`` would, so
+    decision-time strict activation (task state + fingerprint + lineage)
+    actually passes."""
+    client.table("intel_run_tickers").update(
+        {"portfolio_weight_pct": weight_pct}
+    ).eq("run_session_id", session_id).eq("ticker", ticker).execute()
+
     rows = []
-    for axis, score in ((AXIS_FUNDAMENTAL, 0.8), (AXIS_TECHNICAL, -0.8)):
+    for axis, score, confidence in axes:
+        output = {
+            "axis": axis,
+            "stance": "positive" if score > 0 else "negative",
+            "score": score, "confidence": confidence,
+            "key_findings": [f"{ticker} {axis} finding"], "risks": [],
+            "evidence_refs": [], "missing_evidence": [], "limitations": [],
+            "valid_until": "2027-01-01T00:00:00+00:00",
+            "model": "fake", "prompt_version": "test",
+            "input_fingerprint": "sha256:test", "batch_key": None,
+        }
         store.upsert_specialist_output(
             client, run_session_id=session_id, user_id=USER, ticker=ticker,
-            axis=axis,
-            output={
-                "stance": "positive" if score > 0 else "negative",
-                "score": score, "confidence": 0.9,
-                "key_findings": [f"{ticker} {axis} finding"], "risks": [],
-                "evidence_refs": [], "missing_evidence": [], "limitations": [],
-                "valid_until": "2027-01-01T00:00:00+00:00",
-                "model": "fake", "prompt_version": "test",
-                "input_fingerprint": "sha256:test", "batch_key": None,
-            },
+            axis=axis, output=output,
         )
-        rows.append({
-            "axis": axis, "stance": "positive" if score > 0 else "negative",
-            "score": score, "confidence": 0.9,
-            "key_findings": [f"{ticker} {axis} finding"], "risks": [],
-            "evidence_refs": [],
-        })
-    lineage = source_lineage_v1.build_review_lineage_manifest(rows, ticker=ticker)
+        rows.append(output)
+
+    store.create_task(
+        client, run_session_id=session_id, user_id=USER,
+        task_type=TASK_REVIEW_CONFLICT, ticker=ticker, state=TASK_SUCCEEDED,
+    )
+    normalized = conflict_policy_v1.normalize_valid_inputs(rows)
+    assessment = conflict_policy_v1.assess_conflict(normalized, weight_pct)
+    lineage = source_lineage_v1.build_review_lineage_manifest(normalized, ticker=ticker)
+    prompt_context = source_lineage_v1.build_review_prompt_context(normalized, ticker=ticker)
+    fingerprint = conflict_policy_v1.conflict_fingerprint(
+        ticker=ticker, prompt_context=prompt_context, assessment=assessment,
+        major=conflict_policy_v1.safe_major_position(weight_pct),
+    )
     store.upsert_specialist_output(
         client, run_session_id=session_id, user_id=USER, ticker=ticker,
         axis=AXIS_REVIEW,
         output={
             "stance": "neutral", "score": 0.0,
             "confidence": conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
-            "key_findings": [
-                f"Specialist evidence disagreed across {AXIS_FUNDAMENTAL}, "
-                f"{AXIS_TECHNICAL}.",
-            ],
+            "key_findings": [conflict_policy_v1.conflict_summary_sentence(assessment)],
             "risks": [
                 "Conflicting specialist evidence increases the risk of "
                 "acting prematurely.",
@@ -347,7 +450,7 @@ def _seed_conflict_outputs(
             "valid_until": "2027-01-01T00:00:00+00:00",
             "model": conflict_policy_v1.SCHEMA_VERSION,
             "prompt_version": conflict_policy_v1.SCHEMA_VERSION,
-            "input_fingerprint": "sha256:conflict-test",
+            "input_fingerprint": fingerprint,
             "batch_key": None,
         },
     )
@@ -362,12 +465,9 @@ class TestConflictIntegration:
         client = FakeSupabase()
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
-        _seed_conflict_outputs(client, session_id, "AAPL")
         # Normal (non-overweight) portfolio weight — a single-position fake
         # session otherwise defaults to 100% (breach).
-        client.table("intel_run_tickers").update(
-            {"portfolio_weight_pct": 5.0}
-        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+        _seed_conflict_outputs(client, session_id, "AAPL", weight_pct=5.0)
 
         outcome = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
@@ -384,17 +484,16 @@ class TestConflictIntegration:
             "BUY", "HOLD", "REDUCE",
         )
         assert "analysis_conflict" in record["decision_input"]["suppression_reasons"]
-        assert "disagrees across" in record["decision_input"]["primary_driver"]
+        assert "disagreed across" in record["decision_input"]["primary_driver"]
+        assert "Fundamental analysis" in record["decision_input"]["primary_driver"]
+        assert "fundamental" not in record["decision_input"]["primary_driver"]
 
     @pytest.mark.asyncio
     async def test_conflict_with_overweight_still_trims(self):
         client = FakeSupabase()
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
-        _seed_conflict_outputs(client, session_id, "AAPL")
-        client.table("intel_run_tickers").update(
-            {"portfolio_weight_pct": 45.0}
-        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+        _seed_conflict_outputs(client, session_id, "AAPL", weight_pct=45.0)
 
         outcome = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
@@ -428,14 +527,60 @@ class TestConflictIntegration:
         assert record["action"] in ("BUY", "HOLD")
 
     @pytest.mark.asyncio
+    async def test_conflict_with_critical_risk_and_breach_still_sells(self):
+        """Portfolio-fit/risk priority remains authoritative over a HOLD
+        overlay: CRITICAL risk + BREACH concentration forces SELL even
+        though the conflict guardrail neutralized the advisory signal."""
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_conflict_outputs(
+            client, session_id, "AAPL", weight_pct=60.0,
+            axes=(
+                (AXIS_FUNDAMENTAL, 0.8, 0.9), (AXIS_TECHNICAL, -0.8, 0.9),
+                (AXIS_RISK_FILING, -0.8, 0.9),
+            ),
+        )
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        record = outcome.decision
+        assert record["portfolio_fit"] == "BREACH"
+        assert record["risk_band"] == "CRITICAL"
+        assert record["action"] == "SELL"
+        assert record["advisory_signal"]["conflict_detected"] is True
+        assert record["advisory_signal"]["advisory_action"] == "HOLD"
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_major_holding_without_disagreement_holds_low(self):
+        """Low confidence alone (no directional disagreement) on a major
+        holding still neutralizes to HOLD/LOW, but the wording must say
+        confidence was low — never that specialists disagreed."""
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_conflict_outputs(
+            client, session_id, "AAPL", weight_pct=8.0,
+            axes=((AXIS_FUNDAMENTAL, 0.2, 0.2), (AXIS_TECHNICAL, 0.3, 0.9)),
+        )
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        record = outcome.decision
+        assert record["action"] == "HOLD"
+        assert record["conviction"] == "LOW"
+        assert record["advisory_signal"]["conflict_detected"] is True
+        primary_driver = record["decision_input"]["primary_driver"]
+        assert "disagreed" not in primary_driver
+        assert "confidence was low" in primary_driver
+        assert "Fundamental analysis" in primary_driver
+
+    @pytest.mark.asyncio
     async def test_conflict_retry_is_idempotent(self):
         client = FakeSupabase()
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
-        _seed_conflict_outputs(client, session_id, "AAPL")
-        client.table("intel_run_tickers").update(
-            {"portfolio_weight_pct": 5.0}
-        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+        _seed_conflict_outputs(client, session_id, "AAPL", weight_pct=5.0)
 
         first = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),

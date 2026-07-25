@@ -577,15 +577,16 @@ export function deriveRunTrustSummary(
     `${cov.no_call_count} no-call, ${cov.failed_count} failed` +
     (cov.publication_complete ? "." : " (publication incomplete).");
 
-  // Specialist conflicts are resolved deterministically (no LLM review) —
-  // e.g. "7 specialist conflicts detected — 7 handled deterministically."
+  // The status vocabulary is shared by historical LLM-reviewed runs and new
+  // deterministically-resolved runs, so this line is method-neutral —
+  // e.g. "7 specialist conflict or low-confidence cases — 2 completed, 5 failed."
   const rc = contract.conflict_review_coverage;
   const conflictReviewLine =
     rc.required_count === 0
-      ? "No specialist conflicts were detected this run."
-      : `${rc.required_count} specialist conflict${rc.required_count === 1 ? "" : "s"} ` +
-        `detected — ${rc.succeeded_count} handled deterministically` +
-        (rc.failed_count > 0 ? `, ${rc.failed_count} could not be resolved safely` : "") +
+      ? "No specialist conflict or low-confidence cases were detected this run."
+      : `${rc.required_count} specialist conflict or low-confidence case${rc.required_count === 1 ? "" : "s"} ` +
+        `— ${rc.succeeded_count} completed` +
+        (rc.failed_count > 0 ? `, ${rc.failed_count} failed` : "") +
         (rc.pending_count > 0 ? `, ${rc.pending_count} still pending` : "") +
         ".";
 

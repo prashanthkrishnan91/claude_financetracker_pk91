@@ -794,8 +794,8 @@ def build_review_prompt_context(
     reviewed_inputs: list[dict[str, Any]], *, ticker: str,
 ) -> list[dict[str, Any]]:
     """The ONE normalized, bounded list used for BOTH the review LLM prompt
-    (``json.dumps``) and ``review_input_fingerprint`` — no independent
-    re-sorting or alternate representation anywhere else in the codebase.
+    (``json.dumps``) and ``conflict_policy_v1.conflict_fingerprint`` — no
+    independent re-sorting or alternate representation anywhere else.
 
     Filters to valid (score+confidence present) non-review inputs, dedupes to
     one entry per axis, sorted deterministically BY AXIS (so the database's
@@ -844,39 +844,3 @@ def build_review_prompt_context(
             "evidence_sources": compact_projection(refs),
         })
     return context
-
-
-def review_input_fingerprint(
-    prompt_inputs: list[dict[str, Any]], *, ticker: str, prompt_version: str,
-) -> str:
-    """Deterministic fingerprint of the EXACT bounded prompt input a review
-    saw (see ``build_review_prompt_context``) — replaces the previous
-    always-empty ``input_fingerprint`` string. Changes when any reviewed
-    finding, risk, score, confidence, lineage status, missing lane or source
-    identity visible to the review changes; stable to input ORDER (the
-    entries are independently re-sorted here too) and to the ticker/
-    prompt_version staying the same. Finding/risk order WITHIN one axis is
-    preserved (never re-sorted) — only DB row order across axes is
-    order-independent.
-    """
-    normalized = sorted(
-        (
-            str(item.get("axis") or ""),
-            item.get("stance"),
-            item.get("score"),
-            item.get("confidence"),
-            tuple(str(f) for f in (item.get("key_findings") or [])),
-            tuple(str(r) for r in (item.get("risks") or [])),
-            str(item.get("lineage_status") or ""),
-            tuple(sorted(item.get("linked_lanes") or [])),
-            tuple(sorted(item.get("missing_ref_lanes") or [])),
-            tuple(sorted(
-                (s.get("lane"), s.get("ref_type"), s.get("provider"), s.get("identity_token"))
-                for s in (item.get("evidence_sources") or [])
-            )),
-        )
-        for item in prompt_inputs
-    )
-    return stable_fingerprint({
-        "ticker": ticker, "prompt_version": prompt_version, "inputs": normalized,
-    })

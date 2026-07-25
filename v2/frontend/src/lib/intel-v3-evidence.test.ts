@@ -95,15 +95,15 @@ describe("committeeStatusToPlainLabel", () => {
 // ── conflictReviewStatusToLabel / sourceLineageToLabel (run_trust_contract_v1) ─
 
 describe("conflictReviewStatusToLabel", () => {
-  it("succeeded → handled conservatively, never 'review passed'", () => {
+  it("succeeded → method-neutral completion text, never 'review passed'", () => {
     const label = conflictReviewStatusToLabel("succeeded");
-    expect(label).toContain("handled conservatively");
+    expect(label).toContain("Specialist signal handling completed");
     expect(label.toLowerCase()).not.toContain("review passed");
   });
 
   it("failed → explicit failure, never implies an AI review ran", () => {
     const label = conflictReviewStatusToLabel("failed");
-    expect(label).toContain("could not be resolved safely");
+    expect(label).toContain("could not complete safely");
     expect(label.toLowerCase()).not.toContain("reconciliation");
   });
 

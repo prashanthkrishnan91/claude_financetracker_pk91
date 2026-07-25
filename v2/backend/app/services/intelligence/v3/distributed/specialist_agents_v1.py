@@ -691,25 +691,12 @@ async def execute_conflict_resolution_task(
         outcome.error = "claim_lost"
         return outcome
 
-    # Only VALID specialist rows (score AND confidence both present) are
-    # reviewable inputs — the same validity gate ``aggregate_advisory_signal``
-    # and the trust contract use.
-    reviewed_inputs = [
-        {
-            "axis": o.get("axis"),
-            "stance": o.get("stance"),
-            "score": o.get("score"),
-            "confidence": o.get("confidence"),
-            "key_findings": o.get("key_findings"),
-            "risks": o.get("risks"),
-            "evidence_refs": o.get("evidence_refs"),
-        }
-        for o in store.list_specialist_outputs(
-            client, run_session_id=session_id, ticker=ticker,
-        )
-        if o.get("axis") != AXIS_REVIEW
-        and o.get("score") is not None and o.get("confidence") is not None
-    ]
+    # The ONE strict specialist-input authority — same function the trigger,
+    # the fingerprint and decision-time validation all use.
+    raw_outputs = store.list_specialist_outputs(
+        client, run_session_id=session_id, ticker=ticker,
+    )
+    reviewed_inputs = conflict_policy_v1.normalize_valid_inputs(raw_outputs)
 
     ticker_row = next(
         (
@@ -737,8 +724,12 @@ async def execute_conflict_resolution_task(
     review_lineage = source_lineage_v1.build_review_lineage_manifest(
         reviewed_inputs, ticker=ticker,
     )
-    input_fingerprint = source_lineage_v1.review_input_fingerprint(
-        prompt_inputs, ticker=ticker, prompt_version=conflict_policy_v1.SCHEMA_VERSION,
+    # Same fingerprint function the decision reader recomputes — covers
+    # ticker, schema version, the exact bounded lineage input, the
+    # assessment, and major-position state, so staleness is detectable.
+    input_fingerprint = conflict_policy_v1.conflict_fingerprint(
+        ticker=ticker, prompt_context=prompt_inputs, assessment=assessment,
+        major=conflict_policy_v1.safe_major_position(weight_pct),
     )
     summary_sentence = conflict_policy_v1.conflict_summary_sentence(assessment)
 

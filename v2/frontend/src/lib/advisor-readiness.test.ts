@@ -1031,14 +1031,17 @@ describe("deriveRunTrustSummary", () => {
     expect(summary.axisCoverageLine).not.toContain("Crypto");
   });
 
-  it("conflict review line states detected/handled/failed honestly (deterministic wording)", () => {
+  it("conflict review line states completed/failed honestly (method-neutral wording)", () => {
     const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
     const summary = deriveRunTrustSummary(snap)!;
-    expect(summary.conflictReviewLine).toContain("7 specialist conflicts detected");
-    expect(summary.conflictReviewLine).toContain("2 handled deterministically");
-    expect(summary.conflictReviewLine).toContain("5 could not be resolved safely");
+    expect(summary.conflictReviewLine).toContain(
+      "7 specialist conflict or low-confidence cases",
+    );
+    expect(summary.conflictReviewLine).toContain("2 completed");
+    expect(summary.conflictReviewLine).toContain("5 failed");
     expect(summary.conflictReviewLine.toLowerCase()).not.toContain("review passed");
     expect(summary.conflictReviewLine.toLowerCase()).not.toContain("consensus");
+    expect(summary.conflictReviewLine.toLowerCase()).not.toContain("handled deterministically");
   });
 
   it("all-succeeded conflict line matches the locked copy example", () => {
@@ -1052,7 +1055,7 @@ describe("deriveRunTrustSummary", () => {
     });
     const summary = deriveRunTrustSummary(snap)!;
     expect(summary.conflictReviewLine).toBe(
-      "7 specialist conflicts detected — 7 handled deterministically.",
+      "7 specialist conflict or low-confidence cases — 7 completed.",
     );
   });
 
@@ -1133,10 +1136,12 @@ describe("deriveRunTrustSummary", () => {
     expect(summary.sessionCoverageLine).not.toContain("0 of 0");
   });
 
-  it("unknown overlay → never claims 'no specialist conflicts were detected'", () => {
+  it("unknown overlay → never claims 'no specialist conflict or low-confidence cases were detected'", () => {
     const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
     const summary = deriveRunTrustSummary(snap)!;
-    expect(summary.conflictReviewLine).not.toContain("No specialist conflicts were detected");
+    expect(summary.conflictReviewLine).not.toContain(
+      "No specialist conflict or low-confidence cases were detected",
+    );
   });
 
   it("unknown overlay → never claims 'no specialist axes applied' or 'not applicable'", () => {

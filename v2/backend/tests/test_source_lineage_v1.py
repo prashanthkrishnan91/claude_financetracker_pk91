@@ -7,10 +7,12 @@ state, per ``docs/ai/RUN_INTEL_DISTRIBUTED_WORKFLOW.md`` §PR-2 contract.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.services.intelligence.v3.distributed import (
+    conflict_policy_v1,
     run_task_store_v1 as store,
     session_control_v1 as control,
     source_lineage_v1 as lineage,
@@ -583,20 +585,6 @@ def test_review_never_writes_evidence_refs_empty_when_sourced_inputs_exist():
     assert review["refs"] != []
 
 
-def test_review_input_fingerprint_is_deterministic_and_nonempty():
-    inputs = [{
-        "axis": AXIS_TECHNICAL, "stance": "positive", "score": 0.5,
-        "confidence": 0.8, "key_findings": ["f"], "risks": [],
-        "lineage_status": lineage.LINEAGE_FULL, "linked_lanes": [LANE_PRICE],
-        "missing_ref_lanes": [], "evidence_sources": [],
-    }]
-    fp1 = lineage.review_input_fingerprint(inputs, ticker="AAA", prompt_version="v2")
-    fp2 = lineage.review_input_fingerprint(inputs, ticker="AAA", prompt_version="v2")
-    assert fp1 and fp1 == fp2
-    fp3 = lineage.review_input_fingerprint(inputs, ticker="BBB", prompt_version="v2")
-    assert fp3 != fp1  # ticker is part of the fingerprint
-
-
 # ── Bundle-level integration: direct lanes via real collectors ──────────────
 
 async def _bundle_for(
@@ -712,6 +700,12 @@ class TestBundleDirectLaneLineage:
         recorder = ProviderRecorder()
         patch_providers(monkeypatch, recorder)
         settings = make_settings()
+        # Relative to the real wall clock (not a hardcoded calendar date) —
+        # `find_recent_lane_output` compares against `datetime.now(utc)` at
+        # call time, so a fixed past date silently ages past the 24h
+        # technicals TTL as real time advances, flaking this test on any
+        # run after that date. One hour ago is always safely inside TTL.
+        completed_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
         session_id_1 = str(uuid.uuid4())
         await control.create_distributed_session(
@@ -726,7 +720,7 @@ class TestBundleDirectLaneLineage:
             result = await execute_collector_task(client, task=task, settings=settings)
             client.table("intel_run_tasks").update({
                 "state": result.final_state, "output": result.output,
-                "completed_at": "2026-07-24T00:00:00+00:00",
+                "completed_at": completed_at,
             }).eq("id", task["id"]).execute()
         calls_after_first = len(recorder.calls)
         assert calls_after_first > 0
@@ -753,7 +747,7 @@ class TestBundleDirectLaneLineage:
         assert len(recorder.calls) == calls_after_first  # zero new provider calls
         client.table("intel_run_tasks").update({
             "state": result_2.final_state, "output": result_2.output,
-            "completed_at": "2026-07-24T00:00:00+00:00",
+            "completed_at": completed_at,
         }).eq("id", tech_task_2["id"]).execute()
         row_2 = next(
             r for r in client.rows("intel_run_tickers")
@@ -1923,110 +1917,11 @@ class TestBoundedReferenceStorage:
         assert len(artifact_ref["source_url"]) <= lineage.MAX_FREE_TEXT_CHARS
 
 
-# ── Review input-fingerprint sensitivity (contract §5 patch) ────────────────
-
-class TestReviewInputFingerprintSensitivity:
-    def _base_prompt_input(self) -> dict:
-        return {
-            "axis": AXIS_TECHNICAL, "stance": "positive", "score": 0.5, "confidence": 0.8,
-            "key_findings": ["f1"], "risks": ["r1"],
-            "lineage_status": lineage.LINEAGE_FULL, "linked_lanes": [LANE_PRICE],
-            "missing_ref_lanes": [],
-            "evidence_sources": [
-                {"lane": LANE_PRICE, "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
-                 "provider": "yfinance"},
-            ],
-        }
-
-    def test_finding_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, key_findings=["a different finding"])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_risk_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, risks=["a different risk"])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_score_or_confidence_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, confidence=0.1)
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_lineage_status_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, lineage_status=lineage.LINEAGE_PARTIAL)
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_missing_ref_lane_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, missing_ref_lanes=[LANE_TECHNICALS])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_source_identity_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        changed = dict(base, evidence_sources=[
-            {"lane": LANE_PRICE, "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
-             "provider": "coingecko"},
-        ])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_ordering_alone_does_not_alter_fingerprint(self):
-        a = self._base_prompt_input()
-        b = dict(self._base_prompt_input(), axis=AXIS_FUNDAMENTAL)
-        fp1 = lineage.review_input_fingerprint([a, b], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([b, a], ticker="AAA", prompt_version="v2")
-        assert fp1 == fp2
-
-    def test_prompt_version_change_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v3")
-        assert fp1 != fp2
-
-    def test_identity_token_change_alone_alters_fingerprint(self):
-        base = self._base_prompt_input()
-        base["evidence_sources"] = [{
-            "lane": LANE_SEC_COMPANY_FACTS, "ref_type": lineage.REF_TYPE_RESEARCH_ARTIFACT_SOURCE,
-            "provider": "sec_edgar", "identity_token": "token-a",
-        }]
-        changed = dict(base, evidence_sources=[{
-            "lane": LANE_SEC_COMPANY_FACTS, "ref_type": lineage.REF_TYPE_RESEARCH_ARTIFACT_SOURCE,
-            "provider": "sec_edgar", "identity_token": "token-b",
-        }])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([changed], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-    def test_finding_order_within_one_axis_is_preserved_not_resorted(self):
-        # The OUTER list of axis-entries is order-independent (sorted by
-        # axis), but findings/risks WITHIN one axis entry keep their
-        # original semantic order — reordering them is a real content
-        # change, not noise to normalize away.
-        base = self._base_prompt_input()
-        base["key_findings"] = ["first finding", "second finding"]
-        reordered = dict(base, key_findings=["second finding", "first finding"])
-        fp1 = lineage.review_input_fingerprint([base], ticker="AAA", prompt_version="v2")
-        fp2 = lineage.review_input_fingerprint([reordered], ticker="AAA", prompt_version="v2")
-        assert fp1 != fp2
-
-
 class TestBuildReviewPromptContext:
     """Round-3 item 5: ONE normalized, bounded object drives BOTH the review
-    LLM prompt (via ``json.dumps``) and ``review_input_fingerprint`` — never
-    two independently hand-built shapes that could silently diverge."""
+    LLM prompt (via ``json.dumps``) and the deterministic conflict fingerprint
+    (``conflict_policy_v1.conflict_fingerprint``) — never two independently
+    hand-built shapes that could silently diverge."""
 
     def _reviewed_input(self, axis, *, findings=None, has_ref=True):
         manifest = lineage.build_axis_lineage_manifest(
@@ -2060,6 +1955,12 @@ class TestBuildReviewPromptContext:
         # Sorted deterministically by axis.
         assert [c["axis"] for c in context] == sorted(c["axis"] for c in context)
 
+    def _fingerprint(self, context, ticker="AAA"):
+        assessment = conflict_policy_v1.assess_conflict([], None)
+        return conflict_policy_v1.conflict_fingerprint(
+            ticker=ticker, prompt_context=context, assessment=assessment, major=False,
+        )
+
     def test_same_object_feeds_both_prompt_json_and_fingerprint(self):
         import json
 
@@ -2067,15 +1968,9 @@ class TestBuildReviewPromptContext:
         context = lineage.build_review_prompt_context(inputs, ticker="AAA")
         # The exact object serialized for the LLM prompt...
         prompt_json = json.dumps(context, default=str)
-        # ...must be exactly what review_input_fingerprint is fed.
-        fp_from_context = lineage.review_input_fingerprint(
-            context, ticker="AAA", prompt_version="v2",
-        )
+        # ...must be exactly what the deterministic conflict fingerprint is fed.
         reparsed_context = json.loads(prompt_json)
-        fp_from_reparsed = lineage.review_input_fingerprint(
-            reparsed_context, ticker="AAA", prompt_version="v2",
-        )
-        assert fp_from_context == fp_from_reparsed
+        assert self._fingerprint(context) == self._fingerprint(reparsed_context)
 
     def test_db_row_order_does_not_change_built_context_or_fingerprint(self):
         inputs = [
@@ -2085,9 +1980,7 @@ class TestBuildReviewPromptContext:
         context_a = lineage.build_review_prompt_context(inputs, ticker="AAA")
         context_b = lineage.build_review_prompt_context(list(reversed(inputs)), ticker="AAA")
         assert context_a == context_b
-        fp_a = lineage.review_input_fingerprint(context_a, ticker="AAA", prompt_version="v2")
-        fp_b = lineage.review_input_fingerprint(context_b, ticker="AAA", prompt_version="v2")
-        assert fp_a == fp_b
+        assert self._fingerprint(context_a) == self._fingerprint(context_b)
 
     def test_duplicate_axis_keeps_first_occurrence_only(self):
         first = self._reviewed_input(AXIS_TECHNICAL, findings=["first"])

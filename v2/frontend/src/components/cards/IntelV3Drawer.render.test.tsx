@@ -152,6 +152,7 @@ describe("IntelV3Drawer — deterministic conflict handling (no LLM-review wordi
       "senior reviewer",
       "review model",
       "reconciliation by ai",
+      "handled deterministically",
       "consensus",
     ]) {
       expect(lower).not.toContain(forbidden);

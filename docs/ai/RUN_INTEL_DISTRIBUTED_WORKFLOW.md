@@ -343,15 +343,16 @@ present) participate in `conflict_policy_v1.assess_conflict` and in a
 successful `review_conflict` output's derived lineage. The persisted
 `evidence_refs` manifest (`derived_from_axes`, `missing_ref_axes`, `status`,
 `refs`) is built from each input's INDEPENDENTLY RE-VALIDATED manifest (never
-trusted from its persisted status) via the SAME `source_lineage_v1` helpers
-the prior LLM review used (`build_review_prompt_context`,
-`build_review_lineage_manifest`, `review_input_fingerprint`) — now purely as
-deterministic audit/fingerprint material, since no LLM ever sees them.
-`full` only when every reconciled input's own re-derived lineage was `full`.
-The persisted `input_fingerprint` is built from the EXACT normalized/bounded
-audit input, plus ticker and `prompt_version="deterministic_conflict_policy_v1"`,
-sorted for order-independence — it changes when any reviewed finding, risk,
-score, confidence, lineage status, missing lane, or source identity changes.
+trusted from its persisted status) via `source_lineage_v1.build_review_prompt_
+context`/`build_review_lineage_manifest` — now purely as deterministic
+audit/fingerprint material, since no LLM ever sees them. `full` only when
+every reconciled input's own re-derived lineage was `full`. The persisted
+`input_fingerprint` is `conflict_policy_v1.conflict_fingerprint` — the ONE
+function the executor, the decision reader, and the trust contract all call,
+covering ticker, schema version, the exact bounded prompt context, the
+conflict assessment, and safely normalized major-position state; it changes
+when any reviewed finding, risk, score, confidence, lineage status, missing
+lane, source identity, or major-position state changes.
 There is no review model, token budget, retry logic, or fallback behavior
 left to own — `execute_conflict_resolution_task` makes ZERO calls to
 `llm.ask_json` or any other provider; the directional signal is neutralized
@@ -445,10 +446,46 @@ they no longer meet the contract, and persists one advisory row
 (axis='review', stance='neutral', score=0.0, confidence=0.49,
 model=prompt_version='deterministic_conflict_policy_v1') — it cannot set
 actions. `aggregate_advisory_signal` in `decision_tasks_v1` aggregates only
-non-review outputs; when a valid deterministic conflict row exists, the
+non-review outputs (via `conflict_policy_v1.normalize_valid_inputs`, which it
+enforces itself and always excludes `axis=review` even if a caller passes
+the full output list); when a valid deterministic conflict row exists, the
 post-conflict `advisory_signal` (HOLD, confidence capped at 0.49) is what
 `decide()` sees, while the ordinary `pre_conflict_advisory_signal` is
 preserved alongside it in the decision audit record for replay.
+
+**Strict activation contract (PR 3 round 2).** A deterministic row may alter
+`advisory_signal` ONLY when ALL of: its `TASK_REVIEW_CONFLICT` task is
+`TASK_SUCCEEDED`; exactly one `axis=review` row exists; model/prompt_version/
+stance/score/confidence match the deterministic shape exactly; its lineage
+validates against the CURRENT strict-normalized non-review inputs; the
+assessment recomputed from those current inputs still has
+`conflict_detected=true`; and its `input_fingerprint` equals
+`conflict_policy_v1.conflict_fingerprint` recomputed fresh.
+`decision_tasks_v1.resolve_conflict_advisory` and
+`run_trust_contract_v1._has_valid_review_output` both call this same
+contract (`conflict_policy_v1.validate_current_conflict_row`) — a pending/
+failed/orphaned/stale/forged row never neutralizes a decision and never
+reads as a successful trust-contract review. A genuine historical
+(pre-deterministic) LLM review row keeps its original simple validity gate —
+never reinterpreted under current rules.
+
+**Historical replay truth.** An already-decided ticker's retry path
+(`_replay_persisted_decision`) rebuilds the verdict/aggregate from the
+PERSISTED decision audit record (`advisory_signal`, `decision_input`) —
+`decide()` and `resolve_conflict_advisory` are never re-run, so a historical
+LLM-reviewed decision replays its exact action even if current specialist
+inputs would newly conflict under today's rules.
+
+**Method-neutral UI copy.** The `conflict_review_status` vocabulary is
+shared across historical LLM-reviewed and new deterministic holdings, so its
+labels are truthful for either generation: "Specialist signal handling
+completed/could not complete safely/is still pending for this holding";
+"No specialist conflict or low-confidence case was detected" (not_required);
+session line "N specialist conflict or low-confidence cases — M completed,
+K failed". Disagreement-vs-low-confidence wording
+(`conflict_policy_v1.conflict_summary_sentence`) is truthful and only names
+axes actually implicated, via a bounded axis-display map (never a raw schema
+identifier).
 
 ## 9. ONE final deterministic decision authority + session-native publication
 

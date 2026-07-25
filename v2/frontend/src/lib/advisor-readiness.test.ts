@@ -362,6 +362,84 @@ describe("deriveRunModel — distributed session state machine", () => {
     expect(run.nextActionSentence).toContain("Could not start the run");
   });
 
+  it("not_created / portfolio_scope_empty → idle, add-positions sentence, repairAction stays null", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_created",
+        reason: "no_active_holdings",
+        code: "portfolio_scope_empty",
+        status: "blocked",
+        plain_status: "Add positions before running Intel.",
+        repair_action: "Add or import at least one open position.",
+        retryable: true,
+      }),
+    });
+    expect(run.state).toBe("idle");
+    expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
+    // The pre-existing add-positions behavior owns this case entirely —
+    // the sibling repair_action field is never surfaced here.
+    expect(run.repairAction).toBeNull();
+  });
+
+  it("not_created / portfolio_truth_unavailable → failed with the truthful message and repair action", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_created",
+        reason: "portfolio_truth_unavailable",
+        code: "portfolio_truth_unavailable",
+        status: "blocked",
+        plain_status: "Portfolio data could not be read right now.",
+        repair_action: "Try again in a moment. If this persists, contact support.",
+        retryable: true,
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.nextActionSentence).toBe("Portfolio data could not be read right now.");
+    expect(run.repairAction).toBe(
+      "Try again in a moment. If this persists, contact support.",
+    );
+  });
+
+  it("not_created blocked codes without a repair_action leave repairAction null, never a placeholder", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "not_created",
+        reason: "portfolio_reconciliation_failed",
+        code: "portfolio_reconciliation_failed",
+        status: "blocked",
+        plain_status: "Portfolio books do not reconcile with current positions.",
+        retryable: false,
+      }),
+    });
+    expect(run.repairAction).toBeNull();
+  });
+
+  it("a terminal completed/failed result never carries a preflight repair action", () => {
+    const completed = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        terminal: true,
+        completed_snapshot_id: "snap-1",
+      }),
+    });
+    expect(completed.repairAction).toBeNull();
+    const failed = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({ session_status: "failed", terminal: true }),
+    });
+    expect(failed.repairAction).toBeNull();
+  });
+
   it("not_found → failed with an honest restart sentence", () => {
     const run = deriveRunModel({
       isRunPending: false,

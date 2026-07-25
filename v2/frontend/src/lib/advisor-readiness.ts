@@ -65,6 +65,11 @@ export interface AdvisorRunModel {
   /** Compact "N lanes reused, M refreshed" line — only set on a terminal
    *  run when the backend reported real metrics; never a zero placeholder. */
   evidenceSummaryLine: string | null;
+  /** Bounded, human-readable next step from a blocked financial-truth
+   *  preflight (e.g. "Add or import at least one open position.") — never a
+   *  raw code. Null except on a blocked-preflight not_created result whose
+   *  reason isn't the pre-existing "no_active_holdings" add-positions case. */
+  repairAction: string | null;
 }
 
 // ── Plain-English sentences (exported for tests and UI reuse) ─────────────────
@@ -154,6 +159,7 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
     shouldRefetchSnapshot: false,
     completedWithGaps: false,
     evidenceSummaryLine: null as string | null,
+    repairAction: null as string | null,
   };
 
   // 1. Session creating or executing — the browser is polling; button busy.
@@ -238,6 +244,7 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
       buttonLabel: "Retry Intel run",
       buttonBusy: false,
       nextActionSentence: plain ?? RUN_REQUEST_FAILED_SENTENCE,
+      repairAction: lastRunResult.repair_action?.trim() || null,
     };
   }
 

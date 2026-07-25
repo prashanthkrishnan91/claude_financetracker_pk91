@@ -20,10 +20,10 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from . import conflict_policy_v1
 from . import run_task_store_v1 as store
 from .task_contracts_v1 import (
     AXIS_BACKING_LANES,
-    AXIS_REVIEW,
     SESSION_RUNNING,
     STAGE_ANALYSIS,
     STAGE_COLLECTING,
@@ -47,14 +47,6 @@ from .task_contracts_v1 import (
 
 logger = logging.getLogger(__name__)
 
-# Review-trigger thresholds (deterministic; see contract §8).
-REVIEW_SCORE_SPREAD = 1.0
-REVIEW_MIN_CONFIDENCE = 0.6
-REVIEW_STRONG_NEGATIVE = -0.5
-REVIEW_STRONG_POSITIVE = 0.5
-REVIEW_MAJOR_WEIGHT_PCT = 5.0
-REVIEW_LOW_CONFIDENCE = 0.3
-
 BATCH_TICKER_SEPARATOR = "+"
 
 
@@ -74,47 +66,12 @@ def make_batch_key(asset_type: str, axis: str, index: int, tickers: list[str]) -
 def should_review(
     outputs: list[dict[str, Any]], weight_pct: Optional[float]
 ) -> bool:
-    """Deterministic conflict rules — the ONLY thing that creates a review."""
-    scored = [
-        o for o in outputs
-        if o.get("axis") != AXIS_REVIEW and o.get("score") is not None
-    ]
-    if len(scored) < 2:
-        # Low confidence on a major holding still warrants review.
-        if (
-            weight_pct is not None
-            and float(weight_pct) >= REVIEW_MAJOR_WEIGHT_PCT
-        ):
-            for o in scored:
-                conf = o.get("confidence")
-                if conf is not None and float(conf) < REVIEW_LOW_CONFIDENCE:
-                    return True
-        return False
+    """Deterministic conflict rules — the ONLY thing that creates a review.
 
-    scores = [(float(o["score"]), float(o.get("confidence") or 0.0)) for o in scored]
-    max_s = max(s for s, _ in scores)
-    min_s = min(s for s, _ in scores)
-    max_conf = max(c for s, c in scores if s == max_s)
-    min_conf = max(c for s, c in scores if s == min_s)
-
-    if (
-        (max_s - min_s) > REVIEW_SCORE_SPREAD
-        and max_conf >= REVIEW_MIN_CONFIDENCE
-        and min_conf >= REVIEW_MIN_CONFIDENCE
-    ):
-        return True
-    if (
-        weight_pct is not None
-        and float(weight_pct) >= REVIEW_MAJOR_WEIGHT_PCT
-        and min_s <= REVIEW_STRONG_NEGATIVE
-        and max_s >= REVIEW_STRONG_POSITIVE
-    ):
-        return True
-    if weight_pct is not None and float(weight_pct) >= REVIEW_MAJOR_WEIGHT_PCT:
-        for _, conf in scores:
-            if conf < REVIEW_LOW_CONFIDENCE:
-                return True
-    return False
+    Thin delegator: ``conflict_policy_v1.assess_conflict`` is the single
+    source of truth for the trigger thresholds AND the conflict task's own
+    resolution — no duplicate trigger implementation."""
+    return conflict_policy_v1.assess_conflict(outputs, weight_pct)["conflict_detected"]
 
 
 def run_scheduler_pass(

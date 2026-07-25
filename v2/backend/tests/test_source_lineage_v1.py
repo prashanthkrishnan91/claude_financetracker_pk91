@@ -26,7 +26,7 @@ from app.services.intelligence.v3.distributed.run_scheduler_v1 import (
 )
 from app.services.intelligence.v3.distributed.specialist_agents_v1 import (
     PROMPT_VERSION,
-    execute_review_task,
+    execute_conflict_resolution_task,
     execute_specialist_task,
 )
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
@@ -1557,8 +1557,19 @@ class TestReviewLineage:
         await _ready_bundle_session(client, monkeypatch, ["AAPL"])
         session = client.rows("intel_run_sessions")[0]
         run_scheduler_pass(client, session=session)
-        llm = FakeLLM()
-        for axis in (AXIS_FUNDAMENTAL, AXIS_TECHNICAL):
+        # Conflicting specialist outputs — the deterministic resolution task
+        # fails closed (conflict_task_without_conflict) on aligned inputs.
+        axis_llms = {
+            AXIS_FUNDAMENTAL: FakeLLM(score_by_ticker={"AAPL": 0.8}),
+            AXIS_TECHNICAL: FakeLLM(script={
+                (AXIS_TECHNICAL, "AAPL"): {
+                    "ticker": "AAPL", "stance": "negative", "score": -0.8,
+                    "confidence": 0.85, "key_findings": ["breakdown"],
+                    "risks": [], "missing_evidence": [], "limitations": [],
+                }
+            }),
+        }
+        for axis, llm in axis_llms.items():
             task = next(
                 t for t in client.rows("intel_run_tasks")
                 if t["task_type"] == TASK_SPECIALIST_ANALYSIS and t["lane"] == axis
@@ -1576,7 +1587,7 @@ class TestReviewLineage:
         review_task = next(
             t for t in client.rows("intel_run_tasks") if t["id"] == review_task["id"]
         )
-        outcome = await execute_review_task(client, task=review_task, llm=llm)
+        outcome = await execute_conflict_resolution_task(client, task=review_task)
         assert outcome.final_state == TASK_SUCCEEDED
         review_output = next(
             o for o in client.rows("intel_run_specialist_outputs")
@@ -1603,14 +1614,16 @@ class TestReviewLineage:
             "id": session_id, "user_id": USER, "status": "running",
             "workflow_version": 2,
         }).execute()
+        # Conflicting scores (spread > 1.0, both confidences >= 0.6) — the
+        # deterministic resolution requires a real conflict to fail open.
         client.table("intel_run_specialist_outputs").insert({
             "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
-            "ticker": "AAA", "axis": AXIS_TECHNICAL, "score": 0.5, "confidence": 0.8,
+            "ticker": "AAA", "axis": AXIS_TECHNICAL, "score": 0.8, "confidence": 0.9,
             "key_findings": ["f"], "risks": [], "evidence_refs": full_manifest,
         }).execute()
         client.table("intel_run_specialist_outputs").insert({
             "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
-            "ticker": "AAA", "axis": AXIS_FUNDAMENTAL, "score": 0.5, "confidence": 0.8,
+            "ticker": "AAA", "axis": AXIS_FUNDAMENTAL, "score": -0.8, "confidence": 0.9,
             "key_findings": ["f"], "risks": [], "evidence_refs": None,
         }).execute()
         review_task = {
@@ -1623,8 +1636,7 @@ class TestReviewLineage:
         review_task = next(
             t for t in client.rows("intel_run_tasks") if t["id"] == review_task["id"]
         )
-        llm = FakeLLM()
-        outcome = await execute_review_task(client, task=review_task, llm=llm)
+        outcome = await execute_conflict_resolution_task(client, task=review_task)
         assert outcome.final_state == TASK_SUCCEEDED
         review_output = next(
             o for o in client.rows("intel_run_specialist_outputs")
@@ -1640,16 +1652,21 @@ class TestReviewLineage:
             "id": session_id, "user_id": USER, "status": "running",
             "workflow_version": 2,
         }).execute()
-        # Valid row — included.
+        # Valid, conflicting rows — included.
         client.table("intel_run_specialist_outputs").insert({
             "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
-            "ticker": "AAA", "axis": AXIS_TECHNICAL, "score": 0.5, "confidence": 0.8,
+            "ticker": "AAA", "axis": AXIS_TECHNICAL, "score": 0.8, "confidence": 0.9,
             "key_findings": ["f"], "risks": [], "evidence_refs": None,
         }).execute()
-        # Invalid row (no confidence) — must be excluded from reconciliation.
         client.table("intel_run_specialist_outputs").insert({
             "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
-            "ticker": "AAA", "axis": AXIS_FUNDAMENTAL, "score": 0.5, "confidence": None,
+            "ticker": "AAA", "axis": AXIS_FUNDAMENTAL, "score": -0.8, "confidence": 0.9,
+            "key_findings": ["f"], "risks": [], "evidence_refs": None,
+        }).execute()
+        # Invalid row (no confidence) — must be excluded from resolution.
+        client.table("intel_run_specialist_outputs").insert({
+            "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+            "ticker": "AAA", "axis": AXIS_SENTIMENT, "score": 0.5, "confidence": None,
             "key_findings": ["f"], "risks": [], "evidence_refs": None,
         }).execute()
         review_task = {
@@ -1662,17 +1679,18 @@ class TestReviewLineage:
         review_task = next(
             t for t in client.rows("intel_run_tasks") if t["id"] == review_task["id"]
         )
-        llm = FakeLLM()
-        outcome = await execute_review_task(client, task=review_task, llm=llm)
+        outcome = await execute_conflict_resolution_task(client, task=review_task)
         assert outcome.final_state == TASK_SUCCEEDED
-        # Review model/token-budget/retry/call-count contract is untouched —
-        # exactly one LLM call regardless of how many rows were filtered.
-        assert outcome.llm_calls == 1
+        # Zero LLM calls — deterministic resolution, regardless of how many
+        # rows were filtered.
+        assert outcome.llm_calls == 0
         review_output = next(
             o for o in client.rows("intel_run_specialist_outputs")
             if o["axis"] == AXIS_REVIEW
         )
-        assert review_output["evidence_refs"]["derived_from_axes"] == [AXIS_TECHNICAL]
+        assert review_output["evidence_refs"]["derived_from_axes"] == [
+            AXIS_FUNDAMENTAL, AXIS_TECHNICAL,
+        ]
 
 
 # ── Fingerprint canonical source-identity projection (contract §3 patch) ────

@@ -31,7 +31,10 @@ from .decision_tasks_v1 import execute_ticker_decision_task
 from .evidence_bundle_v1 import build_evidence_bundle
 from .publication_v1 import execute_publication_task
 from .run_scheduler_v1 import run_scheduler_pass
-from .specialist_agents_v1 import execute_review_task, execute_specialist_task
+from .specialist_agents_v1 import (
+    execute_conflict_resolution_task,
+    execute_specialist_task,
+)
 from .task_contracts_v1 import (
     SESSION_ACTIVE_STATES,
     TASK_BUILD_EVIDENCE_BUNDLE,
@@ -114,12 +117,9 @@ class WorkerSupervisor:
     ):
         self._client = client
         self.settings = settings or get_settings()
-        # Explicit override (tests, callers wiring a single fake): used for
-        # BOTH specialist and review tasks when set, exactly as before this
-        # class had separate model-routed clients.
+        # Explicit override (tests, callers wiring a single fake).
         self._llm = llm
         self._specialist_llm: Any = None
-        self._review_llm: Any = None
         self.worker_id = worker_id or store.default_worker_id()
         self.metrics_buffer: dict[str, dict[str, int]] = {}
 
@@ -152,29 +152,6 @@ class WorkerSupervisor:
                 fallback_model=None,
             )
         return self._specialist_llm
-
-    @property
-    def review_llm(self) -> Any:
-        """Conditional conflict-review agent: configured Sonnet model with a
-        configured Haiku fallback."""
-        if self._llm is not None:
-            return self._llm
-        if self._review_llm is None:
-            from ....agents.llm import LLMClient
-            self._review_llm = LLMClient(
-                api_key=getattr(self.settings, "anthropic_api_key", "") or "",
-                model=getattr(
-                    self.settings,
-                    "intel_v3_distributed_review_model",
-                    "claude-sonnet-5",
-                ),
-                fallback_model=getattr(
-                    self.settings,
-                    "intel_v3_distributed_review_fallback_model",
-                    "claude-haiku-4-5-20251001",
-                ),
-            )
-        return self._review_llm
 
     def _effective_specialist_batch_cap(self) -> int:
         """Batch size the scheduler chunks specialist tickers into.
@@ -301,7 +278,7 @@ class WorkerSupervisor:
             if task_type in _COLLECTOR_TASK_TYPES:
                 async with collector_semaphore:
                     await self._execute_one(task, stats)
-            elif task_type in (TASK_SPECIALIST_ANALYSIS, TASK_REVIEW_CONFLICT):
+            elif task_type == TASK_SPECIALIST_ANALYSIS:
                 async with llm_semaphore:
                     await self._execute_one(task, stats)
             else:
@@ -392,12 +369,16 @@ class WorkerSupervisor:
                     )
                 )
             elif task_type == TASK_REVIEW_CONFLICT:
-                outcome = await execute_review_task(
-                    self.client, task=task, llm=self.review_llm,
+                # Deterministic conflict resolution — ordinary work, no LLM
+                # semaphore, zero provider/LLM calls, zero llm_calls/model
+                # metrics.
+                outcome = await execute_conflict_resolution_task(
+                    self.client, task=task,
                 )
-                buffer["llm_calls"] = buffer.get("llm_calls", 0) + outcome.llm_calls
-                self._buffer_model_metrics(buffer, outcome.models_used)
-                stats["llm_calls"] += outcome.llm_calls
+                if outcome.persisted:
+                    buffer["deterministic_conflicts_resolved"] = (
+                        buffer.get("deterministic_conflicts_resolved", 0) + 1
+                    )
                 await asyncio.to_thread(
                     lambda: store.complete_task(
                         self.client,

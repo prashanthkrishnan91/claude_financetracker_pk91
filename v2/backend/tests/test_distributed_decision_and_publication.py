@@ -21,8 +21,10 @@ import uuid
 import pytest
 
 import app.services.intelligence.v3.distributed.run_task_store_v1 as store
+from app.services.intelligence.v3.distributed import conflict_policy_v1
 from app.services.intelligence.v3.distributed import decision_tasks_v1
 from app.services.intelligence.v3.distributed import session_control_v1 as control
+from app.services.intelligence.v3.distributed import source_lineage_v1
 from app.services.intelligence.v3.distributed.decision_tasks_v1 import (
     aggregate_advisory_signal,
     execute_ticker_decision_task,
@@ -32,6 +34,7 @@ from app.services.intelligence.v3.distributed.publication_v1 import (
 )
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_FUNDAMENTAL,
+    AXIS_REVIEW,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
     TASK_PORTFOLIO_JOIN_PUBLISH,
@@ -293,6 +296,164 @@ class TestDeterministicAuthority:
         )
         assert row["state"] == "pending"
         assert client.rows("recommendations") == []
+
+
+def _seed_conflict_outputs(
+    client: FakeSupabase, session_id: str, ticker: str,
+) -> list[dict]:
+    """Two materially conflicting non-review specialist rows."""
+    rows = []
+    for axis, score in ((AXIS_FUNDAMENTAL, 0.8), (AXIS_TECHNICAL, -0.8)):
+        store.upsert_specialist_output(
+            client, run_session_id=session_id, user_id=USER, ticker=ticker,
+            axis=axis,
+            output={
+                "stance": "positive" if score > 0 else "negative",
+                "score": score, "confidence": 0.9,
+                "key_findings": [f"{ticker} {axis} finding"], "risks": [],
+                "evidence_refs": [], "missing_evidence": [], "limitations": [],
+                "valid_until": "2027-01-01T00:00:00+00:00",
+                "model": "fake", "prompt_version": "test",
+                "input_fingerprint": "sha256:test", "batch_key": None,
+            },
+        )
+        rows.append({
+            "axis": axis, "stance": "positive" if score > 0 else "negative",
+            "score": score, "confidence": 0.9,
+            "key_findings": [f"{ticker} {axis} finding"], "risks": [],
+            "evidence_refs": [],
+        })
+    lineage = source_lineage_v1.build_review_lineage_manifest(rows, ticker=ticker)
+    store.upsert_specialist_output(
+        client, run_session_id=session_id, user_id=USER, ticker=ticker,
+        axis=AXIS_REVIEW,
+        output={
+            "stance": "neutral", "score": 0.0,
+            "confidence": conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+            "key_findings": [
+                f"Specialist evidence disagreed across {AXIS_FUNDAMENTAL}, "
+                f"{AXIS_TECHNICAL}.",
+            ],
+            "risks": [
+                "Conflicting specialist evidence increases the risk of "
+                "acting prematurely.",
+            ],
+            "missing_evidence": [],
+            "limitations": [
+                "Directional signal neutralized until the evidence "
+                "becomes more consistent.",
+            ],
+            "evidence_refs": lineage,
+            "valid_until": "2027-01-01T00:00:00+00:00",
+            "model": conflict_policy_v1.SCHEMA_VERSION,
+            "prompt_version": conflict_policy_v1.SCHEMA_VERSION,
+            "input_fingerprint": "sha256:conflict-test",
+            "batch_key": None,
+        },
+    )
+    return rows
+
+
+class TestConflictIntegration:
+    """Acceptance matrix rows 2/3/4/5 — deterministic conflict handling."""
+
+    @pytest.mark.asyncio
+    async def test_conflict_neutralizes_to_hold_low_conviction(self):
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_conflict_outputs(client, session_id, "AAPL")
+        # Normal (non-overweight) portfolio weight — a single-position fake
+        # session otherwise defaults to 100% (breach).
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 5.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        assert outcome.final_ticker_state == TICKER_DECIDED
+        record = outcome.decision
+        assert record["action"] == "HOLD"
+        assert record["conviction"] == "LOW"
+        assert record["advisory_signal"]["advisory_action"] == "HOLD"
+        assert record["advisory_signal"]["mean_confidence"] <= 0.49
+        assert record["advisory_signal"]["conflict_detected"] is True
+        assert "pre_conflict_advisory_signal" in record
+        assert record["pre_conflict_advisory_signal"]["advisory_action"] in (
+            "BUY", "HOLD", "REDUCE",
+        )
+        assert "analysis_conflict" in record["decision_input"]["suppression_reasons"]
+        assert "disagrees across" in record["decision_input"]["primary_driver"]
+
+    @pytest.mark.asyncio
+    async def test_conflict_with_overweight_still_trims(self):
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_conflict_outputs(client, session_id, "AAPL")
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 45.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        record = outcome.decision
+        # Existing portfolio-fit policy remains authoritative — conflict
+        # neutralization never weakens a real overweight/breach TRIM.
+        assert record["action"] in ("TRIM", "SELL")
+        assert record["portfolio_fit"] in ("OVERWEIGHT", "BREACH")
+        assert record["advisory_signal"]["conflict_detected"] is True
+        assert "analysis_conflict" in record["decision_input"]["suppression_reasons"]
+
+    @pytest.mark.asyncio
+    async def test_no_conflict_aggregate_and_action_unchanged(self):
+        """Acceptance row 1 — aligned specialists, no conflict row: ordinary
+        aggregation/decision are byte-for-byte unaffected."""
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_specialist_outputs(client, session_id, "AAPL", score=0.6)
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 5.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        record = outcome.decision
+        assert record["advisory_signal"].get("conflict_detected") is None
+        assert record["advisory_signal"] == record["pre_conflict_advisory_signal"]
+        assert record["action"] in ("BUY", "HOLD")
+
+    @pytest.mark.asyncio
+    async def test_conflict_retry_is_idempotent(self):
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_conflict_outputs(client, session_id, "AAPL")
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 5.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        first = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        existing_task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_TICKER_DECISION and t["ticker"] == "AAPL"
+        )
+        from tests.distributed_run_intel_test_utils import claim_task_row
+
+        second = await execute_ticker_decision_task(
+            client, task=claim_task_row(client, existing_task),
+        )
+        assert second.decision["action"] == first.decision["action"]
+        assert (
+            second.decision["advisory_signal"]
+            == first.decision["advisory_signal"]
+        )
 
 
 class TestPublicationStatusSemantics:

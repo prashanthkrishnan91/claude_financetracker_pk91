@@ -31,7 +31,9 @@ from ..decision_contracts import (
 )
 from ..decision_policy_v1 import decide
 from ..portfolio_governor_lite import compute_portfolio_fit
+from . import conflict_policy_v1
 from . import run_task_store_v1 as store
+from . import source_lineage_v1
 from .task_contracts_v1 import (
     AXIS_REVIEW,
     AXIS_RISK_FILING,
@@ -46,6 +48,10 @@ logger = logging.getLogger(__name__)
 # signal consumed by decide(); decide() remains the only action authority).
 _ADVISORY_BUY_THRESHOLD = 0.35
 _ADVISORY_REDUCE_THRESHOLD = -0.35
+
+_ANALYSIS_CONFLICT_ACTION_REASON = (
+    "The directional signal was neutralized until the evidence becomes more consistent."
+)
 
 
 def _now() -> datetime:
@@ -99,6 +105,61 @@ def aggregate_advisory_signal(
         "aggregate_score": round(aggregate, 4),
         "mean_confidence": round(mean_confidence, 4),
     }
+
+
+def resolve_conflict_advisory(
+    *,
+    ticker: str,
+    outputs: list[dict[str, Any]],
+    non_review: list[dict[str, Any]],
+    weight_pct: Optional[float],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Pure, idempotent: ``(pre_conflict_advisory_signal, advisory_signal,
+    verdict)``. Fail closed — only a model-tagged deterministic review row
+    whose lineage validates against the CURRENT non-review outputs triggers
+    the HOLD/confidence-cap overlay and narrative override (never the
+    visible ACTION)."""
+    pre_conflict = aggregate_advisory_signal(non_review)
+    verdict = compose_analyst_verdict(ticker, non_review, pre_conflict)
+    review_row = next(
+        (
+            o for o in outputs
+            if str(o.get("axis")) == AXIS_REVIEW
+            and str(o.get("model") or "") == conflict_policy_v1.SCHEMA_VERSION
+            and o.get("score") is not None and o.get("confidence") is not None
+            and source_lineage_v1.validate_review_against_current_outputs(
+                o.get("evidence_refs"), ticker=ticker,
+                current_non_review_outputs=non_review,
+            ) is not None
+        ),
+        None,
+    )
+    if review_row is None:
+        return pre_conflict, pre_conflict, verdict
+
+    pre_confidence = pre_conflict.get("mean_confidence")
+    capped = min(
+        pre_confidence if pre_confidence is not None
+        else conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+        conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+    )
+    assessment = conflict_policy_v1.assess_conflict(non_review, weight_pct)
+    advisory_signal = {
+        **pre_conflict,
+        "advisory_action": conflict_policy_v1.CONFLICT_ACTION,
+        "mean_confidence": round(capped, 4),
+        "conflict_detected": True,
+        "conflict_assessment": assessment,
+    }
+    verdict = compose_analyst_verdict(ticker, non_review, advisory_signal)
+    axes = assessment.get("conflicting_axes") or verdict.get("specialist_axes") or []
+    axis_text = ", ".join(axes) if axes else "the reviewed specialist axes"
+    verdict = {
+        **verdict,
+        "primary_driver": f"Specialist evidence disagrees across {axis_text}."[:280],
+        "action_reason": _ANALYSIS_CONFLICT_ACTION_REASON[:280],
+    }
+    return pre_conflict, advisory_signal, verdict
 
 
 def _conviction_level(mean_confidence: Optional[float]) -> str:
@@ -389,8 +450,10 @@ async def execute_ticker_decision_task(
             and existing_decision.get("agent_run_id")
             and existing_decision.get("action")
         ):
-            aggregate = aggregate_advisory_signal(outputs)
-            verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+            _pre_conflict, aggregate, verdict = resolve_conflict_advisory(
+                ticker=ticker, outputs=outputs, non_review=non_review,
+                weight_pct=row.get("portfolio_weight_pct"),
+            )
             evidence_ok = _write_durable_evidence(
                 client,
                 user_id=user_id,
@@ -451,8 +514,10 @@ async def execute_ticker_decision_task(
         # session ticker row → 5. compatibility evidence rows carrying the
         # FINAL deterministic action. No BUY/HOLD/TRIM/SELL row exists before
         # canonical policy determined it.
-        aggregate = aggregate_advisory_signal(outputs)
-        verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+        pre_conflict, aggregate, verdict = resolve_conflict_advisory(
+            ticker=ticker, outputs=outputs, non_review=non_review,
+            weight_pct=row.get("portfolio_weight_pct"),
+        )
         run_id = str(uuid.uuid4())
 
         suppression: dict[str, Any] = {}
@@ -475,9 +540,12 @@ async def execute_ticker_decision_task(
             upstream_conviction=verdict.get("conviction_level"),
             suppression_reasons={
                 **suppression,
+                "price_context": "Price/valuation banding evidence is "
+                "not available for this run.",
                 **(
-                    {"price_context": "Price/valuation banding evidence is "
-                     "not available for this run."}
+                    {"analysis_conflict": "Specialist evidence disagreed materially; "
+                     "the directional signal was neutralized and confidence was capped."}
+                    if aggregate.get("conflict_detected") else {}
                 ),
             },
             primary_driver=verdict.get("primary_driver"),
@@ -528,6 +596,7 @@ async def execute_ticker_decision_task(
                 "asset_type_hint": decision_input.asset_type_hint,
             },
             "advisory_signal": aggregate,
+            "pre_conflict_advisory_signal": pre_conflict,
             "agent_run_id": run_id,
             "policy_schema_version": decision.schema_version,
             "decided_at": now.isoformat(),

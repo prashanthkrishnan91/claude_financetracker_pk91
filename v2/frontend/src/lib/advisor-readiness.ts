@@ -577,13 +577,17 @@ export function deriveRunTrustSummary(
     `${cov.no_call_count} no-call, ${cov.failed_count} failed` +
     (cov.publication_complete ? "." : " (publication incomplete).");
 
+  // Specialist conflicts are resolved deterministically (no LLM review) —
+  // e.g. "7 specialist conflicts detected — 7 handled deterministically."
   const rc = contract.conflict_review_coverage;
   const conflictReviewLine =
     rc.required_count === 0
-      ? "No conflict reviews were required this run."
-      : `${rc.succeeded_count} of ${rc.required_count} required conflict reviews succeeded` +
-        (rc.failed_count > 0 ? ` — ${rc.failed_count} failed.` : ".") +
-        (rc.pending_count > 0 ? ` ${rc.pending_count} still pending.` : "");
+      ? "No specialist conflicts were detected this run."
+      : `${rc.required_count} specialist conflict${rc.required_count === 1 ? "" : "s"} ` +
+        `detected — ${rc.succeeded_count} handled deterministically` +
+        (rc.failed_count > 0 ? `, ${rc.failed_count} could not be resolved safely` : "") +
+        (rc.pending_count > 0 ? `, ${rc.pending_count} still pending` : "") +
+        ".";
 
   const sl = contract.source_lineage;
   const totalOutputs = sl.outputs_with_source_refs + sl.outputs_missing_source_refs;

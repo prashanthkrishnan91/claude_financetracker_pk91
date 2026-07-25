@@ -119,3 +119,42 @@ describe("IntelV3Drawer — 'What's limiting this holding' section", () => {
     expect(text).toContain("What's limiting this holding");
   });
 });
+
+describe("IntelV3Drawer — deterministic conflict handling (no LLM-review wording)", () => {
+  it("a conflicted normal-weight holding shows HOLD/LOW conviction and the plain-English neutralization explanation, with zero LLM-review wording", () => {
+    // Exact rationale text decision_policy_v1.decide() produces (unmodified)
+    // for a conflict-neutralized HOLD — see decision_tasks_v1's
+    // _apply_conflict_narrative / _ANALYSIS_CONFLICT_ACTION_REASON.
+    const card = makeCard({
+      conflict_review_status: "succeeded",
+      rationale:
+        "AAA: The directional signal was neutralized until the evidence " +
+        "becomes more consistent.",
+    });
+    card.action = "HOLD";
+    card.conviction = "LOW";
+    render(card);
+    const text = container.textContent ?? "";
+
+    // Visible action/conviction — existing UI structure, no special-casing.
+    expect(text).toContain("HOLD");
+    expect(text).toContain("Low conviction");
+
+    // Plain-English neutralization explanation is present (why confidence
+    // was capped / directional signal suppressed).
+    expect(text.toLowerCase()).toContain("neutralized");
+
+    // No LLM-review vocabulary anywhere in the rendered drawer.
+    const lower = text.toLowerCase();
+    for (const forbidden of [
+      "review passed",
+      "senior investment research reviewer",
+      "senior reviewer",
+      "review model",
+      "reconciliation by ai",
+      "consensus",
+    ]) {
+      expect(lower).not.toContain(forbidden);
+    }
+  });
+});

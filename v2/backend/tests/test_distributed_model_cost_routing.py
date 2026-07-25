@@ -3,27 +3,27 @@
 Proves:
   1. standard specialist analysis routes to the configured Haiku model;
   2. a specialist failure never auto-escalates to Sonnet (no fallback);
-  3. the conditional conflict-review agent routes to the configured Sonnet
-     model;
-  4. review may fall back to the configured Haiku model on primary failure;
-  5. unrelated legacy `LLMClient` callers retain Sonnet 4.6 → Haiku 4.5
+  3. unrelated legacy `LLMClient` callers retain Sonnet 4.6 → Haiku 4.5
      failover, unchanged;
-  6. a successful specialist output is never re-generated after a process
+  4. a successful specialist output is never re-generated after a process
      restart (fresh `WorkerSupervisor`/`LLMClient` objects) — the persisted
      row is untouched;
-  7. an unfinished task picked up after restart uses the newly configured
+  5. an unfinished task picked up after restart uses the newly configured
      model;
-  8. model names are environment configurable (`INTEL_V3_DISTRIBUTED_*`);
-  9. migration 027 no longer declares or references the buggy `session_user`
+  6. model names are environment configurable (`INTEL_V3_DISTRIBUTED_*`);
+  7. migration 027 no longer declares or references the buggy `session_user`
      PL/pgSQL variable;
-  10. deterministic decision authority is unaffected by model routing.
+  8. deterministic decision authority is unaffected by model routing;
+  9. conflict resolution (`TASK_REVIEW_CONFLICT`) makes ZERO LLM calls and
+     has no model/routing surface at all — see
+     `test_distributed_specialists_and_review.py` for its own coverage.
 
-Collectors, bundle construction, decisions and publication make zero LLM
-calls in this workflow — only specialist/review tasks touch the Anthropic
-client, so tests either exercise `LLMClient` directly (with `_single_call`
-stubbed — no real network) or call the specialist/review executors with a
-stubbed `ask_json` on a real `LLMClient` instance built through
-`WorkerSupervisor.specialist_llm` / `.review_llm`.
+Collectors, bundle construction, decisions, publication and conflict
+resolution make zero LLM calls in this workflow — only specialist tasks
+touch the Anthropic client, so tests either exercise `LLMClient` directly
+(with `_single_call` stubbed — no real network) or call the specialist
+executor with a stubbed `ask_json` on a real `LLMClient` instance built
+through `WorkerSupervisor.specialist_llm`.
 """
 from __future__ import annotations
 
@@ -141,7 +141,7 @@ def _stub_single_call(monkeypatch, canned: dict[str, object]) -> list[str]:
     return called_models
 
 
-# ── 1 & 3: WorkerSupervisor routes specialist vs review to distinct clients ──
+# ── 1: WorkerSupervisor routes specialist analysis to the configured Haiku ───
 
 
 class TestSupervisorModelRouting:
@@ -155,28 +155,9 @@ class TestSupervisorModelRouting:
         assert llm.fallback_model is None
         assert llm._fallback_enabled is False
 
-    def test_review_llm_defaults_to_configured_sonnet_with_haiku_fallback(self):
-        settings = make_settings()
-        supervisor = WorkerSupervisor(
-            client=FakeSupabase(), settings=settings, worker_id="w",
-        )
-        llm = supervisor.review_llm
-        assert llm.model == "claude-sonnet-5"
-        assert llm.fallback_model == "claude-haiku-4-5-20251001"
-        assert llm._fallback_enabled is True
-
-    def test_specialist_and_review_are_distinct_client_instances(self):
-        settings = make_settings()
-        supervisor = WorkerSupervisor(
-            client=FakeSupabase(), settings=settings, worker_id="w",
-        )
-        assert supervisor.specialist_llm is not supervisor.review_llm
-        assert supervisor.specialist_llm.model != supervisor.review_llm.model
-
-    def test_explicit_llm_override_still_serves_both_roles(self):
-        """Back-compat: tests/callers that inject one `llm=` kwarg (the
-        pre-cost-routing shape) still get it for both specialist and review
-        tasks — only the DEFAULT (no override) path splits by model."""
+    def test_explicit_llm_override_still_serves_specialist_role(self):
+        """Back-compat: tests/callers that inject one `llm=` kwarg still get
+        it for specialist tasks."""
         settings = make_settings()
         sentinel = object()
         supervisor = WorkerSupervisor(
@@ -184,7 +165,16 @@ class TestSupervisorModelRouting:
             worker_id="w",
         )
         assert supervisor.specialist_llm is sentinel
-        assert supervisor.review_llm is sentinel
+
+    def test_no_review_llm_surface_remains(self):
+        """Conflict resolution is deterministic — no Sonnet/fallback client
+        is ever instantiated for it."""
+        settings = make_settings()
+        supervisor = WorkerSupervisor(
+            client=FakeSupabase(), settings=settings, worker_id="w",
+        )
+        assert not hasattr(supervisor, "review_llm")
+        assert not hasattr(supervisor, "_review_llm")
 
 
 # ── 2: specialist failure never escalates to Sonnet ──────────────────────────
@@ -210,34 +200,7 @@ class TestSpecialistNoEscalation:
         assert not any("sonnet" in m for m in called)
 
 
-# ── 4: review may fall back to Haiku ──────────────────────────────────────────
-
-
-class TestReviewFallback:
-    @pytest.mark.asyncio
-    async def test_review_falls_back_to_haiku_on_sonnet_failure(
-        self, monkeypatch
-    ):
-        called = _stub_single_call(monkeypatch, {
-            "claude-sonnet-5": RuntimeError(
-                "insufficient_quota: account balance depleted"
-            ),
-            "claude-haiku-4-5-20251001": (
-                '{"ticker": "AAPL", "stance": "neutral", "score": 0.0, '
-                '"confidence": 0.6, "key_findings": ["reconciled"], '
-                '"risks": [], "missing_evidence": [], "limitations": []}'
-            ),
-        })
-        client = LLMClient(
-            api_key="key", model="claude-sonnet-5",
-            fallback_model="claude-haiku-4-5-20251001",
-        )
-        result = await client.ask_json("system", "Ticker: AAPL")
-        assert result["ticker"] == "AAPL"
-        assert called == ["claude-sonnet-5", "claude-haiku-4-5-20251001"]
-
-
-# ── 5: unrelated legacy LLMClient callers are unaffected ─────────────────────
+# ── 3: unrelated legacy LLMClient callers are unaffected ─────────────────────
 
 
 class TestLegacyLLMClientUnaffected:
@@ -263,7 +226,7 @@ class TestLegacyLLMClientUnaffected:
         assert called == [PRIMARY_MODEL, FALLBACK_MODEL]
 
 
-# ── 6 & 7: restart — succeeded outputs untouched, unfinished work re-routed ──
+# ── 4 & 5: restart — succeeded outputs untouched, unfinished work re-routed ──
 
 
 class TestRestartRecovery:
@@ -397,7 +360,7 @@ class TestRestartRecovery:
         assert aapl_output_after == aapl_output_before
 
 
-# ── 8: model names are environment configurable ──────────────────────────────
+# ── 6: model names are environment configurable ──────────────────────────────
 
 
 class TestEnvironmentConfigurable:
@@ -410,24 +373,11 @@ class TestEnvironmentConfigurable:
         monkeypatch.setenv(
             "INTEL_V3_DISTRIBUTED_SPECIALIST_MODEL", "claude-haiku-ENV",
         )
-        monkeypatch.setenv(
-            "INTEL_V3_DISTRIBUTED_REVIEW_MODEL", "claude-sonnet-ENV",
-        )
-        monkeypatch.setenv(
-            "INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL",
-            "claude-haiku-ENV-FALLBACK",
-        )
         from app.config import Settings
 
         settings = Settings(_env_file=None)
         assert settings.intel_v3_distributed_specialist_model == (
             "claude-haiku-ENV"
-        )
-        assert settings.intel_v3_distributed_review_model == (
-            "claude-sonnet-ENV"
-        )
-        assert settings.intel_v3_distributed_review_fallback_model == (
-            "claude-haiku-ENV-FALLBACK"
         )
 
     def test_settings_defaults_without_any_env_vars(self):
@@ -444,13 +394,13 @@ class TestEnvironmentConfigurable:
         assert settings.intel_v3_distributed_specialist_model == (
             "claude-haiku-4-5-20251001"
         )
-        assert settings.intel_v3_distributed_review_model == "claude-sonnet-5"
-        assert settings.intel_v3_distributed_review_fallback_model == (
-            "claude-haiku-4-5-20251001"
+        assert not hasattr(settings, "intel_v3_distributed_review_model")
+        assert not hasattr(
+            settings, "intel_v3_distributed_review_fallback_model",
         )
 
 
-# ── 9: migration 027 no longer declares/references session_user ─────────────
+# ── 7: migration 027 no longer declares/references session_user ─────────────
 
 
 class TestMigration027Corrected:
@@ -483,7 +433,7 @@ class TestMigration027Corrected:
             assert "IS DISTINCT FROM" in fn_body
 
 
-# ── 10: deterministic decision authority is unaffected ───────────────────────
+# ── 8: deterministic decision authority is unaffected ───────────────────────
 
 
 class TestDecisionAuthorityUnaffected:

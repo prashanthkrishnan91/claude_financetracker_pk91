@@ -50,20 +50,22 @@ export function sourceLineageToLabel(
   }
 }
 
-/** Per-card conflict-review status → plain-English label. Never claims "no
- * review was required" for "unknown" (fail-closed read-time overlay) — that
- * would silently re-introduce the exact optimistic-default bug this exists
- * to prevent. */
+/** Per-card conflict-review status → plain-English label. Specialist
+ * conflicts are resolved deterministically (no LLM review) — copy describes
+ * conservative handling, never a "review" that "passed" or reached
+ * "consensus". Never claims "no conflict was detected" for "unknown"
+ * (fail-closed read-time overlay) — that would silently re-introduce the
+ * exact optimistic-default bug this exists to prevent. */
 export function conflictReviewStatusToLabel(status: string | null | undefined): string {
   switch (status) {
-    case "succeeded": return "Conflict review passed for this holding.";
-    case "failed":    return "A required conflict review failed — shown without successful reconciliation.";
-    case "pending":   return "A required conflict review is still pending.";
-    case "unknown":   return "Conflict-review status could not be re-verified for this holding.";
+    case "succeeded": return "Specialist disagreement was handled conservatively for this holding.";
+    case "failed":    return "Specialist disagreement could not be resolved safely.";
+    case "pending":   return "Specialist disagreement handling is still pending.";
+    case "unknown":   return "Conflict-handling status could not be re-verified for this holding.";
     case "not_required":
-      return "No conflict review was required for this holding.";
+      return "No specialist conflict was detected for this holding.";
     default:
-      return "Conflict-review status unavailable for this holding.";
+      return "Conflict-handling status unavailable for this holding.";
   }
 }
 

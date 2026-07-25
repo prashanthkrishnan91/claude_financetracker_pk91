@@ -1318,11 +1318,17 @@ class TestAxisFingerprintContract:
     def _bundle(
         self, *, sma=1.0, provider="yfinance", task_id="t1",
         prior_action="buy", market_price=100.0,
+        generated_at=None, artifact_id=None,
     ):
         ref = lineage.make_provider_observation_ref(
             lane=LANE_TECHNICALS, ticker="AAPL", task_id=task_id,
             output={"sma_50": sma, "source": provider, "as_of": "2026-07-01T00:00:00+00:00"},
         )
+        technical = {"sma_50": sma}
+        if generated_at is not None:
+            technical["generated_at"] = generated_at
+        if artifact_id is not None:
+            technical["artifact_id"] = artifact_id
         return {
             "ticker": "AAPL", "asset_type": "equity",
             "portfolio_context": {
@@ -1331,7 +1337,7 @@ class TestAxisFingerprintContract:
             },
             "missing_lanes": [], "degraded_lanes": [],
             "market": {"price": market_price},
-            "technical": {"sma_50": sma},
+            "technical": technical,
             "source_refs_by_lane": {LANE_TECHNICALS: [ref]},
         }
 
@@ -1343,12 +1349,12 @@ class TestAxisFingerprintContract:
 
     def test_identical_prompt_payload_yields_identical_fingerprint(self):
         a, b = self._context(), self._context()
-        assert a["compact_bundle"] == b["compact_bundle"]
+        assert a["prompt_payload"] == b["prompt_payload"]
         assert a["input_fingerprint"] == b["input_fingerprint"]
 
     def test_visible_prompt_change_changes_fingerprint(self):
         a, b = self._context(sma=1.0), self._context(sma=2.0)
-        assert a["compact_bundle"] != b["compact_bundle"]
+        assert a["prompt_payload"] != b["prompt_payload"]
         assert a["input_fingerprint"] != b["input_fingerprint"]
 
     def test_invisible_replay_locator_never_changes_fingerprint(self):
@@ -1357,23 +1363,44 @@ class TestAxisFingerprintContract:
 
     def test_changed_source_identity_changes_fingerprint(self):
         a, b = self._context(provider="yfinance"), self._context(provider="polygon")
-        assert a["compact_bundle"]["evidence_sources"] != b["compact_bundle"]["evidence_sources"]
+        assert a["prompt_payload"]["evidence_sources"] != b["prompt_payload"]["evidence_sources"]
         assert a["input_fingerprint"] != b["input_fingerprint"]
 
     def test_market_tick_never_reaches_prompt_or_fingerprint(self):
         a, b = self._context(market_price=100.0), self._context(market_price=999.0)
-        assert "market" not in a["compact_bundle"]
+        assert "market" not in a["prompt_payload"]
         assert a["input_fingerprint"] == b["input_fingerprint"]
 
     def test_prior_action_never_reaches_prompt_or_fingerprint(self):
         a, b = self._context(prior_action="buy"), self._context(prior_action="sell")
-        assert "prior_action" not in a["compact_bundle"]["portfolio_context"]
+        assert "prior_action" not in a["prompt_payload"]["portfolio_context"]
         assert a["input_fingerprint"] == b["input_fingerprint"]
 
     def test_lineage_lists_exactly_the_lanes_in_the_actual_prompt(self):
         context = self._context()
         assert context["supplied_lanes"] == [LANE_TECHNICALS]
         assert context["manifest"]["expected_lanes"] == [LANE_TECHNICALS]
+
+    def test_input_fingerprint_equals_stable_fingerprint_of_prompt_payload(self):
+        """The fingerprint is not a separately-maintained projection — it is
+        ``stable_fingerprint`` applied directly to the exact object returned
+        as ``prompt_payload``, recomputed here independently."""
+        from app.services.intelligence.v3.distributed.task_contracts_v1 import (
+            stable_fingerprint,
+        )
+
+        context = self._context()
+        assert context["input_fingerprint"] == stable_fingerprint(
+            context["prompt_payload"]
+        )
+
+    def test_generated_at_and_artifact_id_absent_from_payload_and_invisible_to_fingerprint(self):
+        a = self._context(generated_at="2026-07-01T00:00:00+00:00", artifact_id="artifact-a")
+        b = self._context(generated_at="2026-08-15T12:00:00+00:00", artifact_id="artifact-b")
+        assert "generated_at" not in a["prompt_payload"]["technical"]
+        assert "artifact_id" not in a["prompt_payload"]["technical"]
+        assert a["prompt_payload"] == b["prompt_payload"]
+        assert a["input_fingerprint"] == b["input_fingerprint"]
 
 
 # ── Axis-scoped specialist lineage + reuse + review ─────────────────────────
@@ -1461,7 +1488,7 @@ class TestSpecialistAxisLineage:
         # LANE_PRICE is never supplied even though the raw bundle carries it.
         assert LANE_PRICE not in context["supplied_lanes"]
         assert LANE_TECHNICALS in context["supplied_lanes"]
-        compact = context["compact_bundle"]
+        compact = context["prompt_payload"]
         assert "evidence_sources" in compact
         assert compact["evidence_sources"]
         for source in compact["evidence_sources"]:

@@ -62,9 +62,6 @@ export interface AdvisorRunModel {
   shouldRefetchSnapshot: boolean;
   /** True when the run completed but some holdings had limited evidence. */
   completedWithGaps: boolean;
-  /** Compact "N lanes reused, M refreshed" line — only set on a terminal
-   *  run when the backend reported real metrics; never a zero placeholder. */
-  evidenceSummaryLine: string | null;
   /** Bounded, human-readable next step from a blocked financial-truth
    *  preflight (e.g. "Add or import at least one open position.") — never a
    *  raw code. Null except on a blocked-preflight not_created result whose
@@ -158,7 +155,6 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
     progress,
     shouldRefetchSnapshot: false,
     completedWithGaps: false,
-    evidenceSummaryLine: null as string | null,
     repairAction: null as string | null,
   };
 
@@ -212,7 +208,6 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
         (withGaps ? RUN_COMPLETED_WITH_GAPS_SENTENCE : RUN_COMPLETED_SENTENCE),
       shouldRefetchSnapshot: Boolean(lastRunResult.completed_snapshot_id),
       completedWithGaps: withGaps,
-      evidenceSummaryLine: lastRunResult.evidence_summary_line?.trim() || null,
     };
   }
 

@@ -146,8 +146,20 @@ and re-raises every other database error; session creation verifies the exact
 expected seed graph (portfolio context + macro + every collector lane for
 every frozen ticker) before `created → running`; incomplete shapes stay in
 the explicit retryable `created` state and `repair_session_graph` (run by the
-supervisor — no browser traffic required) converges every partial-create
-shape to exactly one complete graph.
+supervisor — no browser traffic required) converges a partial-create shape
+to a complete graph WITHOUT ever re-deriving scope from the current
+portfolio: durable `intel_run_tickers` rows are the sole scope authority.
+If frozen ticker rows exist, repair creates only the missing seed tasks and
+never adds/removes/modifies a ticker row or `holdings_scope` (repair fails
+honestly if `holdings_scope` doesn't match the frozen ticker-row set exactly,
+or if the frozen rows are internally contradictory — duplicates, malformed
+asset type, or a `holdings_scope` entry with no matching row). If ZERO
+frozen ticker rows exist, the crash happened before scope freeze ever
+persisted — repair terminalizes the session as `failed` with
+`scope_freeze_incomplete_restart_required` rather than reconstructing scope
+from (possibly since-changed) current holdings; the user must click Run
+Intel again for a fresh preflight and a new session. Repair makes zero
+financial-truth, provider, or LLM calls in either path.
 
 ### intel_run_specialist_outputs (new)
 
@@ -793,17 +805,30 @@ current-session DB read — never a lane cache hit or provider refresh.
 
 **5. One prompt/fingerprint helper** (`specialist_agents_v1.axis_evidence_context`).
 The separately-maintained `axis_input_fingerprint` is gone —
-`axis_evidence_context` is the ONE helper returning the compact prompt
-bundle (with its `evidence_sources` projection), supplied lanes, lineage
-manifest, and `input_fingerprint` together, used identically by prompt
-construction, the reuse lookup, the persisted `input_fingerprint`, and
-`evidence_refs` rebinding on reuse. `market`/`prior_action` are excluded
-from BOTH the prompt and the fingerprint together (previously `market`
-reached the prompt while being excluded only from the fingerprint — a
-field must never be visible to the LLM while invisible to reuse). No
-axis's compact bundle ever includes `market` anymore, so
-`source_lineage_v1.AXIS_CANDIDATE_LANES` no longer lists `LANE_PRICE` for
-any axis — an axis never claims price lineage it was never given.
+`axis_evidence_context` is the ONE helper returning `prompt_payload`
+(the EXACT bounded object the model receives), supplied lanes, lineage
+manifest, and `input_fingerprint`, used identically by prompt construction,
+the reuse lookup, the persisted `input_fingerprint`, and `evidence_refs`
+rebinding on reuse. `prompt_payload` is built by stripping volatile fields
+(`as_of`/`cache_hit`/`generated_at`/`fetched_at`/`task_id`/`observed_at`/
+`artifact_id`) OUT of the payload itself — not merely out of its hash — so
+`input_fingerprint = stable_fingerprint(prompt_payload)` hashes exactly what
+was sent, nothing more, nothing less. `axis_evidence_context` is computed
+ONCE per ticker per task and that same object is reused for the reuse
+lookup, the persisted fingerprint/evidence_refs, and the actual prompt —
+`_build_user_prompt` accepts prebuilt payloads and never recomputes axis
+context. `market`/`prior_action` are excluded from BOTH the prompt and the
+fingerprint together (a field must never be visible to the LLM while
+invisible to reuse). No axis's compact bundle ever includes `market`
+anymore, so `source_lineage_v1.AXIS_CANDIDATE_LANES` no longer lists
+`LANE_PRICE` for any axis — an axis never claims price lineage it was never
+given. Deterministic safe batching (`_batch_payloads_by_size`) groups
+COMPLETE per-ticker payloads into LLM calls bounded by 60,000 serialized
+JSON chars — a payload is never split or truncated (the old
+`json.dumps(...)[:60000]` slice is deleted); an ordinary batch still costs
+one call; a single ticker whose own bounded payload exceeds the limit
+degrades with `prompt_payload_oversized` and never reaches an LLM call;
+`llm_calls`/reuse metrics reflect the actual resulting per-batch calls.
 
 **6. Literal cost/reuse metrics** (`worker_supervisor_v1`). `cache_hits`/
 `lanes_refreshed` count ONLY a successful evidence-lane adoption/collection
@@ -813,11 +838,10 @@ non-cache-hit task completion, including the portfolio-context read,
 silently inflated `lanes_refreshed`). `provider_calls` stays unconditional
 (reflects real attempts regardless of outcome). `llm_calls`/`llm_reused`
 were already literal (actual `ask_json` calls vs. individually adopted
-outputs) and are unchanged. `_evidence_summary_line` renders the
-`cache_hits`/`lanes_refreshed` pair (and separately the
-`llm_reused`/`llm_calls` pair) once EITHER sibling counter exists — an
-immediate rerun that reuses every lane never sets `lanes_refreshed` at all,
-and that absence is a genuine zero, not a reason to suppress the line.
+outputs) and are unchanged. All of these stay internal collector-success
+observability only — `get_session_status` no longer derives or exposes any
+user-facing sentence from them (the prior `_evidence_summary_line`/
+`evidence_summary_line` surface is deleted entirely, not replaced; see §11).
 
 **7. Blocked-preflight UI.** `IntelV3SessionStatus` (frontend) and
 `AdvisorRunModel` carry the backend's existing `status`/`code`/`message`/
@@ -842,3 +866,40 @@ session-native snapshot, never a copy of a prior session's.
 **Lane TTL matrix (unchanged from §6, verified not redefined by item 8's
 tests):** price 0.25h, technicals/fundamentals/sec_catalyst/macro 24h,
 news_sentiment 1h, sec_company_facts 168h, etf_fund_data 2160h.
+
+**9. Cash-aware reconciliation** (`financial_truth_baseline_v1`). The
+portfolio snapshot's `total_equity` includes `cash_balance` on top of
+invested positions — it is never compared directly against the
+position-derived market value. `_snapshot_truth` now selects
+`cash_balance`, validates both it and `total_equity` as finite
+(`math.isfinite`), and derives `snapshot_invested_value = total_equity -
+cash_balance` only when both are present and finite. `_reconciliation`
+compares `snapshot_invested_value` (not the raw `total_equity`) against
+position-derived market value, and returns `snapshot_portfolio_value`/
+`snapshot_cash_balance`/`snapshot_invested_value`/
+`position_derived_market_value` alongside the existing
+`absolute_difference`/`percentage_difference`/`reconciliation_status`.
+Missing/non-finite cash on a fresh snapshot (after the one existing refresh
+attempt) fails closed as `portfolio_truth_unavailable` — never silently
+treated as zero cash. Negative finite cash remains arithmetic data.
+
+**10. Immutable frozen scope on repair** (`session_control_v1.
+repair_session_graph`). See the updated "Graph creation is fail-closed and
+self-repairing" paragraph above — repair never re-derives scope from the
+current portfolio; durable `intel_run_tickers` rows are the sole authority,
+and a crash before scope freeze persisted fails the session rather than
+reconstructing it.
+
+**11. No evidence-count UI claim.** The optional "Evidence: N lanes reused,
+M refreshed. Specialist analysis: ..." sentence is deleted entirely —
+backend `_evidence_summary_line`/`evidence_summary_line` and frontend
+`evidence_summary_line`/`evidenceSummaryLine` (`IntelV3SessionStatus`,
+`AdvisorRunModel`, `deriveRunModel`, `AdvisorReadinessPanel`'s render line)
+are all removed, with no replacement status line/card/tooltip/control.
+Reason: collector success (a lane adopted/collected) happens before the
+evidence bundle decides whether an artifact is actually usable, so a raw
+collector-success count was never a trustworthy "usable evidence" claim.
+`provider_calls`/`llm_calls`/`llm_reused`/`cache_hits`/`lanes_refreshed`
+remain as internal collector-success observability only (§6) — never
+described as final usable evidence. The blocked-preflight reason and
+repair-action UI (§7) are unchanged.

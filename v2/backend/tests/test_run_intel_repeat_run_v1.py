@@ -77,9 +77,10 @@ async def test_immediate_rerun_reuses_everything_with_zero_new_calls(monkeypatch
     assert snapshot_2["id"] != snapshot_1["id"], "rerun must publish its own session-native snapshot"
 
     status_2 = await control.get_session_status(client=client, user_id=USER, session_id=session_2)
-    assert "evidence_summary_line" in status_2
-    assert "lanes reused" in status_2["evidence_summary_line"]
-    assert "reused" in status_2["evidence_summary_line"].split("Specialist analysis:")[1]
+    # No optional user-facing evidence-count sentence — internal reuse
+    # metrics (asserted above via recorder/llm.calls) stay collector-success
+    # observability only, never a surfaced "usable evidence" claim.
+    assert "evidence_summary_line" not in status_2
 
 
 @pytest.mark.asyncio

@@ -2,29 +2,46 @@
 
 Last updated: 2026-07-25 (Run Intel operational-reliability PR #488 — item 4
 of the Run Intel trust-recovery sequence, OPEN, not yet merged, patched a
-second round to close eight connected correctness gaps a final producer-to-
-screen audit found: (1) the strict financial-truth preflight now freezes the
-EXACT open-position/price rows it reconciled — zero second read, duplicate
-active tickers block instead of silently deduping, a core DB read failure is
-never reported as an empty portfolio; (2) fundamentals are labeled by REAL
-currency domain (statement/reporting vs. quote/security, EPS as
-currency-per-share, NaN/±infinity rejected, GBp/GBX never coerced to GBP);
-(3) news parsing handles the CURRENT nested yfinance shape with strict
-related-ticker-metadata-first relevance (never overridden by a text match);
-(4) collector cache lookup is fail-closed and asset-type-scoped (a DB outage
-is retried, never reinterpreted as a legitimate miss), plus a 24h macro
-reuse path on the existing task table; (5) the specialist prompt object and
-its `input_fingerprint` are now ONE helper (`axis_evidence_context`) —
-`market`/`prior_action` excluded from both the prompt AND the fingerprint
-together, `evidence_sources` included in the fingerprint, no axis claims
-price lineage since price is never sent to any axis prompt; (6) session
-cost/reuse metrics are literal (portfolio-context DB reads and degraded/
-failed lane attempts no longer inflate `lanes_refreshed`); (7) a blocked
-preflight's specific reason and bounded repair action render in the
-existing `AdvisorReadinessPanel` (no new UI surface); (8) the hour/day/week
-repeat-run matrix has real controlled-clock integration coverage across
-equities/ETF/crypto, including the SEC/ETF long-TTL artifact-lane paths. See
-the finish-plan item 4 entry below for full detail.)
+THIRD round to close four remaining release blockers: (1) portfolio
+reconciliation is now cash-aware — the snapshot's `total_equity` includes
+cash on top of invested positions, so `snapshot_invested_value =
+total_equity - cash_balance` is derived and compared against position-
+derived market value instead of the raw (cash-inflated) total; `cash_balance`
+is validated finite (NaN/±infinity/missing fails closed as
+`portfolio_truth_unavailable` after the one existing refresh attempt;
+negative finite cash stays arithmetic, never coerced to zero); (2)
+`repair_session_graph` never re-derives the frozen scope from the CURRENT
+portfolio — durable `intel_run_tickers` rows are the sole scope authority:
+present rows get missing seed tasks only (ticker rows and `holdings_scope`
+are immutable), zero rows fails closed as
+`scope_freeze_incomplete_restart_required` (user must click Run Intel again
+for a fresh preflight), and any contradictory frozen state (duplicate ticker
+rows, `holdings_scope`/ticker-row mismatch, malformed asset type) fails
+rather than repairs — zero truth/provider/LLM calls in repair; (3)
+`axis_evidence_context` now returns the exact `prompt_payload` object the
+model receives (volatile fields physically stripped out of the payload
+itself, not just its hash) and `input_fingerprint = stable_fingerprint(
+prompt_payload)` computed directly on that same object — one call per
+ticker, reused for the prompt, reuse lookup, and persisted fingerprint/
+evidence_refs; the `[:60000]`-char JSON truncation is deleted in favor of
+deterministic greedy batching of COMPLETE per-ticker payloads
+(`_batch_payloads_by_size`) — a payload is never split, an oversized single
+payload degrades with `prompt_payload_oversized` and costs zero LLM calls;
+(4) the optional user-facing "Evidence: N lanes reused, M refreshed.
+Specialist analysis: ..." sentence is deleted entirely (backend
+`evidence_summary_line`/`_evidence_summary_line`, frontend
+`evidence_summary_line`/`evidenceSummaryLine` field and derivation, and the
+`AdvisorReadinessPanel` render line) — no replacement status line/card/
+tooltip; the blocked-preflight reason and repair-action UI are unchanged.
+Internal `provider_calls`/`llm_calls`/`llm_reused`/`cache_hits`/
+`lanes_refreshed` metrics remain as internal collector-success observability
+only. Net production LOC vs. the round-2 PR head: +52 (cash-aware fields,
+fail-closed repair checks, and deterministic batching add code; the evidence-
+summary deletion removes it) — within the +75 guideline. Full backend
+(8792) and frontend (676) suites pass, TypeScript/build clean. Production
+behavior remains unproven — no live Run Intel call was made, and final paid
+certification has not started. See the finish-plan item 4 entry below for
+the round-2 detail this round built on.)
 
 Previously (2026-07-25, Deterministic conflict handling / review-LLM
 deletion, PR #487 — COMPLETED. Deletes the conditional Sonnet/Haiku review

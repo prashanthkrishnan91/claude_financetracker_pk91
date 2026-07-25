@@ -862,29 +862,6 @@ def _plain_status(
     return "Working…"
 
 
-def _evidence_summary_line(metrics: Optional[dict[str, Any]]) -> Optional[str]:
-    """Compact, truthful technical-detail line built ONLY from literal
-    session counters (contract §6) — never a placeholder when metrics are
-    entirely unavailable. A counter's own key is absent (never 0) when
-    nothing of that kind ever happened this session — e.g. an immediate
-    rerun that reuses every lane never sets ``lanes_refreshed`` at all — so
-    the line still renders once EITHER sibling counter in a pair exists,
-    treating the other as a genuine zero rather than suppressing the line."""
-    metrics = metrics or {}
-    parts: list[str] = []
-    if "cache_hits" in metrics or "lanes_refreshed" in metrics:
-        lanes_reused = int(metrics.get("cache_hits") or 0)
-        lanes_refreshed = int(metrics.get("lanes_refreshed") or 0)
-        if lanes_reused or lanes_refreshed:
-            parts.append(f"Evidence: {lanes_reused} lanes reused, {lanes_refreshed} refreshed.")
-    if "llm_reused" in metrics or "llm_calls" in metrics:
-        llm_reused = int(metrics.get("llm_reused") or 0)
-        llm_calls = int(metrics.get("llm_calls") or 0)
-        if llm_reused or llm_calls:
-            parts.append(f"Specialist analysis: {llm_reused} reused, {llm_calls} refreshed.")
-    return " ".join(parts) if parts else None
-
-
 async def get_session_status(
     *,
     client: Any,
@@ -957,8 +934,4 @@ async def get_session_status(
         "retryable": not terminal,
         "terminal": terminal,
     }
-    if session_status in (SESSION_COMPLETED, SESSION_COMPLETED_WITH_GAPS):
-        summary_line = _evidence_summary_line(session.get("metrics"))
-        if summary_line:
-            result["evidence_summary_line"] = summary_line
     return result

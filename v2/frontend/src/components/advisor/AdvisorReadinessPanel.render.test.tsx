@@ -247,8 +247,8 @@ describe("AdvisorReadinessPanel — completed-with-gaps snapshot", () => {
   });
 });
 
-describe("AdvisorReadinessPanel — evidence reuse/refresh summary line", () => {
-  it("renders the compact lanes/specialist reuse line on a completed run", () => {
+describe("AdvisorReadinessPanel — no evidence-count claim", () => {
+  it("never renders an evidence/specialist reuse-count sentence, even when the backend sends one", () => {
     const completedRun = {
       isRunPending: false,
       isRunError: false,
@@ -258,32 +258,14 @@ describe("AdvisorReadinessPanel — evidence reuse/refresh summary line", () => 
         terminal: true,
         retryable: false,
         completed_snapshot_id: "snap_2",
-        evidence_summary_line: "Evidence: 80 lanes reused, 13 refreshed. Specialist analysis: 70 reused, 23 refreshed.",
+        // A legacy/unexpected backend field must never resurrect the line.
+        ...({ evidence_summary_line: "Evidence: 80 lanes reused, 13 refreshed." } as Record<string, unknown>),
       }),
     };
-    const model = renderPanel(completedRun, completedRun.lastRunResult, () => {});
-    expect(model.run.evidenceSummaryLine).toContain("lanes reused");
-    const text = container.textContent ?? "";
-    expect(text).toContain("80 lanes reused, 13 refreshed");
-    expect(text).toContain("70 reused, 23 refreshed");
-  });
-
-  it("omits the line when the backend reports no metrics — never a zero placeholder", () => {
-    const completedRun = {
-      isRunPending: false,
-      isRunError: false,
-      lastRunResult: makeSessionStatus({
-        session_status: "completed",
-        plain_status: "Completed — your recommendations are up to date.",
-        terminal: true,
-        retryable: false,
-        completed_snapshot_id: "snap_3",
-      }),
-    };
-    const model = renderPanel(completedRun, completedRun.lastRunResult, () => {});
-    expect(model.run.evidenceSummaryLine).toBeNull();
+    renderPanel(completedRun, completedRun.lastRunResult, () => {});
     const text = container.textContent ?? "";
     expect(text).not.toContain("lanes reused");
+    expect(text).not.toContain("Specialist analysis:");
   });
 });
 

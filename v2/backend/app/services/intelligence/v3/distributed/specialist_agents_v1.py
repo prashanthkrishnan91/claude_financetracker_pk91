@@ -289,10 +289,17 @@ def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
     construction, the specialist reuse lookup, the persisted
     ``input_fingerprint``, ``evidence_refs`` rebinding on reuse, and the
     bounded prompt-safe source projection — nobody derives supplied lanes, a
-    lineage manifest, or a fingerprint any other way; there is exactly one
-    prompt/fingerprint shape.
+    lineage manifest, a prompt payload, or a fingerprint any other way;
+    there is exactly one prompt/fingerprint shape.
 
-    Artifact-backed lanes only ever appear in ``compact_bundle`` (and
+    ``prompt_payload`` IS the exact bounded object the model receives (never
+    a separately-maintained projection) — volatile/internal fields
+    (timestamps, cache markers, replay locators) are stripped OUT of the
+    payload itself, not merely out of its hash, so nothing visible to the
+    LLM is excluded from ``input_fingerprint`` and nothing excluded from it
+    is visible to the LLM.
+
+    Artifact-backed lanes only ever appear in ``prompt_payload`` (and
     therefore only ever count as supplied) when ``evidence_bundle_v1`` has
     already validated the parent artifact's ownership/ticker-scope/active/
     substantive-payload status — this function trusts that gate and never
@@ -309,20 +316,13 @@ def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
     # see the provenance of the evidence it was actually given. Deterministic
     # code output only; the LLM is never asked to invent or select a
     # citation.
-    compact_with_sources = dict(compact)
-    compact_with_sources["evidence_sources"] = source_lineage_v1.compact_projection(
+    compact["evidence_sources"] = source_lineage_v1.compact_projection(
         manifest["refs"]
     )
-    # The ONE fingerprint for this axis: hashes exactly the object serialized
-    # into the LLM prompt (``compact_with_sources``, including
-    # ``evidence_sources``) minus only timestamps/cache markers/internal
-    # storage identifiers (``_strip_volatile``) — nothing visible to the LLM
-    # is excluded here, and nothing excluded here is visible to the LLM.
-    input_fingerprint = stable_fingerprint(
-        evidence_bundle_v1._strip_volatile(compact_with_sources)
-    )
+    prompt_payload = evidence_bundle_v1._strip_volatile(compact)
+    input_fingerprint = stable_fingerprint(prompt_payload)
     return {
-        "compact_bundle": compact_with_sources,
+        "prompt_payload": prompt_payload,
         "supplied_lanes": supplied_lanes,
         "manifest": manifest,
         "input_fingerprint": input_fingerprint,
@@ -389,20 +389,51 @@ def validate_specialist_result(entry: Any) -> Optional[dict[str, Any]]:
     }
 
 
-def _build_user_prompt(axis: str, bundles: list[dict[str, Any]]) -> str:
+def _build_user_prompt(axis: str, payloads: list[dict[str, Any]]) -> str:
+    """Accepts already-built ``prompt_payload`` objects (from
+    ``axis_evidence_context``) — never recomputes axis context, and never
+    truncates the serialized JSON (callers own bounding payloads to
+    ``_MAX_PROMPT_JSON_CHARS`` via ``_batch_payloads_by_size``)."""
     import json
 
     focus = _AXIS_FOCUS.get(axis, axis)
-    compact = [
-        axis_evidence_context(bundle, axis)["compact_bundle"] for bundle in bundles
-    ]
-    tickers = [str(b.get("ticker")) for b in compact]
+    tickers = [str(p.get("ticker")) for p in payloads]
     return (
         f"Specialist axis: {axis}. Focus: {focus}.\n"
         f"Analyze these tickers: {', '.join(tickers)}.\n"
         "Evidence bundles (JSON):\n"
-        + json.dumps(compact, default=str)[:60000]
+        + json.dumps(payloads, default=str)
     )
+
+
+_MAX_PROMPT_JSON_CHARS = 60_000
+
+
+def _batch_payloads_by_size(
+    payloads: list[dict[str, Any]], limit: int = _MAX_PROMPT_JSON_CHARS,
+) -> tuple[list[list[dict[str, Any]]], list[str]]:
+    """Greedy, order-preserving grouping of COMPLETE ticker payloads into
+    calls whose serialized JSON never exceeds ``limit`` chars — a payload is
+    never split or truncated. A single payload that alone exceeds the limit
+    is returned in ``oversized`` (its ticker) instead of any batch."""
+    import json
+
+    batches: list[list[dict[str, Any]]] = []
+    oversized: list[str] = []
+    current: list[dict[str, Any]] = []
+    for payload in payloads:
+        if len(json.dumps([payload], default=str)) > limit:
+            oversized.append(str(payload.get("ticker")))
+            continue
+        trial = current + [payload]
+        if current and len(json.dumps(trial, default=str)) > limit:
+            batches.append(current)
+            current = [payload]
+        else:
+            current = trial
+    if current:
+        batches.append(current)
+    return batches, oversized
 
 
 class SpecialistBatchOutcome:
@@ -497,8 +528,12 @@ async def execute_specialist_task(
         for r in store.list_ticker_rows(client, run_session_id=session_id)
     }
 
-    to_analyze: list[dict[str, Any]] = []
+    to_analyze: list[str] = []
     fingerprints: dict[str, str] = {}
+    # Computed ONCE per ticker and reused for the reuse lookup, the
+    # persisted input_fingerprint/evidence_refs, AND the actual LLM prompt —
+    # never recomputed by _build_user_prompt or the final persist below.
+    contexts: dict[str, dict[str, Any]] = {}
     for ticker in batch_tickers:
         row = ticker_rows.get(ticker)
         bundle = (row or {}).get("evidence_bundle")
@@ -506,6 +541,7 @@ async def execute_specialist_task(
             outcome.skipped_insufficient.append(ticker)
             continue
         context = axis_evidence_context(bundle, axis)
+        contexts[ticker] = context
         fingerprint = context["input_fingerprint"]
         fingerprints[ticker] = fingerprint
 
@@ -559,14 +595,16 @@ async def execute_specialist_task(
         if not _axis_has_evidence(bundle, axis):
             outcome.skipped_insufficient.append(ticker)
             continue
-        to_analyze.append(bundle)
+        to_analyze.append(ticker)
 
     if not to_analyze:
         return outcome
 
     system = SPECIALIST_SYSTEM_PROMPT
-    requested = [str(b.get("ticker")).upper() for b in to_analyze]
-    bundle_by_ticker = {str(b.get("ticker")).upper(): b for b in to_analyze}
+    payload_by_ticker = {
+        str(t).upper(): contexts[t]["prompt_payload"] for t in to_analyze
+    }
+    requested = list(payload_by_ticker.keys())
 
     async def _call(prompt: str, tickers_in_call: list[str]) -> tuple[dict[str, Any], str]:
         outcome.llm_calls += 1
@@ -610,46 +648,70 @@ async def execute_specialist_task(
                 out[normalized["ticker"]] = normalized
         return out
 
-    user_prompt = _build_user_prompt(axis, to_analyze)
-    response, error_class = await _call(user_prompt, requested)
-    validated: dict[str, dict[str, Any]] = _validate_batch(response, requested)
+    # Deterministic safe batching: complete ticker payloads are grouped into
+    # calls whose serialized JSON never exceeds _MAX_PROMPT_JSON_CHARS — a
+    # payload is NEVER split/truncated. An ordinary batch (the common case)
+    # fits in one group and costs exactly one initial call, same as before.
+    ordered_payloads = [payload_by_ticker[t] for t in requested]
+    batches, oversized_tickers = _batch_payloads_by_size(ordered_payloads)
+    for ticker in oversized_tickers:
+        logger.warning(
+            "specialist_task.prompt_payload_oversized axis=%s ticker=%s",
+            axis, ticker,
+        )
+        outcome.skipped_insufficient.append(ticker)
+        requested.remove(ticker)
+    oversized_set = set(oversized_tickers)
+    to_analyze = [t for t in to_analyze if str(t).upper() not in oversized_set]
 
-    # Any ACTUAL provider-call failure — quota/authentication, or an
-    # exhausted rate-limit/transient retry inside LLMClient — is never
-    # reinterpreted as ticker-level malformed JSON. A parse/truncation
-    # failure (the provider answered, but the JSON was bad) has NO
-    # classification here and is eligible for the bounded per-ticker
-    # repair loop below; a genuine provider-call failure gets zero repair
-    # calls and an honest retryable task outcome instead.
-    quota_or_auth = error_class in NON_RETRYABLE_PROVIDER_CLASSES
-    provider_failure = bool(error_class)
-    if provider_failure:
-        if quota_or_auth:
-            outcome.quota_or_auth_failures += 1
-        # One provider call only — never a repair call. The durable task
-        # retry backoff owns the next attempt.
-    else:
+    validated: dict[str, dict[str, Any]] = {}
+    quota_or_auth = False
+    provider_failure = False
+
+    for batch in batches:
+        tickers_in_batch = [str(p.get("ticker")).upper() for p in batch]
+        prompt = _build_user_prompt(axis, batch)
+        response, error_class = await _call(prompt, tickers_in_batch)
+        validated.update(_validate_batch(response, tickers_in_batch))
+
+        # Any ACTUAL provider-call failure — quota/authentication, or an
+        # exhausted rate-limit/transient retry inside LLMClient — is never
+        # reinterpreted as ticker-level malformed JSON. A parse/truncation
+        # failure (the provider answered, but the JSON was bad) has NO
+        # classification here and is eligible for the bounded per-ticker
+        # repair loop below; a genuine provider-call failure gets zero
+        # repair calls for THIS batch and an honest retryable task outcome.
+        batch_quota_or_auth = error_class in NON_RETRYABLE_PROVIDER_CLASSES
+        batch_provider_failure = bool(error_class)
+        if batch_provider_failure:
+            quota_or_auth = quota_or_auth or batch_quota_or_auth
+            provider_failure = True
+            if batch_quota_or_auth:
+                outcome.quota_or_auth_failures += 1
+            continue  # one provider call only — never a repair call
+
         # Retry only missing/malformed tickers, one call PER ticker (bounded:
         # a two-ticker batch never exceeds 1 initial + 2 individual = 3 total
         # calls). This also guarantees an already-validated ticker is never
         # re-requested, and a peer ticker's failure never re-runs a
         # successfully validated ticker.
-        missing = [t for t in requested if t not in validated]
+        missing = [t for t in tickers_in_batch if t not in validated]
         for ticker in missing:
-            repair_bundle = bundle_by_ticker.get(ticker)
-            if repair_bundle is None:
+            repair_payload = payload_by_ticker.get(ticker)
+            if repair_payload is None:
                 continue
             repair_prompt = (
                 f"Your previous response was missing or malformed for: {ticker}. "
                 "Return STRICT JSON for ONLY this ticker.\n"
-                + _build_user_prompt(axis, [repair_bundle])
+                + _build_user_prompt(axis, [repair_payload])
             )
             repair_response, repair_error_class = await _call(repair_prompt, [ticker])
             outcome.repair_calls += 1
             validated.update(_validate_batch(repair_response, [ticker]))
             if repair_error_class:
-                quota_or_auth = repair_error_class in NON_RETRYABLE_PROVIDER_CLASSES
-                if quota_or_auth:
+                repair_quota_or_auth = repair_error_class in NON_RETRYABLE_PROVIDER_CLASSES
+                quota_or_auth = quota_or_auth or repair_quota_or_auth
+                if repair_quota_or_auth:
                     outcome.quota_or_auth_failures += 1
                 provider_failure = True
                 break  # stop further per-ticker repairs on any provider failure
@@ -680,13 +742,13 @@ async def execute_specialist_task(
         or getattr(llm, "model", None)
         or "claude"
     )
-    for bundle in to_analyze:
-        ticker = str(bundle.get("ticker")).upper()
+    for raw_ticker in to_analyze:
+        ticker = str(raw_ticker).upper()
         result = validated.get(ticker)
         if result is None:
             outcome.malformed.append(ticker)
             continue
-        axis_lineage = axis_evidence_context(bundle, axis)["manifest"]
+        axis_lineage = contexts[raw_ticker]["manifest"]
         persisted = store.upsert_specialist_output(
             client,
             run_session_id=session_id,

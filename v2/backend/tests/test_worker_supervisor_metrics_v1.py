@@ -257,32 +257,3 @@ class TestMetricsReconcileWithPersistedRows:
         # is a fresh collection.
         assert metrics.get("cache_hits", 0) == 0
         assert metrics.get("lanes_refreshed", 0) == len(successful_lane_tasks)
-
-
-class TestEvidenceSummaryLineFromLiteralCounts:
-    """The UI sentence is built ONLY from literal counters — a counter's
-    absence (nothing of that kind happened) must render as a genuine zero,
-    never suppress the whole line just because its sibling counter never
-    fired (e.g. an immediate rerun that reuses every lane never sets
-    ``lanes_refreshed`` at all)."""
-
-    def _line(self, metrics):
-        from app.services.intelligence.v3.distributed.session_control_v1 import (
-            _evidence_summary_line,
-        )
-        return _evidence_summary_line(metrics)
-
-    def test_all_lanes_reused_renders_zero_refreshed_not_a_suppressed_line(self):
-        line = self._line({"cache_hits": 8, "llm_reused": 6})
-        assert line == "Evidence: 8 lanes reused, 0 refreshed. Specialist analysis: 6 reused, 0 refreshed."
-
-    def test_all_lanes_refreshed_renders_zero_reused_not_a_suppressed_line(self):
-        line = self._line({"lanes_refreshed": 4, "llm_calls": 3})
-        assert line == "Evidence: 0 lanes reused, 4 refreshed. Specialist analysis: 0 reused, 3 refreshed."
-
-    def test_entirely_unavailable_metrics_render_nothing(self):
-        assert self._line({}) is None
-        assert self._line(None) is None
-
-    def test_only_preflight_metrics_present_renders_nothing(self):
-        assert self._line({"preflight": {"status": "passed"}}) is None

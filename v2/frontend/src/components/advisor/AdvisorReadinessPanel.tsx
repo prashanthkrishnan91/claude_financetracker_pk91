@@ -205,9 +205,6 @@ export function AdvisorReadinessPanel({
         {run.repairAction && (
           <p className="text-[11px] text-text-muted">{run.repairAction}</p>
         )}
-        {run.evidenceSummaryLine && (
-          <p className="text-[11px] text-text-muted">{run.evidenceSummaryLine}</p>
-        )}
         {showTickerProgress && (
           <p className="text-[11px] text-text-muted font-mono tabular-nums">
             {progress.decidedTickers} of {progress.totalTickers} holdings analyzed

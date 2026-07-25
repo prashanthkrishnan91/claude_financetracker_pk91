@@ -856,9 +856,6 @@ export interface IntelV3SessionStatus {
   completed_snapshot_id?: string | null;
   /** Pre-sanitized plain-English progress sentence — safe to render. */
   plain_status?: string;
-  /** Terminal runs only: compact "N lanes reused, M refreshed" line built
-   *  from real session metrics — absent when metrics are unavailable. */
-  evidence_summary_line?: string;
   retryable?: boolean;
   /** True when the session reached a terminal state — stop polling. */
   terminal?: boolean;

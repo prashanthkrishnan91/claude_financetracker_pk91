@@ -1,8 +1,8 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-25 (Run Intel operational-reliability PR — item 4 of the
-Run Intel trust-recovery sequence, IN PROGRESS, PR number filled in below once
-opened. Portfolio financial-truth preflight wired into the ONE session-start
+Last updated: 2026-07-25 (Run Intel operational-reliability PR #488 — item 4
+of the Run Intel trust-recovery sequence, OPEN, not yet merged. Portfolio
+financial-truth preflight wired into the ONE session-start
 path (`financial_truth_baseline_v1`, reused verbatim); versioned monetary
 normalization (`evidence_normalization_v1.normalize_fundamentals`) labels
 every currency-bearing fundamental with its verified reporting currency
@@ -463,8 +463,8 @@ separate PRs:
    integration validation is complete; production behavior is NOT
    runtime-proven — deferred to the single final certification run (item 5
    above), same deferral pattern as PR #485/#486.
-4. One final operational-reliability PR — **IN PROGRESS — PR number filled
-   in below once opened.** Makes Run Intel dependable whether clicked while
+4. One final operational-reliability PR — **OPEN — PR #488, not yet merged.**
+   Makes Run Intel dependable whether clicked while
    active, immediately after completion, or an hour/day/week later.
    - **Portfolio financial-truth preflight**
      (`session_control_v1._run_truth_preflight`, wired into the ONE

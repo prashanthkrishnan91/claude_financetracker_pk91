@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from ....agents.llm import NON_RETRYABLE_PROVIDER_CLASSES
 from . import run_task_store_v1 as store
+from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
 from .task_contracts_v1 import (
     ALLOWED_STANCES,
@@ -32,6 +33,14 @@ from .task_contracts_v1 import (
     AXIS_RISK_FILING,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
+    LANE_CRYPTO_MARKET,
+    LANE_ETF_FUND_DATA,
+    LANE_FUNDAMENTALS,
+    LANE_NEWS_SENTIMENT,
+    LANE_PRICE,
+    LANE_SEC_CATALYST,
+    LANE_SEC_COMPANY_FACTS,
+    LANE_TECHNICALS,
     TASK_DEGRADED,
     TASK_SUCCEEDED,
 )
@@ -39,7 +48,10 @@ from .run_task_store_v1 import TASK_FAILED_RETRYABLE
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "distributed_specialist_v1"
+# v2: the prompt contract now carries a compact, bounded source projection
+# (contract §3) — a reused output from the v1 (unsourced) prompt contract
+# must never be treated as equivalent and is never reused (contract §4/§13).
+PROMPT_VERSION = "distributed_specialist_v2"
 # How long a specialist output stays reusable for an unchanged evidence
 # fingerprint (skips duplicate LLM calls across sessions).
 OUTPUT_VALID_HOURS = 24.0
@@ -182,20 +194,105 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
     return base
 
 
-def _payload_only(value: Any) -> Any:
-    """Drop artifact envelope noise, keep payload substance (bounded)."""
+def _nonempty(value: Any) -> bool:
     if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if isinstance(item, dict) and "payload" in item:
-                out[key] = {
-                    "generated_at": item.get("generated_at"),
-                    "trust_level": item.get("trust_level"),
-                    "payload": item.get("payload"),
-                }
-            else:
-                out[key] = item
-        return out
+        return any(v not in (None, "", [], {}) for v in value.values())
+    if isinstance(value, list):
+        return bool(value)
+    return value not in (None, "", [], {})
+
+
+def _axis_supplied_lanes(compact: dict[str, Any], axis: str) -> list[str]:
+    """The exact nonempty external-evidence lanes actually represented in
+    THIS axis's own compact bundle (contract §2) — never derived from the
+    bundle-wide ``usable_lanes`` list, and never a superset of what the axis
+    itself was actually given (e.g. ``risk_filing``'s narrowed fundamental
+    subset counts only when THAT subset is nonempty, even if the full
+    fundamentals lane succeeded)."""
+    supplied: set[str] = set()
+    if _nonempty(compact.get("market")):
+        supplied.add(LANE_PRICE)
+    if _nonempty(compact.get("technical")):
+        supplied.add(LANE_TECHNICALS)
+    if _nonempty(compact.get("fundamental")) or _nonempty(compact.get("valuation")):
+        supplied.add(LANE_FUNDAMENTALS)
+    if _nonempty(compact.get("sentiment")):
+        supplied.add(LANE_NEWS_SENTIMENT)
+    sec = compact.get("sec")
+    if isinstance(sec, dict):
+        if _nonempty(sec.get(LANE_SEC_COMPANY_FACTS)):
+            supplied.add(LANE_SEC_COMPANY_FACTS)
+        if _nonempty(sec.get(LANE_SEC_CATALYST)):
+            supplied.add(LANE_SEC_CATALYST)
+    # AXIS_SENTIMENT carries SEC catalyst evidence in its own compact
+    # ``catalysts`` list rather than the ``sec`` dict (contract §2) — a
+    # substantive catalyst artifact there must count as SEC_CATALYST being
+    # supplied to this axis exactly as it would via the ``sec`` dict path.
+    catalysts = compact.get("catalysts")
+    if isinstance(catalysts, list) and any(_nonempty(c) for c in catalysts):
+        supplied.add(LANE_SEC_CATALYST)
+    asset_specific = compact.get("asset_specific")
+    if isinstance(asset_specific, dict):
+        if _nonempty(asset_specific.get("etf_fund_data")):
+            supplied.add(LANE_ETF_FUND_DATA)
+        if _nonempty(asset_specific.get("crypto_market")):
+            supplied.add(LANE_CRYPTO_MARKET)
+
+    candidate = set(source_lineage_v1.AXIS_CANDIDATE_LANES.get(axis, ()))
+    return sorted(supplied & candidate)
+
+
+def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
+    """Single shared source of truth for "what evidence was actually
+    supplied to this axis" (contract §2). Used IDENTICALLY by prompt
+    construction, persisted ``evidence_refs``, cross-session reuse
+    rebinding, and the bounded prompt-safe source projection — nobody
+    derives supplied lanes or a lineage manifest any other way.
+
+    Artifact-backed lanes only ever appear in ``compact_bundle`` (and
+    therefore only ever count as supplied) when ``evidence_bundle_v1`` has
+    already validated the parent artifact's ownership/ticker-scope/active/
+    substantive-payload status — this function trusts that gate and never
+    re-reads the database itself.
+    """
+    compact = _compact_bundle_for_axis(bundle, axis)
+    supplied_lanes = _axis_supplied_lanes(compact, axis)
+    manifest = source_lineage_v1.build_axis_lineage_manifest(
+        axis=axis,
+        source_refs_by_lane=bundle.get("source_refs_by_lane") or {},
+        supplied_lanes=supplied_lanes,
+    )
+    # Compact, bounded source projection (contract §3) — lets the analysis
+    # see the provenance of the evidence it was actually given. Deterministic
+    # code output only; the LLM is never asked to invent or select a
+    # citation.
+    compact_with_sources = dict(compact)
+    compact_with_sources["evidence_sources"] = source_lineage_v1.compact_projection(
+        manifest["refs"]
+    )
+    return {
+        "compact_bundle": compact_with_sources,
+        "supplied_lanes": supplied_lanes,
+        "manifest": manifest,
+    }
+
+
+def _payload_only(value: Any) -> Any:
+    """Drop artifact envelope noise (internal storage identifiers such as
+    ``artifact_id``/``artifact_type``/``skill_pack``), keep payload substance
+    (bounded) — wherever an artifact-summary shape (a dict carrying a
+    ``payload`` key) appears: directly, nested inside a dict (e.g. the
+    per-lane ``sec``/``asset_specific`` maps), or as an item inside a list
+    (e.g. the ``catalysts`` list). Never sends internal artifact/database
+    identifiers to the specialist prompt."""
+    if isinstance(value, dict):
+        if "payload" in value:
+            return {
+                "generated_at": value.get("generated_at"),
+                "trust_level": value.get("trust_level"),
+                "payload": value.get("payload"),
+            }
+        return {key: _payload_only(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_payload_only(v) for v in value][:3]
     return value
@@ -245,7 +342,7 @@ def _build_user_prompt(axis: str, bundles: list[dict[str, Any]]) -> str:
 
     focus = _AXIS_FOCUS.get(axis, axis)
     compact = [
-        _compact_bundle_for_axis(bundle, axis) for bundle in bundles
+        axis_evidence_context(bundle, axis)["compact_bundle"] for bundle in bundles
     ]
     tickers = [str(b.get("ticker")) for b in compact]
     return (
@@ -357,7 +454,10 @@ async def execute_specialist_task(
         fingerprint = str(bundle.get("input_fingerprint") or "")
         fingerprints[ticker] = fingerprint
 
-        # Reuse an unchanged prior output instead of a new LLM call.
+        # Reuse an unchanged prior output instead of a new LLM call. Reuse
+        # requires the CURRENT prompt version — a row persisted under an
+        # older (unsourced) prompt contract never matches and is never
+        # reused (contract §4/§13).
         if fingerprint:
             reusable = store.find_reusable_specialist_output(
                 client,
@@ -365,11 +465,18 @@ async def execute_specialist_task(
                 ticker=ticker,
                 axis=axis,
                 input_fingerprint=fingerprint,
+                prompt_version=PROMPT_VERSION,
                 now=now,
             )
             if reusable is not None and str(
                 reusable.get("run_session_id")
             ) != session_id:
+                # Analytical fields only carry over; evidence_refs is REBUILT
+                # from THIS session's own bundle lineage via the SAME shared
+                # helper the initial analysis and prompt use — a reused
+                # result must never carry forward a prior session's
+                # (possibly stale) source references (contract §4).
+                rebuilt_refs = axis_evidence_context(bundle, axis)["manifest"]
                 store.upsert_specialist_output(
                     client,
                     run_session_id=session_id,
@@ -380,11 +487,15 @@ async def execute_specialist_task(
                         key: reusable.get(key)
                         for key in (
                             "stance", "score", "confidence", "key_findings",
-                            "risks", "evidence_refs", "missing_evidence",
-                            "limitations", "valid_until", "model",
-                            "prompt_version", "input_fingerprint",
+                            "risks", "missing_evidence", "limitations",
+                            "valid_until", "model",
                         )
-                    } | {"batch_key": str(task.get("batch_key") or "")},
+                    } | {
+                        "evidence_refs": rebuilt_refs,
+                        "prompt_version": PROMPT_VERSION,
+                        "input_fingerprint": fingerprint,
+                        "batch_key": str(task.get("batch_key") or ""),
+                    },
                     now=now,
                 )
                 outcome.reused.append(ticker)
@@ -520,6 +631,7 @@ async def execute_specialist_task(
         if result is None:
             outcome.malformed.append(ticker)
             continue
+        axis_lineage = axis_evidence_context(bundle, axis)["manifest"]
         persisted = store.upsert_specialist_output(
             client,
             run_session_id=session_id,
@@ -532,7 +644,7 @@ async def execute_specialist_task(
                 "confidence": result["confidence"],
                 "key_findings": result["key_findings"],
                 "risks": result["risks"],
-                "evidence_refs": list(bundle.get("source_refs") or []),
+                "evidence_refs": axis_lineage,
                 "missing_evidence": result["missing_evidence"],
                 "limitations": result["limitations"],
                 "valid_until": valid_until,
@@ -587,7 +699,14 @@ async def execute_review_task(
         outcome.error = "claim_lost"
         return outcome
 
-    outputs = [
+    # Only VALID specialist rows (score AND confidence both present) are
+    # reviewable inputs — the same validity gate ``aggregate_advisory_signal``
+    # and the trust contract use. A row that never produced a usable
+    # score/confidence contributes nothing to reconcile (contract §5).
+    def _is_valid_specialist_row(o: dict[str, Any]) -> bool:
+        return o.get("score") is not None and o.get("confidence") is not None
+
+    reviewed_inputs = [
         {
             "axis": o.get("axis"),
             "stance": o.get("stance"),
@@ -600,18 +719,31 @@ async def execute_review_task(
         for o in store.list_specialist_outputs(
             client, run_session_id=session_id, ticker=ticker,
         )
-        if o.get("axis") != AXIS_REVIEW
+        if o.get("axis") != AXIS_REVIEW and _is_valid_specialist_row(o)
     ]
-    if len(outputs) < 1:
+    if len(reviewed_inputs) < 1:
         outcome.skipped_insufficient.append(ticker)
         return outcome
+
+    # Bounded, prompt-safe view for the LLM (contract §5) — the reviewer sees
+    # WHICH sources back each specialist view (lineage status + linked/
+    # missing lanes + a bounded source projection), but is never asked to
+    # invent or select a citation; the persisted review lineage below is
+    # built deterministically from the same re-validated manifests, never
+    # from anything the LLM returns. ONE normalized, bounded object drives
+    # BOTH the LLM prompt and the audit fingerprint (contract §5) — each
+    # input's manifest is independently re-derived (never trusted from its
+    # own persisted status) inside ``build_review_prompt_context``.
+    prompt_outputs = source_lineage_v1.build_review_prompt_context(
+        reviewed_inputs, ticker=ticker,
+    )
 
     outcome.llm_calls += 1
     call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}
     response = await llm.ask_json(
         REVIEW_SYSTEM_PROMPT,
         f"Ticker: {ticker}\nSpecialist outputs (JSON):\n"
-        + json.dumps(outputs, default=str)[:30000],
+        + json.dumps(prompt_outputs, default=str)[:30000],
         max_tokens=500,
         metadata=call_meta,
     )
@@ -634,6 +766,18 @@ async def execute_review_task(
         outcome.models_used[-1] if outcome.models_used
         else getattr(llm, "primary_model", None) or "claude"
     )
+    # A review never fabricates a new source — its lineage is deterministic
+    # code output derived from the exact inputs it reconciled (contract §5),
+    # never anything the LLM response itself carries. The audit fingerprint
+    # is built from the EXACT bounded/normalized prompt input the LLM saw
+    # (findings, risks, score, confidence, lineage status, missing lanes,
+    # source identity) plus ticker + prompt version — never the empty string.
+    review_lineage = source_lineage_v1.build_review_lineage_manifest(
+        reviewed_inputs, ticker=ticker,
+    )
+    review_fingerprint = source_lineage_v1.review_input_fingerprint(
+        prompt_outputs, ticker=ticker, prompt_version=PROMPT_VERSION,
+    )
     persisted = store.upsert_specialist_output(
         client,
         run_session_id=session_id,
@@ -646,13 +790,13 @@ async def execute_review_task(
             "confidence": normalized["confidence"],
             "key_findings": normalized["key_findings"],
             "risks": normalized["risks"],
-            "evidence_refs": [],
+            "evidence_refs": review_lineage,
             "missing_evidence": normalized["missing_evidence"],
             "limitations": normalized["limitations"],
             "valid_until": (now + timedelta(hours=OUTPUT_VALID_HOURS)).isoformat(),
             "model": str(model_name),
             "prompt_version": PROMPT_VERSION,
-            "input_fingerprint": "",
+            "input_fingerprint": review_fingerprint,
             "batch_key": None,
         },
         now=now,

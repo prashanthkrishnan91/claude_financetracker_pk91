@@ -32,6 +32,7 @@ from __future__ import annotations
 import pytest
 
 from app.services.intelligence.v3.distributed import run_trust_contract_v1 as trust
+from app.services.intelligence.v3.distributed import source_lineage_v1 as lineage
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_ETF_EXPOSURE,
     AXIS_FUNDAMENTAL,
@@ -39,6 +40,8 @@ from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     AXIS_RISK_FILING,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL,
+    LANE_PRICE,
+    LANE_TECHNICALS,
     TASK_CANCELLED,
     TASK_DEGRADED,
     TASK_REVIEW_CONFLICT,
@@ -134,7 +137,49 @@ def _ticker_row(ticker: str) -> dict:
     }
 
 
-def _specialist_output(ticker: str, axis: str, *, evidence_refs=None) -> dict:
+def _specialist_output(
+    ticker: str, axis: str, *, evidence_refs=None, reviewed_outputs=None,
+) -> dict:
+    """``evidence_refs`` truthy/falsy keeps the old call convention (hundreds
+    of call sites just signal "has a reference" vs "doesn't") while building
+    a STRUCTURALLY VALID PR-2 manifest — ``run_trust_contract_v1`` now
+    independently re-derives ``status`` from the manifest's own structure
+    (never trusts a persisted status field), so the fixture must be
+    self-consistent, not just carry the right label.
+
+    Review outputs (``axis == AXIS_REVIEW``) are now ENTIRELY DERIVED from
+    the sibling non-review outputs they reconcile (round-3 contract §6) — a
+    review manifest is never independently hand-authored, it is built via
+    the same ``build_review_lineage_manifest`` production code uses, fed by
+    ``reviewed_outputs`` (a list of sibling ``_specialist_output(...)``
+    dicts). When ``reviewed_outputs`` is omitted, a single synthetic
+    technical-axis input mirroring ``evidence_refs``'s truthiness is used —
+    matching the old simple "review has some reference or none" call
+    convention for fixtures that don't assert an exact review lineage
+    status.
+    """
+    has_ref = bool(evidence_refs)
+    ref = {
+        "schema_version": lineage.SCHEMA_VERSION,
+        "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
+        "lane": "price", "provider": "yfinance", "ticker": ticker,
+        "task_id": f"{ticker}-{axis}-task", "output_digest": "sha256:test",
+    }
+    if axis == AXIS_REVIEW:
+        inputs = reviewed_outputs if reviewed_outputs is not None else [
+            _specialist_output(ticker, AXIS_TECHNICAL, evidence_refs=evidence_refs)
+        ]
+        manifest = lineage.build_review_lineage_manifest(inputs, ticker=ticker)
+    else:
+        manifest = {
+            "schema_version": lineage.SCHEMA_VERSION,
+            "axis": axis,
+            "expected_lanes": ["price"],
+            "linked_lanes": ["price"] if has_ref else [],
+            "missing_ref_lanes": [] if has_ref else ["price"],
+            "status": lineage.LINEAGE_FULL if has_ref else lineage.LINEAGE_MISSING,
+            "refs": [ref] if has_ref else [],
+        }
     return {
         "ticker": ticker,
         "axis": axis,
@@ -144,9 +189,35 @@ def _specialist_output(ticker: str, axis: str, *, evidence_refs=None) -> dict:
         "risks": [],
         # Zero-reference outputs — matches production: 0 persisted specialist
         # outputs with nonempty evidence_refs.
-        "evidence_refs": list(evidence_refs or []),
+        "evidence_refs": manifest,
         "missing_evidence": [],
         "limitations": [],
+        "model": "fake", "prompt_version": "test",
+    }
+
+
+def _partial_specialist_output(ticker: str, axis: str) -> dict:
+    """A genuinely PARTIAL manifest (self-consistent — two of that axis's own
+    candidate lanes supplied, only one referenced) — used to prove
+    source-health/lineage semantics correctly distinguish partial from full,
+    never collapsing "some reference somewhere" into healthy."""
+    candidate_lanes = list(lineage.AXIS_CANDIDATE_LANES.get(axis, ()))
+    referenced_lane, unreferenced_lane = candidate_lanes[0], candidate_lanes[1]
+    manifest = lineage.build_axis_lineage_manifest(
+        axis=axis,
+        source_refs_by_lane={referenced_lane: [{
+            "schema_version": lineage.SCHEMA_VERSION,
+            "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
+            "lane": referenced_lane, "provider": "yfinance", "ticker": ticker,
+            "task_id": f"{ticker}-{axis}-ref", "output_digest": "sha256:test",
+        }]},
+        supplied_lanes=[referenced_lane, unreferenced_lane],
+    )
+    assert manifest["status"] == lineage.LINEAGE_PARTIAL
+    return {
+        "ticker": ticker, "axis": axis, "score": 0.5, "confidence": 0.8,
+        "key_findings": [f"{ticker} {axis} finding"], "risks": [],
+        "evidence_refs": manifest, "missing_evidence": [], "limitations": [],
         "model": "fake", "prompt_version": "test",
     }
 
@@ -504,8 +575,12 @@ class TestConflictReviewTruth:
         outputs = [
             _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
             _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
-            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=["r3"]),
         ]
+        outputs.append(
+            _specialist_output(
+                "AAA", AXIS_REVIEW, evidence_refs=["r3"], reviewed_outputs=outputs,
+            )
+        )
         contract = trust.build_run_trust_contract(
             session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
         )
@@ -562,8 +637,12 @@ class TestConflictReviewTruth:
             _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
             _specialist_output("AAA", AXIS_SENTIMENT, evidence_refs=["r4"]),
             _specialist_output("AAA", AXIS_RISK_FILING, evidence_refs=["r5"]),
-            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=["r3"]),
         ]
+        outputs.append(
+            _specialist_output(
+                "AAA", AXIS_REVIEW, evidence_refs=["r3"], reviewed_outputs=outputs,
+            )
+        )
         contract = trust.build_run_trust_contract(
             session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
         )
@@ -585,6 +664,40 @@ class TestConflictReviewTruth:
                 evidence_quality="STRONG", lineage_status=trust.LINEAGE_FULL,
                 review_status=good_status,
             ) is True
+
+    def test_forged_review_derived_axes_never_reads_full(self):
+        # Round-3 item 6: a review claiming it reconciled a different axis
+        # set than what's CURRENTLY true for this ticker (a stale/forged
+        # persisted claim) must read as missing lineage in the trust
+        # contract, never full — even though the review manifest is
+        # otherwise internally self-consistent.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_SUCCEEDED}]
+        technical_output = _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"])
+        review_output = _specialist_output(
+            "AAA", AXIS_REVIEW, evidence_refs=["r3"], reviewed_outputs=[technical_output],
+        )
+        # Forge the persisted claim: assert it also reconciled "fundamental"
+        # even though no fundamental output exists for this ticker at all.
+        forged_manifest = dict(review_output["evidence_refs"])
+        forged_manifest["input_axis_lineage"] = sorted(
+            forged_manifest["input_axis_lineage"]
+            + [{"axis": AXIS_FUNDAMENTAL, "status": lineage.LINEAGE_FULL}],
+            key=lambda e: e["axis"],
+        )
+        forged_manifest["derived_from_axes"] = sorted(
+            forged_manifest["derived_from_axes"] + [AXIS_FUNDAMENTAL]
+        )
+        review_output["evidence_refs"] = forged_manifest
+        outputs = [technical_output, review_output]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        # The review's own lineage is forced to MISSING by the cross-check —
+        # capping the ticker-level aggregate below full.
+        assert entry["lineage_status"] != trust.LINEAGE_FULL
 
 
 class TestSourceLineageFullPartialMissing:
@@ -635,17 +748,25 @@ class TestSourceLineageFullPartialMissing:
         assert contract["overall_status"] == trust.STATUS_BLOCKED
 
     def test_review_output_counts_toward_lineage(self):
-        # A ticker with full lineage on its tracked axes but a referenced
-        # review output missing its own reference must be "partial", since
-        # the review output also feeds aggregate_advisory_signal().
+        # A review is now ENTIRELY DERIVED from the sibling outputs it
+        # reconciles (round-3 contract §6) — it can never independently
+        # claim a worse status than a fully-linked set of inputs, nor a
+        # better one. A review reconciling one fully-linked axis and one
+        # unlinked axis is itself honestly "partial", proving the review
+        # output counts as its own decision-influencing lineage input in the
+        # ticker-level aggregate (technical alone would already be "full").
         session = _one_ticker_session()
         rows = [_one_ticker_row(evidence_quality="STRONG")]
         tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": TASK_SUCCEEDED}]
         outputs = [
             _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
-            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
-            _specialist_output("AAA", AXIS_REVIEW, evidence_refs=[]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=[]),
         ]
+        outputs.append(
+            _specialist_output(
+                "AAA", AXIS_REVIEW, evidence_refs=["r3"], reviewed_outputs=outputs,
+            )
+        )
         contract = trust.build_run_trust_contract(
             session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
         )
@@ -842,3 +963,88 @@ class TestDecisionConstraintTruth:
         )
         entry = contract["ticker_trust"][0]
         assert entry["decision_constraints"] == [trust.CONSTRAINT_OTHER]
+
+
+class TestSourceHealthSemantics:
+    """Release-blocker proof: full/partial/missing output lineage are
+    tracked SEPARATELY — an all-partial run must never collapse into
+    "outputs_with_refs == total" and read as healthy."""
+
+    def test_all_partial_outputs_never_reads_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _partial_specialist_output("AAA", AXIS_TECHNICAL),
+            _partial_specialist_output("AAA", AXIS_FUNDAMENTAL),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_LIMITED
+        assert contract["source_health"]["status"] != trust.STATUS_HEALTHY
+        assert contract["source_lineage"]["outputs_full_lineage"] == 0
+        assert contract["source_lineage"]["outputs_partial_lineage"] == 2
+        assert contract["source_lineage"]["outputs_missing_lineage"] == 0
+
+    def test_all_missing_outputs_is_blocked(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=None),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=None),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_BLOCKED
+        assert contract["source_lineage"]["outputs_missing_lineage"] == 2
+
+    def test_all_full_outputs_is_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=["r2"]),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_HEALTHY
+        assert contract["source_lineage"]["outputs_full_lineage"] == 2
+
+    def test_mixed_full_and_missing_is_limited_not_healthy(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _specialist_output("AAA", AXIS_FUNDAMENTAL, evidence_refs=None),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_LIMITED
+
+    def test_zero_valid_outputs_is_unknown(self):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=[],
+        )
+        assert contract["source_health"]["status"] == trust.STATUS_UNKNOWN
+
+    def test_full_ticker_lineage_requires_every_influencing_output_full(self):
+        # PR #485 rule preserved: mixed full+partial at the TICKER level is
+        # "partial", never "full" — even though this patch changes HOW each
+        # output's own status is derived.
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        outputs = [
+            _specialist_output("AAA", AXIS_TECHNICAL, evidence_refs=["r1"]),
+            _partial_specialist_output("AAA", AXIS_FUNDAMENTAL),
+        ]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        entry = contract["ticker_trust"][0]
+        assert entry["lineage_status"] == trust.LINEAGE_PARTIAL
+        assert entry["source_validated"] is False

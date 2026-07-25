@@ -157,6 +157,9 @@ valid_until, model, prompt_version, input_fingerprint, batch_key). Unique on
 (session, ticker, axis); repair retries upsert, never duplicate. Advisory
 research output only — never visible action authority.
 
+`evidence_refs` (PR 2, `source_lineage_v1`) is a versioned JSONB manifest, not
+an opaque string list — see §7a.
+
 ### Ownership / cross-user protection
 
 All four operational tables: deny-all RLS (service-role only, migration 018/026
@@ -171,7 +174,7 @@ anything.
 |---|---|---|---|
 | collect_portfolio_context | session | none | frozen portfolio-level context (cash, allocation, concentration, prior snapshot state) in task output |
 | collect_macro_context | session | none | FRED macro artifact (existing `run_fred_macro_evidence`); degraded when no key |
-| collect_evidence_lane | ticker+lane | none | normalized lane evidence (existing lane runners / per-ticker fetchers), artifact id in `output_ref` |
+| collect_evidence_lane | ticker+lane | none | normalized lane evidence (existing lane runners / per-ticker fetchers); artifact id in `output.artifact_id` for SEC/ETF/macro lanes (`output_ref` is legacy/internal — PR 2 lineage never derives from it; see §7a) |
 | build_evidence_bundle | ticker | all required lanes terminal | immutable bundle on `intel_run_tickers.evidence_bundle` + fingerprint; state → evidence_ready |
 | specialist_analysis | batch+axis | bundles of batch tickers ready | one `intel_run_specialist_outputs` row per ticker in batch |
 | review_conflict | ticker | conflicting specialist outputs (deterministic trigger) | axis='review' output row |
@@ -240,8 +243,13 @@ Built once per ticker after required lanes are terminal; persisted on
   "as_of": "…", "portfolio_context": {…frozen scope + session context…},
   "market": {…price lane…}, "technical": {…}, "fundamental": {…},
   "valuation": {…}, "sentiment": {…}, "sec": {…}, "catalysts": […],
-  "asset_specific": {…etf/crypto…}, "source_refs": […artifact ids…],
-  "missing_lanes": […], "degraded_lanes": […], "quality": {…},
+  "asset_specific": {…etf/crypto…},
+  "source_refs_by_lane": {"price": [{…}], "fundamentals": [{…}], "…": […]},
+  "source_refs": [{…deterministic flattened/deduped structured refs…}],
+  "source_ref_gaps": ["…usable lanes with no valid source provenance…"],
+  "missing_lanes": […], "degraded_lanes": […],
+  "quality": {"usable_lane_count": 5, "total_lane_count": 6,
+              "source_linked_lane_count": 4, "source_ref_count": 5},
   "input_fingerprint": "sha256:…"
 }
 ```
@@ -249,6 +257,149 @@ Built once per ticker after required lanes are terminal; persisted on
 The bundle is the ONLY input specialists see. Specialists never call providers
 (`specialist_agents_v1` imports no provider/data_sources module — enforced by
 a boundary test).
+
+## 7a. Source-reference lineage (PR 2, `source_lineage_v1`)
+
+Owns making the bundle's/specialist's/review's source references genuinely
+prove external provenance instead of the PR-1 honest-empty "0 of N" state.
+Pure module — no IO, no LLM, no providers. Landed in two rounds on the same
+PR: the initial reference-generation slice, then a same-PR patch closing six
+semantic gaps that could still yield a false-trusted or reuse-breaking state
+(strict derived validation, axis-supplied-evidence precision, fingerprint
+correctness, artifact ownership scoping + bounded storage, review input
+filtering, and source-health full/partial/missing semantics).
+
+Two versioned reference types (`schema_version: "source_lineage_v1"`):
+
+- `provider_observation` — built directly from a durable direct-lane task's
+  own output (price/technicals/fundamentals/news_sentiment/crypto_market).
+  Carries only `lane`, `provider` (the output's own `source` field), `ticker`,
+  `observed_at` (when the provider output carried one), `task_id` (replay
+  locator) and a deterministic `output_digest` of the substantive output.
+  Never fabricates a URL, publication date or document id the provider didn't
+  supply; a degraded/no-data output (e.g. zero news items) produces no
+  reference.
+- `research_artifact_source` — built from one canonical
+  `research_artifact_sources` row belonging to an artifact-backed lane
+  (SEC/ETF), but ONLY once the PARENT `research_artifacts` row has been
+  verified: owned by the ticker bundle's own `user_id`, ticker-scoped for
+  ticker-specific lanes (macro is portfolio-scope, no ticker check), active,
+  and carrying a nonempty `payload`. An artifact id alone (or one owned by a
+  different user/ticker, or with an empty payload) is internal storage
+  provenance, not proof of an external source — it is a lineage gap
+  (`source_ref_gaps`), never a fabricated reference, and its summary/payload
+  is never exposed to the bundle or the specialist prompt either.
+  `evidence_bundle_v1` does ONE bulk parent-artifact read
+  (`research_artifacts`, scoped `user_id`+`is_active`) and ONE bulk
+  source-row read (`research_artifact_sources`, scoped `user_id`, ids
+  restricted to already-validated parents) per ticker bundle — the same
+  validated parent rows are reused for the SEC/ETF/macro DISPLAY summaries
+  too, never a second/N+1 query per lane. Fails closed (empty mapping, never
+  a bundle-construction crash) on a read error.
+
+Legacy opaque strings (the pre-PR-2 `intel_run_tasks.output_ref` value used
+verbatim) and malformed objects never validate — `is_valid_reference` /
+`parse_axis_manifest` treat them as missing lineage, never as truthy.
+
+**Strict, DERIVED manifest validation.** `parse_axis_manifest` never trusts a
+persisted `status` field — it independently re-derives status from the
+manifest's own lane/reference structure (unique/disjoint/union-consistent
+lane sets, every reference structurally valid and lane-consistent, every
+linked lane backed by ≥1 reference, and — when the caller supplies
+`expected_axis`/`expected_ticker` — an exact axis/ticker match on every
+reference). A persisted `status` that disagrees with the derived status makes
+the WHOLE manifest malformed, read as `missing` everywhere (specialist
+output, review output, trust contract) — never partially trusted. Review
+manifests are validated through a separate schema
+(`derived_from_axes`/`missing_ref_axes`), never the lane-based axis schema.
+
+**Axis-scoped manifests, evidence actually supplied.** `evidence_refs` is a
+manifest (`schema_version`, `axis`, `expected_lanes`, `linked_lanes`,
+`missing_ref_lanes`, `status`, `refs`, `truncated_ref_count`). The shared
+`specialist_agents_v1.axis_evidence_context(bundle, axis)` helper is the ONE
+source of truth for "what evidence was actually supplied to this axis" —
+used identically by prompt construction, persisted `evidence_refs`,
+cross-session reuse rebinding, and the bounded prompt-safe source
+projection. Supplied lanes are derived from the axis's OWN compact bundle
+content (`_axis_supplied_lanes`) intersected with `AXIS_CANDIDATE_LANES` —
+NEVER from the bundle-wide `usable_lanes` list, so e.g. `risk_filing`'s
+narrowed fundamentals subset only counts when that subset itself is
+nonempty, even if the full fundamentals lane succeeded. `full` requires at
+least one valid reference AND every expected lane linked; one
+supplied-but-unreferenced lane is `partial`, never `full`.
+
+**Reuse.** `find_reusable_specialist_output` filters on `prompt_version` — a
+row persisted under an older, unsourced prompt contract never matches and is
+never reused. When a match IS reused across sessions, only the analytical
+fields (stance/score/confidence/findings/…) carry over; `evidence_refs` is
+rebuilt via the SAME `axis_evidence_context` helper from the CURRENT
+session's own bundle lineage, so a reused result can never carry forward a
+prior session's task ids as current provenance.
+
+**Review-derived lineage.** Only VALID non-review specialist rows (score AND
+confidence both present) are reviewable inputs. A successful `review_conflict`
+output's `evidence_refs` is a derived manifest (`derived_from_axes`,
+`missing_ref_axes`, `status`, `refs`) built from each input's INDEPENDENTLY
+RE-VALIDATED manifest (never trusted from its persisted status) — it unions
+and deduplicates their valid references and never fabricates a new source.
+`full` only when every reconciled input's own re-derived lineage was `full`.
+The review prompt itself carries, per reviewed axis: stance/score/confidence,
+bounded findings/risks, `lineage_status`, `linked_lanes`, `missing_ref_lanes`
+and a bounded source projection — never a raw payload or an invitation to
+invent a citation. The persisted `input_fingerprint` (previously always `""`)
+is built from the EXACT normalized/bounded prompt input the LLM saw, plus
+ticker and prompt version, sorted for order-independence — it changes when
+any reviewed finding, risk, score, confidence, lineage status, missing lane,
+or source identity visible to the review changes. Review model, token
+budget, retry logic, fallback behavior and call count are all UNCHANGED —
+PR 3 still owns review reliability.
+
+**Fingerprint correctness.** The bundle's `input_fingerprint` never hashes
+raw source-reference objects (they carry internal replay locators — task_id,
+artifact_id, artifact_source_id — and, for `provider_observation` on the
+PRICE lane, a digest of the volatile intraday price/pct_1d itself). Instead
+`source_lineage_v1.fingerprint_source_refs` builds a canonical per-lane
+identity-only projection (`source_identity_projection`): every reference
+type retains `lane`/`provider`/`ref_type`; a `provider_observation` on any
+lane OTHER than price also retains its `output_digest` (so a genuine
+technical/fundamental/news/crypto evidence change still alters the
+fingerprint); a `research_artifact_source` retains real external identity
+(`source_id`/`source_hash`/a sanitized `source_url`) instead of internal
+artifact/source-row ids, so swapping which internal row backs the SAME
+external filing never changes the fingerprint while a genuinely different
+filing does; source-reference GAPS are retained too, so sourced vs
+gapped evidence is never fingerprint-equivalent. An ordinary price tick
+alone (or a fresh session/task UUID, or swapping an internal artifact id for
+the same external source) never changes the fingerprint; a genuine
+provider/source-identity or substantive-evidence change always does.
+
+**Bounded reference storage.** Every lane's reference list is bounded to 8
+(`MAX_REFS_PER_LANE`), every axis/review manifest's flattened list to 24
+(`MAX_REFS_PER_MANIFEST`) — `bound_references` always dedupes+deterministically
+sorts BEFORE truncating, and `linked_lanes`/`missing_ref_lanes` (or
+`missing_ref_axes`) are derived from the POST-truncation reference set so a
+manifest always round-trips self-consistently through `parse_axis_manifest`
+even when bounding drops some references. Truncation is disclosed via an
+additive `truncated_ref_count` field, never silent. Free-text identifier
+fields (provider, task_id, artifact/source ids, source_url, …) are capped to
+200 characters (`MAX_FREE_TEXT_CHARS`). No source URL, excerpt or full
+reference object is ever logged.
+
+**Trust projection.** `run_trust_contract_v1._output_lineage_status` calls
+`source_lineage_v1.output_lineage_status` with the output's OWN axis and
+ticker (never a bare refs list) — structural, axis/ticker-aware manifest
+validation, never a raw truthy/nonempty-list check. Per-ticker lineage is
+`full` only when EVERY decision-influencing output (including review) has
+`full` per-output lineage; `partial` when at least one has valid (full or
+partial) lineage but not all do; `missing` when none do. Session-wide
+`source_health` tracks full/partial/missing OUTPUT counts SEPARATELY
+(`outputs_full_lineage`/`outputs_partial_lineage`/`outputs_missing_lineage`,
+additive fields alongside the preserved `outputs_with_source_refs`/
+`outputs_missing_source_refs`) — `healthy` ONLY when every valid output is
+full; `blocked` when none are sourced at all; `limited` for any partial
+output or a full+missing mix. An all-partial run can never read `healthy`
+(the release-blocker this patch fixes — the prior truthy-count check
+conflated "has some reference" with "fully sourced").
 
 ## 8. Specialist agent contracts
 

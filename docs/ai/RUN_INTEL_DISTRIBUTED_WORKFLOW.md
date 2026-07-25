@@ -732,67 +732,113 @@ Superseded data: unfinished v1 sessions → `superseded` by migration 027.
   visible card contract is unchanged in this slice (deterministic policy's
   existing suppression semantics still govern card actions).
 
-## 17. Operational reliability (final PR: preflight, normalization, selective reuse)
+## 17. Operational reliability (final PR: preflight, normalization, selective reuse, patched round 2)
 
-**Portfolio financial-truth preflight.** `session_control_v1.create_distributed_session`
-runs `_run_truth_preflight` after the active-session adoption check and
-before scope freeze: reads `financial_truth_baseline_v1.run_financial_truth_baseline`
-(existing contract, no duplicated math), and on `snapshot_truth.status != "ok"`
-or `snapshot_is_stale` invokes the existing canonical refresh
-(`PortfolioService.create_snapshot`) at most once, then re-reads. A session is
-created only when snapshot availability+freshness, position-derived
-market-value feasibility, and reconciliation (`reconciliation_status == "pass"`)
-all pass; each failure returns one of `portfolio_truth_unavailable` /
+**1. Frozen financial-truth preflight.** `financial_truth_baseline_v1` splits
+into a shared `_gather_truth_sections` core, a backward-compatible public
+`run_financial_truth_baseline` (strips underscore-prefixed internal keys),
+and a strict `run_financial_truth_baseline_strict` that raises
+`FinancialTruthReadError` on a core positions/price_history/snapshot query
+failure instead of returning an empty-looking result. `_run_truth_preflight`
+calls ONLY the strict API; its single passing result supplies BOTH the
+verdict and the exact `open_positions`/`price_rows` `create_distributed_session`
+freezes into scope — no second query, no time-of-check/time-of-use gap.
+Duplicate active tickers for the same user now BLOCK
+(`portfolio_reconciliation_failed`) rather than silently keeping the first
+row — a duplicate is a financial-truth defect, not a valid scope. Each
+failure mode returns its own code (`portfolio_truth_unavailable` /
 `portfolio_snapshot_stale` / `portfolio_reconciliation_failed` /
-`portfolio_refresh_failed` / `portfolio_scope_empty` via the existing
-`not_created` response shape. A bounded `run_intel_preflight_v1` summary
-persists on the new session's `metrics` JSONB.
+`portfolio_refresh_failed` / `portfolio_scope_empty`) via the existing
+`not_created` response shape, now carrying `status`/`code`/`message`/
+`repair_action`/`provider_calls`/`llm_calls` (see §7 below). A bounded
+`run_intel_preflight_v1` summary persists on the new session's `metrics`.
 
-**Versioned monetary normalization** (`distributed/evidence_normalization_v1.py`,
-`financial_evidence_normalization_v1`). Every currency-bearing fundamental
-metric is labeled with its verified ISO-4217 reporting currency
-(`financialCurrency` from yfinance `.info`) — never the market-price quote
-currency (`currency`) an ADR happens to trade in. Ratios/percentages stay
-dimensionless. An unknown reporting currency excludes the field from the
-compact specialist projection and records a `normalization_gaps` entry —
-never a guessed `$`. `collectors_v1.find_recent_lane_output` rejects a
-pre-normalization-contract fundamentals/news cache entry even inside TTL
-(`_reuse_contract_compatible`) and any future-dated `completed_at`.
+**2. Corrected currency domain model** (`evidence_normalization_v1.normalize_fundamentals`).
+Statement fields (`revenue`/`free_cash_flow`/`operating_cash_flow`/
+`net_income`/`total_debt`/`cash`/`ebitda`) are labeled with the reporting/
+financial-statement currency (`financial_currency`); quote/security fields
+(`market_cap`/`target_mean_price`/`eps`) are labeled with the quote currency
+(`quote_currency`) — a TSM-shaped reporter (USD quote, TWD statements) is
+labeled correctly on BOTH sides at once, never conflated, never FX-converted.
+`eps` carries `unit: "per_share"` (a currency amount, never a dimensionless
+ratio). Every accepted number passes `math.isfinite` (NaN/±infinity
+rejected); non-ISO/mixed-case codes (`GBp`/`GBX`/lowercase) are rejected,
+never coerced to `GBP`. An unknown currency in either domain excludes only
+that domain's fields (`normalization_gaps`), never blocks the other domain.
 
-**Accepted-news contract** (same module, `filter_news_items`). An article is
-durable/prompt-eligible only with a finite, non-epoch, non-future, ≤14-day-old
-publication timestamp AND deterministic ticker relevance (provider
-`related_tickers` metadata, else an exact ticker token in headline/summary —
-never fuzzy matching), deduped by provider id/link/normalized-headline+time,
-bounded to 8 accepted articles. Zero accepted articles is an honest degraded
-lane — the sentiment specialist is never called over evidence that doesn't
-exist.
+**3. Current yfinance news contract** (`evidence_normalization_v1._normalize_news_item`,
+the single shape-parsing authority — `data_sources.fetch_yfinance_news_sync`
+now returns raw provider items verbatim). Parses BOTH the legacy top-level
+shape and the current nested `{id, content: {title, summary, pubDate,
+provider, canonicalUrl}}` shape, extracting only fields actually present.
+Timestamp accepted as a finite positive Unix value OR a valid ISO/RFC3339
+string, normalized to UTC — invalid input is rejected, never replaced with
+fetch time. STRICT relevance precedence: provider `related_tickers`
+metadata, when present and nonempty, is authoritative (a mismatch REJECTS
+even when the headline text matches — never overridden); exact-token text
+matching is a fallback only when metadata is absent, and disabled for
+ambiguous 1-2 character tickers. Deduped by id/link/normalized-headline+time,
+bounded to 8 accepted articles.
 
-**Lane TTL/reuse matrix (unchanged from §6):** price 0.25h, technicals/
-fundamentals/sec_catalyst/macro 24h, news_sentiment 1h, sec_company_facts
-168h, etf_fund_data 2160h — cross-session reuse via the pre-existing
-`find_recent_lane_output`, now with the two eligibility fixes above.
+**4. Fail-closed, asset-scoped collector cache** (`collectors_v1`). A new
+`CacheReadError` distinguishes a legitimate miss (`None`, safe to fetch) from
+a cache READ failure (raises → `TASK_FAILED_RETRYABLE`, zero provider calls
+— an outage is never reinterpreted as expired evidence). Cache identity now
+requires a matching `asset_type` (no cross-asset-type reuse), a valid
+completed_at inside TTL, and output/state/contract-version validity.
+`find_recent_macro_output` implements the 24h macro reuse contract on the
+EXISTING task table (user + `task_type` scoped, no fabricated ticker, no
+second table/cache). Portfolio-context collection remains a plain
+current-session DB read — never a lane cache hit or provider refresh.
 
-**Selective specialist refresh — two real fixes.** (1) `prior_action` is
-excluded from both the bundle-wide fingerprint
-(`evidence_bundle_v1._fingerprint_source`) and the new per-axis fingerprint —
-an immediate rerun's own just-published decision was becoming the next
-session's `prior_action`, forcing every decided ticker to re-analyze
-regardless of whether evidence changed; it still reaches the prompt
-unchanged, it just never gates reuse (same treatment as the volatile
-intraday `market` price). (2) `specialist_agents_v1.axis_input_fingerprint`
-computes reuse eligibility from the axis's OWN compact prompt projection
-(`_compact_bundle_for_axis`) rather than the whole-bundle fingerprint, so a
-refreshed lane an axis doesn't read (e.g. a fresh news fetch for the
-technical axis) no longer invalidates that axis's reuse. `PROMPT_VERSION`
-bumped to `distributed_specialist_v3`. Both fixes were found and proven by
-real end-to-end `WorkerSupervisor`-driven tests (two full sessions run back
-to back over the same durable store), not asserted from source reading.
+**5. One prompt/fingerprint helper** (`specialist_agents_v1.axis_evidence_context`).
+The separately-maintained `axis_input_fingerprint` is gone —
+`axis_evidence_context` is the ONE helper returning the compact prompt
+bundle (with its `evidence_sources` projection), supplied lanes, lineage
+manifest, and `input_fingerprint` together, used identically by prompt
+construction, the reuse lookup, the persisted `input_fingerprint`, and
+`evidence_refs` rebinding on reuse. `market`/`prior_action` are excluded
+from BOTH the prompt and the fingerprint together (previously `market`
+reached the prompt while being excluded only from the fingerprint — a
+field must never be visible to the LLM while invisible to reuse). No
+axis's compact bundle ever includes `market` anymore, so
+`source_lineage_v1.AXIS_CANDIDATE_LANES` no longer lists `LANE_PRICE` for
+any axis — an axis never claims price lineage it was never given.
 
-**Cost/technical-detail line.** `worker_supervisor_v1` tracks a
-`lanes_refreshed` session-metrics counter alongside the existing
-`cache_hits`; `session_control_v1.get_session_status` derives an additive,
-optional `evidence_summary_line` ("Evidence: N lanes reused, M refreshed.
-Specialist analysis: N reused, M refreshed.") from real terminal-session
-metrics only, omitted (never a zero placeholder) when unavailable — rendered
-by the existing `AdvisorReadinessPanel` run-progress region.
+**6. Literal cost/reuse metrics** (`worker_supervisor_v1`). `cache_hits`/
+`lanes_refreshed` count ONLY a successful evidence-lane adoption/collection
+— the session-level portfolio-context DB read and any degraded/no-data/
+failed-retryable collector attempt count in neither total (previously every
+non-cache-hit task completion, including the portfolio-context read,
+silently inflated `lanes_refreshed`). `provider_calls` stays unconditional
+(reflects real attempts regardless of outcome). `llm_calls`/`llm_reused`
+were already literal (actual `ask_json` calls vs. individually adopted
+outputs) and are unchanged. `_evidence_summary_line` renders the
+`cache_hits`/`lanes_refreshed` pair (and separately the
+`llm_reused`/`llm_calls` pair) once EITHER sibling counter exists — an
+immediate rerun that reuses every lane never sets `lanes_refreshed` at all,
+and that absence is a genuine zero, not a reason to suppress the line.
+
+**7. Blocked-preflight UI.** `IntelV3SessionStatus` (frontend) and
+`AdvisorRunModel` carry the backend's existing `status`/`code`/`message`/
+`repair_action`/`provider_calls`/`llm_calls` fields. `AdvisorReadinessPanel`'s
+run-status region renders the bounded repair action once when present — no
+new card/drawer/button, no duplicate generic sentence, no raw internal
+code ever rendered. `portfolio_scope_empty` retains its pre-existing "Add
+positions" idle behavior unchanged (no repair action shown for that case).
+
+**8. Hour/day/week controlled-clock matrix** (`test_run_intel_ttl_matrix_v1.py`).
+Real `WorkerSupervisor`/scheduler/collector/specialist dispatch drives two
+sessions per interval; session 2's durable-row timestamps are shifted
+backward by the interval (never the `LANE_TTL_HOURS`/`OUTPUT_VALID_HOURS`
+constants) to simulate immediate/+1h/+1d/+1w elapsed real time. Covers
+equities (AAPL), an ETF (VTI), and crypto (BTC) — including the SEC/ETF
+long-TTL artifact-lane paths via a deterministic fixed-artifact-id fixture
+— without ever enabling a real research-worker/paid provider. Confirms the
+exact TTL matrix at each interval (which lanes reuse/refresh, which
+specialist axes reuse/rerun) and that each rerun publishes its OWN
+session-native snapshot, never a copy of a prior session's.
+
+**Lane TTL matrix (unchanged from §6, verified not redefined by item 8's
+tests):** price 0.25h, technicals/fundamentals/sec_catalyst/macro 24h,
+news_sentiment 1h, sec_company_facts 168h, etf_fund_data 2160h.

@@ -178,6 +178,7 @@ def seed_reconciled_snapshot(client: FakeSupabase, user_id: str) -> None:
         "total_cost": total_cost,
         "total_pnl": total_equity - total_cost,
         "total_pnl_pct": 0.0,
+        "cash_balance": 0.0,
         "created_at": now_utc().isoformat(),
     }
     if existing is not None:

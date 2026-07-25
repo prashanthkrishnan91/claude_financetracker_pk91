@@ -26,6 +26,9 @@ from ..intel_run_session_store_v1 import get_session
 from . import run_task_store_v1 as store
 from .task_contracts_v1 import (
     ALL_TICKER_STATES,
+    ASSET_CRYPTO,
+    ASSET_EQUITY,
+    ASSET_ETF,
     SESSION_ACTIVE_STATES,
     SESSION_COMPLETED,
     SESSION_COMPLETED_WITH_GAPS,
@@ -262,7 +265,14 @@ async def _run_truth_preflight(
 
     snap = result["snapshot_truth"]
     refreshed = False
-    if snap.get("status") != "ok" or snap.get("snapshot_is_stale"):
+    # A missing/non-finite cash_balance means invested value can't be
+    # derived — treat it exactly like staleness/unavailability: one refresh
+    # attempt, then fail closed if it's still unusable.
+    if (
+        snap.get("status") != "ok"
+        or snap.get("snapshot_is_stale")
+        or snap.get("latest_cash_balance") is None
+    ):
         try:
             await PortfolioService(user_id=UUID(str(user_id)), client=client).create_snapshot()
             refreshed = True
@@ -296,6 +306,13 @@ async def _run_truth_preflight(
     if snap.get("snapshot_is_stale"):
         return _preflight_blocked(
             "portfolio_snapshot_stale", verdict.get("next_required_fix"),
+            snapshot_refreshed=refreshed,
+        )
+    if snap.get("latest_cash_balance") is None:
+        # Refreshed once already (above) — still missing/non-finite means
+        # invested value can never be derived; never guess cash as zero.
+        return _preflight_blocked(
+            "portfolio_truth_unavailable", verdict.get("next_required_fix"),
             snapshot_refreshed=refreshed,
         )
     if not pos.get("open_position_count"):
@@ -562,73 +579,68 @@ async def repair_session_graph(
     session: dict[str, Any],
     now: Optional[datetime] = None,
 ) -> bool:
-    """Repair EVERY partial-create shape of a 'created' session.
+    """Repair a partially-seeded 'created' session — WITHOUT ever rebuilding
+    the immutable frozen scope from current portfolio state. The durable
+    ``intel_run_tickers`` rows (or their absence) are the ONLY scope
+    authority: this never re-runs the financial-truth baseline and never
+    reloads current positions/prices/prior actions.
 
-    Handles (completion item 3): session row only; some ticker rows; all
-    ticker rows but no tasks; partial ticker rows; partial seed tasks. It
-    compares the ACTUAL scope + task keys against the exact expected graph,
-    creates only what is missing (idempotent get-or-create), VERIFIES again,
-    and transitions to running only when the graph is complete. A session
-    whose portfolio scope no longer exists is terminalized honestly.
+    - Frozen ticker rows exist: they are the sole scope authority — only
+      missing seed TASKS are created for those exact rows; ``holdings_scope``
+      must already match the frozen ticker set exactly, or the session fails
+      honestly rather than being repaired from current portfolio data.
+    - No frozen ticker rows exist: the crash happened before scope freeze
+      ever persisted — fails with ``scope_freeze_incomplete_restart_required``,
+      creates no tasks, makes no provider/LLM calls. The user must click Run
+      Intel again for a fresh preflight and a new session.
+    - Partial/contradictory frozen state (duplicate ticker rows, malformed
+      asset type, missing ticker identity, a holdings_scope/ticker-row
+      mismatch) fails closed the same way — never repaired.
 
     Returns True when the session is running with a verified-complete graph.
-    Never raises into the adopt path — a repair failure leaves the session in
-    the explicit retryable 'created' state with the error recorded.
+    Never raises into the adopt path.
     """
     if str(session.get("status") or "") != SESSION_CREATED:
         return str(session.get("status") or "") == SESSION_RUNNING
     session_id = str(session.get("id"))
     now = now or _now()
+
+    async def _fail(reason: str) -> bool:
+        await asyncio.to_thread(
+            lambda: client.table(SESSIONS_TABLE)
+            .update({
+                "status": SESSION_FAILED,
+                "last_error": reason[:400],
+                "updated_at": _now().isoformat(),
+            })
+            .eq("id", session_id)
+            .eq("status", SESSION_CREATED)
+            .execute()
+        )
+        return False
+
     try:
-        try:
-            truth = await run_financial_truth_baseline_strict(client, str(user_id))
-        except Exception:
-            truth = None
-        positions = truth["_open_positions"] if truth else []
-        if not positions:
-            # Scope no longer loadable — reserved honest terminal failure.
-            await asyncio.to_thread(
-                lambda: client.table(SESSIONS_TABLE)
-                .update({
-                    "status": SESSION_FAILED,
-                    "last_error": "scope_unavailable_no_active_holdings",
-                    "updated_at": _now().isoformat(),
-                })
-                .eq("id", session_id)
-                .eq("status", SESSION_CREATED)
-                .execute()
-            )
-            return False
-        prices = _latest_price_map(truth["_price_rows"])
-        prior_actions = await asyncio.to_thread(
-            _load_prior_actions, client, str(user_id)
-        )
-        scope_rows = build_frozen_scope_rows(positions, prices, prior_actions)
-
-        # 1. Missing ticker rows only (existing frozen rows are immutable).
-        existing_rows = await asyncio.to_thread(
-            lambda: store.list_ticker_rows(client, run_session_id=session_id)
-        )
-        existing_tickers = {str(r.get("ticker") or "") for r in existing_rows}
-        missing_rows = [
-            r for r in scope_rows if str(r.get("ticker")) not in existing_tickers
-        ]
-        if missing_rows:
-            await asyncio.to_thread(
-                lambda: store.insert_ticker_rows(
-                    client,
-                    run_session_id=session_id,
-                    user_id=str(user_id),
-                    rows=missing_rows,
-                    now=now,
-                )
-            )
-
-        # 2. Missing seed tasks only (get_or_create absorbs the rest). The
-        #    expected graph derives from the DURABLE frozen rows now present.
         frozen_rows = await asyncio.to_thread(
             lambda: store.list_ticker_rows(client, run_session_id=session_id)
         )
+        if not frozen_rows:
+            return await _fail("scope_freeze_incomplete_restart_required")
+
+        seen: set[str] = set()
+        for row in frozen_rows:
+            ticker = str(row.get("ticker") or "").strip()
+            asset_type = str(row.get("asset_type") or "")
+            if not ticker or asset_type not in (ASSET_EQUITY, ASSET_ETF, ASSET_CRYPTO):
+                return await _fail(f"frozen_scope_malformed:{ticker or 'missing_ticker'}")
+            if ticker in seen:
+                return await _fail(f"frozen_scope_duplicate_ticker:{ticker}")
+            seen.add(ticker)
+
+        if {str(t) for t in (session.get("holdings_scope") or [])} != seen:
+            return await _fail("frozen_scope_holdings_scope_mismatch")
+
+        # Missing seed TASKS only — the frozen ticker rows themselves are
+        # never added to, removed from, or modified.
         await asyncio.to_thread(
             lambda: _seed_initial_tasks(
                 client,
@@ -639,7 +651,6 @@ async def repair_session_graph(
             )
         )
 
-        # 3. Verify the complete expected graph, then (and only then) run.
         missing = await asyncio.to_thread(
             lambda: verify_seed_graph(
                 client, run_session_id=session_id, scope_rows=frozen_rows,
@@ -663,9 +674,6 @@ async def repair_session_graph(
             .update({
                 "status": SESSION_RUNNING,
                 "current_stage": STAGE_COLLECTING,
-                "holdings_scope": [
-                    str(r.get("ticker")) for r in frozen_rows
-                ],
                 "last_error": None,
                 "updated_at": _now().isoformat(),
             })
@@ -674,9 +682,8 @@ async def repair_session_graph(
             .execute()
         )
         logger.info(
-            "distributed_session.graph_repaired session=%s tickers=%d "
-            "rows_added=%d",
-            session_id, len(frozen_rows), len(missing_rows),
+            "distributed_session.graph_repaired session=%s tickers=%d",
+            session_id, len(frozen_rows),
         )
         return True
     except Exception as exc:

@@ -159,19 +159,23 @@ class TestD2ZombieCreatedSession:
         return session_id
 
     @pytest.mark.asyncio
-    async def test_same_id_retry_repairs_zombie(self):
+    async def test_same_id_retry_fails_zombie_with_no_frozen_scope(self):
+        """A zombie session with ZERO frozen ticker rows means the crash
+        happened before scope freeze ever persisted — repair must fail it
+        rather than reconstructing scope from the CURRENT portfolio (which
+        may have changed since). The user must click Run Intel again for a
+        fresh preflight and a new session."""
         client = FakeSupabase()
         seed_position(client, USER, "AAPL")
         zombie_id = self._zombie(client)
         result = await control.create_distributed_session(
             client=client, user_id=USER, session_id=zombie_id,
         )
-        assert result["session_status"] == "running"
-        assert result["total_tickers"] == 1
-        assert client.rows("intel_run_tickers")
+        assert result["session_status"] == "failed"
+        assert client.rows("intel_run_tickers") == []
 
     @pytest.mark.asyncio
-    async def test_new_click_adopting_zombie_repairs_it(self):
+    async def test_new_click_adopting_zombie_fails_it_not_reconstructs(self):
         client = FakeSupabase()
         seed_position(client, USER, "AAPL")
         zombie_id = self._zombie(client)
@@ -180,15 +184,16 @@ class TestD2ZombieCreatedSession:
         )
         assert result["run_session_id"] == zombie_id
         assert result["adopted_active_session"] is True
-        assert result["session_status"] == "running"
-        assert result["total_tickers"] == 1
+        assert result["session_status"] == "failed"
+        assert client.rows("intel_run_tickers") == []
 
     @pytest.mark.asyncio
-    async def test_supervisor_repairs_zombie_without_browser_traffic(
+    async def test_supervisor_fails_zombie_without_browser_traffic(
         self, monkeypatch
     ):
-        """A crashed create is repaired by the SUPERVISOR pass alone — no
-        click, no poll, no POST required."""
+        """A crashed create with no frozen scope is failed by the
+        SUPERVISOR pass alone — no click, no poll, no POST required — and
+        is never repaired by reconstructing from current portfolio state."""
         from tests.distributed_run_intel_test_utils import (
             ProviderRecorder, patch_providers,
         )
@@ -203,13 +208,14 @@ class TestD2ZombieCreatedSession:
         )
         await supervisor.run_pass()
         session = client.rows("intel_run_sessions")[0]
-        assert session["status"] == "running"
-        assert client.rows("intel_run_tickers")
+        assert session["status"] == "failed"
+        assert client.rows("intel_run_tickers") == []
 
     @pytest.mark.asyncio
     async def test_repair_terminalizes_session_with_no_scope(self):
-        """When the portfolio scope no longer exists, repair terminalizes
-        honestly instead of looping forever."""
+        """When no frozen scope was ever persisted, repair terminalizes
+        honestly instead of looping forever OR reconstructing a scope from
+        current (possibly nonexistent, possibly changed) portfolio data."""
         client = FakeSupabase()
         self._zombie(client, age_seconds=600)
         supervisor = WorkerSupervisor(
@@ -219,7 +225,7 @@ class TestD2ZombieCreatedSession:
         await supervisor.run_pass()
         session = client.rows("intel_run_sessions")[0]
         assert session["status"] == "failed"
-        assert "scope_unavailable" in str(session.get("last_error"))
+        assert "scope_freeze_incomplete_restart_required" in str(session.get("last_error"))
 
 
 class TestD4FingerprintStability:

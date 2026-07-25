@@ -148,9 +148,13 @@ class TestGetOrCreateContract:
 
 class TestFailClosedCreation:
     @pytest.mark.asyncio
-    async def test_transient_ticker_row_failure_stays_retryable_then_repairs(
+    async def test_transient_ticker_row_failure_leaves_scope_unfrozen_fails_closed(
         self,
     ):
+        """A ticker-row insert failure during creation can leave the frozen
+        scope PARTIAL (some rows persisted, ``holdings_scope`` lists all of
+        them) — repair must fail closed rather than reconstructing the
+        missing rows from the current portfolio."""
         client = FlakyInsertClient(fail_table="intel_run_tickers")
         for ticker in ("AAPL", "MSFT", "GOOGL"):
             seed_position(client, USER, ticker)
@@ -160,19 +164,17 @@ class TestFailClosedCreation:
         )
         # Fail-closed: NOT reported running with a partial scope.
         assert result["session_status"] == "created"
-        assert result.get("reason") == "task_graph_incomplete_retryable" or (
-            (await _session_row(client, session_id)).get("last_error")
-        )
+        rows_after_create = len(client.rows("intel_run_tickers"))
+        assert rows_after_create < 3  # genuinely partial — one insert failed
         client.armed = False
         session = await _session_row(client, session_id)
         repaired = await repair_session_graph(
             client=client, user_id=USER, session=session,
         )
-        assert repaired is True
-        assert (await _session_row(client, session_id))["status"] == "running"
-        assert len(client.rows("intel_run_tickers")) == 3
-        assert _graph_is_complete(client, session_id)
-        assert _no_duplicate_tasks(client, session_id)
+        assert repaired is False
+        assert (await _session_row(client, session_id))["status"] == "failed"
+        # Never grown by reconstructing the missing row from current data.
+        assert len(client.rows("intel_run_tickers")) == rows_after_create
 
     @pytest.mark.asyncio
     async def test_transient_collector_task_failure_stays_retryable_then_repairs(
@@ -202,7 +204,8 @@ class TestRepairAllShapes:
         session_id = str(uuid.uuid4())
         client.table("intel_run_sessions").insert({
             "id": session_id, "user_id": USER, "status": "created",
-            "workflow_version": 2, "holdings_scope": [], "stale_tickers": [],
+            "workflow_version": 2, "holdings_scope": list(with_scope_for),
+            "stale_tickers": [],
             "expected_ticker_job_count": 0, "metrics": {},
             "created_at": "2026-07-21T00:00:00+00:00",
             "updated_at": "2026-07-21T00:00:00+00:00",
@@ -234,22 +237,41 @@ class TestRepairAllShapes:
         assert len(client.rows("intel_run_tasks")) == before
 
     @pytest.mark.asyncio
-    async def test_shape_session_row_only(self):
+    async def test_shape_session_row_only_fails_never_reconstructed(self):
+        """Zero frozen ticker rows means the crash happened before scope
+        freeze ever persisted — repair must fail, never rebuild the scope
+        from the CURRENT portfolio (which may have since changed)."""
         client = FakeSupabase()
         for ticker in ("AAPL", "MSFT"):
             seed_position(client, USER, ticker)
-        session_id = self._bare_session(client)
-        await self._assert_converged(client, session_id)
-        assert len(client.rows("intel_run_tickers")) == 2
+        session_id = self._bare_session(client)  # no frozen rows at all
+        session = await _session_row(client, session_id)
+        repaired = await repair_session_graph(
+            client=client, user_id=USER, session=session,
+        )
+        assert repaired is False
+        updated = await _session_row(client, session_id)
+        assert updated["status"] == "failed"
+        assert "scope_freeze_incomplete_restart_required" in str(updated.get("last_error"))
+        assert client.rows("intel_run_tickers") == []
+        assert client.rows("intel_run_tasks") == []
 
     @pytest.mark.asyncio
-    async def test_shape_some_ticker_rows_no_tasks(self):
+    async def test_frozen_scope_never_grows_to_match_current_portfolio(self):
+        """Only AAPL was frozen at session-creation time even though the
+        CURRENT portfolio now also holds MSFT/GOOGL — repair must seed
+        tasks for AAPL only and never add the newer tickers to the frozen
+        scope."""
         client = FakeSupabase()
-        for ticker in ("AAPL", "MSFT", "GOOGL"):
-            seed_position(client, USER, ticker)
+        seed_position(client, USER, "AAPL")
         session_id = self._bare_session(client, with_scope_for=["AAPL"])
+        # Positions changed AFTER the scope froze.
+        seed_position(client, USER, "MSFT")
+        seed_position(client, USER, "GOOGL")
         await self._assert_converged(client, session_id)
-        assert len(client.rows("intel_run_tickers")) == 3
+        assert len(client.rows("intel_run_tickers")) == 1
+        session = await _session_row(client, session_id)
+        assert session["holdings_scope"] == ["AAPL"]
 
     @pytest.mark.asyncio
     async def test_shape_all_ticker_rows_no_tasks(self):
@@ -298,6 +320,99 @@ class TestRepairAllShapes:
                 task_type=TASK_COLLECT_EVIDENCE_LANE, ticker="AAPL", lane=lane,
             )
         await self._assert_converged(client, session_id)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_frozen_ticker_rows_fail_closed(self):
+        client = FakeSupabase()
+        seed_position(client, USER, "AAPL")
+        session_id = self._bare_session(client, with_scope_for=["AAPL"])
+        # A second, duplicate frozen row for the same ticker (contradictory
+        # durable state — bypasses the fake's own unique-index emulation the
+        # same way a genuinely corrupted row would bypass a real one) —
+        # never silently deduplicated or repaired.
+        client.store["intel_run_tickers"].append({
+            "id": str(uuid.uuid4()), "run_session_id": session_id,
+            "user_id": USER, "ticker": "AAPL", "asset_type": "equity",
+            "state": "pending", "priority": 50,
+            "required_lanes": ["price", "technicals", "fundamentals"],
+        })
+        session = await _session_row(client, session_id)
+        repaired = await repair_session_graph(
+            client=client, user_id=USER, session=session,
+        )
+        assert repaired is False
+        assert (await _session_row(client, session_id))["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_malformed_asset_type_fails_closed(self):
+        session_id = str(uuid.uuid4())
+        client = FakeSupabase()
+        client.table("intel_run_sessions").insert({
+            "id": session_id, "user_id": USER, "status": "created",
+            "workflow_version": 2, "holdings_scope": ["AAPL"],
+            "stale_tickers": [], "expected_ticker_job_count": 0, "metrics": {},
+            "created_at": "2026-07-21T00:00:00+00:00",
+            "updated_at": "2026-07-21T00:00:00+00:00",
+        }).execute()
+        client.table("intel_run_tickers").insert({
+            "id": str(uuid.uuid4()), "run_session_id": session_id,
+            "user_id": USER, "ticker": "AAPL", "asset_type": "not_a_real_type",
+            "state": "pending", "priority": 50,
+            "required_lanes": [],
+        }).execute()
+        session = await _session_row(client, session_id)
+        repaired = await repair_session_graph(
+            client=client, user_id=USER, session=session,
+        )
+        assert repaired is False
+        assert (await _session_row(client, session_id))["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_holdings_scope_ticker_row_mismatch_fails_closed(self):
+        """holdings_scope claims two tickers but only one has a frozen
+        row — a contradictory partial state that must fail, not repair."""
+        client = FakeSupabase()
+        seed_position(client, USER, "AAPL")
+        session_id = str(uuid.uuid4())
+        client.table("intel_run_sessions").insert({
+            "id": session_id, "user_id": USER, "status": "created",
+            "workflow_version": 2, "holdings_scope": ["AAPL", "MSFT"],
+            "stale_tickers": [], "expected_ticker_job_count": 0, "metrics": {},
+            "created_at": "2026-07-21T00:00:00+00:00",
+            "updated_at": "2026-07-21T00:00:00+00:00",
+        }).execute()
+        client.table("intel_run_tickers").insert({
+            "id": str(uuid.uuid4()), "run_session_id": session_id,
+            "user_id": USER, "ticker": "AAPL", "asset_type": "equity",
+            "state": "pending", "priority": 50,
+            "required_lanes": ["price", "technicals", "fundamentals"],
+        }).execute()
+        session = await _session_row(client, session_id)
+        repaired = await repair_session_graph(
+            client=client, user_id=USER, session=session,
+        )
+        assert repaired is False
+        assert (await _session_row(client, session_id))["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_repair_makes_zero_truth_provider_or_llm_calls(self, monkeypatch):
+        """Repair never re-runs the financial-truth baseline, never touches
+        PortfolioService, and never calls a provider/LLM — it only reads
+        the durable frozen ticker rows and seeds missing tasks."""
+
+        def _forbidden(*_a, **_kw):
+            raise AssertionError("repair must never call this")
+
+        monkeypatch.setattr(control, "run_financial_truth_baseline_strict", _forbidden)
+        monkeypatch.setattr(control, "PortfolioService", _forbidden)
+        client = FakeSupabase()
+        seed_position(client, USER, "AAPL")
+        session_id = self._bare_session(client, with_scope_for=["AAPL"])
+        session = await _session_row(client, session_id)
+        repaired = await repair_session_graph(
+            client=client, user_id=USER, session=session,
+        )
+        assert repaired is True
 
     @pytest.mark.asyncio
     async def test_duplicate_retry_after_successful_creation_is_noop(self):

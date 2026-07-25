@@ -269,6 +269,86 @@ async def test_position_query_failure_blocks_not_reported_as_empty_scope(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_missing_cash_balance_refreshes_once_then_fails_closed(monkeypatch):
+    """A snapshot with no cash_balance triggers the existing one-refresh
+    attempt (same budget as stale/unavailable); if the refreshed snapshot
+    STILL has no usable cash_balance, the preflight fails closed as
+    portfolio_truth_unavailable rather than guessing cash is zero. No
+    session or tasks may be created."""
+    client = FakeSupabase()
+    seed_golden_portfolio(client, USER)
+    client.rows("portfolio_snapshots")[0]["cash_balance"] = None
+
+    class _RefreshWithoutFixingCash:
+        calls = 0
+
+        def __init__(self, *, user_id, client=None, **_kw):
+            pass
+
+        async def create_snapshot(self):
+            _RefreshWithoutFixingCash.calls += 1
+            return {}
+
+    monkeypatch.setattr(control, "PortfolioService", _RefreshWithoutFixingCash)
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    assert _RefreshWithoutFixingCash.calls == 1
+    assert result["session_status"] == "not_created"
+    assert result["code"] == "portfolio_truth_unavailable"
+    assert client.rows("intel_run_sessions") == []
+    assert client.rows("intel_run_tasks") == []
+
+
+@pytest.mark.asyncio
+async def test_nan_cash_balance_blocks_without_being_treated_as_zero(monkeypatch):
+    client = FakeSupabase()
+    seed_golden_portfolio(client, USER)
+    client.rows("portfolio_snapshots")[0]["cash_balance"] = float("nan")
+    monkeypatch.setattr(control, "PortfolioService", _FakeNoOpRefreshService)
+
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    assert result["code"] == "portfolio_truth_unavailable"
+    assert client.rows("intel_run_sessions") == []
+
+
+@pytest.mark.asyncio
+async def test_valid_cash_balance_reconciles_and_creates_session():
+    """A fresh snapshot with real cash on top of positions reconciles the
+    invested value against positions and creates a session normally."""
+    client = FakeSupabase()
+    seed_position(client, USER, "AAPL", shares=500.0, avg_cost=150.0, close_price=200.0)
+    snap = client.rows("portfolio_snapshots")[0]
+    snap["cash_balance"] = 2_737.50
+    snap["total_equity"] = 100_000.0 + 2_737.50  # 500 * 200 invested + cash
+
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    assert result["created"] is True
+    preflight = client.rows("intel_run_sessions")[0]["metrics"]["preflight"]
+    assert preflight["reconciliation_status"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_negative_cash_balance_is_arithmetic_not_coerced_and_creates_session():
+    client = FakeSupabase()
+    seed_position(client, USER, "AAPL", shares=500.0, avg_cost=150.0, close_price=200.0)
+    snap = client.rows("portfolio_snapshots")[0]
+    snap["cash_balance"] = -500.0
+    snap["total_equity"] = 100_000.0 - 500.0  # 500 * 200 invested minus overdrawn cash
+
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    assert result["created"] is True
+    preflight = client.rows("intel_run_sessions")[0]["metrics"]["preflight"]
+    assert preflight["reconciliation_status"] == "pass"
+
+
+@pytest.mark.asyncio
 async def test_frozen_scope_values_come_from_the_passed_preflight_result():
     client = FakeSupabase()
     seed_position(client, USER, "AAPL", shares=10.0, avg_cost=100.0, close_price=150.0)

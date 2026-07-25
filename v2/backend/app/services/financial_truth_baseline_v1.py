@@ -7,6 +7,7 @@ portfolio value, cost basis, and recommendation inputs can be trusted.
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -110,6 +111,13 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _finite_float(val: Any) -> float | None:
+    """Same as ``_safe_float`` but also rejects NaN/±infinity — a value that
+    parses but isn't finite is arithmetic garbage, never usable truth."""
+    v = _safe_float(val)
+    return v if v is not None and math.isfinite(v) else None
+
+
 def _pct_diff(a: float, b: float) -> float | None:
     if abs(b) < _NEAR_ZERO:
         return None
@@ -126,6 +134,8 @@ def _snapshot_truth(rows: list[dict]) -> dict[str, Any]:
             "latest_snapshot_at": None,
             "latest_portfolio_value": None,
             "latest_cost_basis": None,
+            "latest_cash_balance": None,
+            "snapshot_invested_value": None,
             "snapshot_age_hours": None,
             "snapshot_is_stale": None,
             "snapshot_count": 0,
@@ -136,22 +146,34 @@ def _snapshot_truth(rows: list[dict]) -> dict[str, Any]:
     snapshot_at = _parse_dt(row.get("snapshot_at"))
     age_hours = _hours_since(snapshot_at)
     is_stale = (age_hours is not None and age_hours > SNAPSHOT_STALE_HOURS)
-    total_equity = _safe_float(row.get("total_equity"))
+    total_equity = _finite_float(row.get("total_equity"))
     total_cost = _safe_float(row.get("total_cost"))
+    # cash_balance is arithmetic data, not a truthy flag — 0.0 and negative
+    # finite values are legitimate and must never be coerced away.
+    cash_balance = _finite_float(row.get("cash_balance"))
+    invested_value = (
+        round(total_equity - cash_balance, 2)
+        if total_equity is not None and cash_balance is not None
+        else None
+    )
 
     warnings: list[str] = []
     if is_stale:
         warnings.append(f"snapshot_stale: last snapshot {age_hours:.1f}h ago (threshold {SNAPSHOT_STALE_HOURS}h)")
     if total_equity is None:
-        warnings.append("portfolio_value_null: total_equity is null in latest snapshot")
+        warnings.append("portfolio_value_null: total_equity is null or non-finite in latest snapshot")
     if total_cost is None:
         warnings.append("cost_basis_null: total_cost is null in latest snapshot")
+    if cash_balance is None:
+        warnings.append("cash_balance_null: cash_balance is missing or non-finite in latest snapshot")
 
     return {
         "status": "ok",
         "latest_snapshot_at": row.get("snapshot_at"),
         "latest_portfolio_value": total_equity,
         "latest_cost_basis": total_cost,
+        "latest_cash_balance": cash_balance,
+        "snapshot_invested_value": invested_value,
         "snapshot_age_hours": age_hours,
         "snapshot_is_stale": is_stale,
         "snapshot_count": len(rows),
@@ -447,20 +469,30 @@ def _intel_truth(
 # ── Section 6: Reconciliation ─────────────────────────────────────────────────
 
 def _reconciliation(
-    snapshot_value: float | None,
+    snapshot_portfolio_value: float | None,
+    snapshot_cash_balance: float | None,
+    snapshot_invested_value: float | None,
     position_mv: float | None,
 ) -> dict[str, Any]:
+    """Compares the snapshot's INVESTED value (``total_equity -
+    cash_balance``) against position-derived market value — the snapshot's
+    raw ``total_equity`` includes cash and must never be compared directly
+    against a positions-only sum."""
     blockers: list[str] = []
     warnings: list[str] = []
 
-    if snapshot_value is None:
-        blockers.append("snapshot_value_unavailable")
+    if snapshot_invested_value is None:
+        blockers.append(
+            "snapshot_invested_value_unavailable: total_equity or cash_balance missing/non-finite"
+        )
     if position_mv is None:
         blockers.append("position_market_value_unavailable: requires current prices for all open positions")
 
     if blockers:
         return {
-            "snapshot_portfolio_value": snapshot_value,
+            "snapshot_portfolio_value": snapshot_portfolio_value,
+            "snapshot_cash_balance": snapshot_cash_balance,
+            "snapshot_invested_value": snapshot_invested_value,
             "position_derived_market_value": position_mv,
             "absolute_difference": None,
             "percentage_difference": None,
@@ -469,8 +501,8 @@ def _reconciliation(
             "warnings": warnings,
         }
 
-    abs_diff = round(abs(snapshot_value - position_mv), 2)
-    pct = _pct_diff(snapshot_value, position_mv)
+    abs_diff = round(abs(snapshot_invested_value - position_mv), 2)
+    pct = _pct_diff(snapshot_invested_value, position_mv)
 
     if pct is None:
         rec_status = "unavailable"
@@ -480,18 +512,20 @@ def _reconciliation(
     elif pct <= RECONCILIATION_DEGRADED_PCT:
         rec_status = "degraded"
         warnings.append(
-            f"values_differ: snapshot={snapshot_value:.2f} vs position_mv={position_mv:.2f} "
+            f"values_differ: snapshot_invested={snapshot_invested_value:.2f} vs position_mv={position_mv:.2f} "
             f"({pct:.2f}% — exceeds certified threshold of {RECONCILIATION_CERTIFIED_PCT}%)"
         )
     else:
         rec_status = "blocked"
         warnings.append(
-            f"values_diverge_critically: snapshot={snapshot_value:.2f} vs position_mv={position_mv:.2f} "
+            f"values_diverge_critically: snapshot_invested={snapshot_invested_value:.2f} vs position_mv={position_mv:.2f} "
             f"({pct:.2f}% — exceeds degraded threshold of {RECONCILIATION_DEGRADED_PCT}%)"
         )
 
     return {
-        "snapshot_portfolio_value": snapshot_value,
+        "snapshot_portfolio_value": snapshot_portfolio_value,
+        "snapshot_cash_balance": snapshot_cash_balance,
+        "snapshot_invested_value": snapshot_invested_value,
         "position_derived_market_value": position_mv,
         "absolute_difference": abs_diff,
         "percentage_difference": pct,
@@ -634,7 +668,7 @@ async def _gather_truth_sections(db_client: Any, user_id: str) -> dict[str, Any]
     try:
         snap_res = (
             db_client.table("portfolio_snapshots")
-            .select("id,snapshot_at,total_equity,total_cost,total_pnl,total_pnl_pct,created_at")
+            .select("id,snapshot_at,total_equity,total_cost,total_pnl,total_pnl_pct,cash_balance,created_at")
             .eq("user_id", user_id)
             .order("snapshot_at", desc=True)
             .execute()
@@ -649,6 +683,8 @@ async def _gather_truth_sections(db_client: Any, user_id: str) -> dict[str, Any]
             "latest_snapshot_at": None,
             "latest_portfolio_value": None,
             "latest_cost_basis": None,
+            "latest_cash_balance": None,
+            "snapshot_invested_value": None,
             "snapshot_age_hours": None,
             "snapshot_is_stale": None,
             "snapshot_count": 0,
@@ -758,9 +794,12 @@ async def _gather_truth_sections(db_client: Any, user_id: str) -> dict[str, Any]
     intel_section = _intel_truth(rec_rows, agent_rows, intel_snap_rows, intel_snap_available)
 
     # ── 6. Reconciliation ─────────────────────────────────────────────────────
-    snapshot_value = snap_section.get("latest_portfolio_value")
-    position_mv = pos_section.get("market_value_sum")
-    recon_section = _reconciliation(snapshot_value, position_mv)
+    recon_section = _reconciliation(
+        snap_section.get("latest_portfolio_value"),
+        snap_section.get("latest_cash_balance"),
+        snap_section.get("snapshot_invested_value"),
+        pos_section.get("market_value_sum"),
+    )
 
     # ── 7. Verdict ────────────────────────────────────────────────────────────
     verdict_section = _verdict(snap_section, pos_section, tx_section, price_section, intel_section, recon_section)

@@ -1,7 +1,7 @@
 # HANDOFF — Current Repo State
 
 Last updated: 2026-07-25 (Deterministic conflict handling / review-LLM
-deletion, PR #TBD — IN PROGRESS. Deletes the conditional Sonnet/Haiku review
+deletion, PR #487 — IN PROGRESS. Deletes the conditional Sonnet/Haiku review
 LLM (`REVIEW_SYSTEM_PROMPT`, `execute_review_task`, `WorkerSupervisor.review_llm`,
 `intel_v3_distributed_review_model`/`_fallback_model`) and replaces it with a
 small deterministic policy (`conflict_policy_v1.py`, ≤180 lines): the SAME
@@ -366,7 +366,7 @@ separate PRs:
    remains NOT runtime-proven — unchanged, still deferred to the single
    final certification run (item 5 in the reduced finish plan).
 3. Deterministic conflict handling / review-LLM deletion — **IN PROGRESS —
-   PR #TBD** (this entry, see the reduced finish plan above). Deletes the
+   PR #487** (this entry, see the reduced finish plan above). Deletes the
    conditional Sonnet/Haiku review LLM (why 5 of 7 reviews failed —
    prompts/model routing/retry behavior are no longer a runtime concern
    because there is no LLM call to fail) rather than repairing it: a small

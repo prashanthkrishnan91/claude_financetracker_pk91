@@ -64,7 +64,8 @@ Worker supervisor loop (until no active v2 session):
      ├─ collectors fan out per (ticker, lane)   [ticker-scoped only]
      ├─ evidence bundles build per ticker as lanes go terminal
      ├─ specialist batches form (asset-compatible, ≤5 tickers) per axis
-     ├─ conditional review tasks on deterministic conflict rules
+     ├─ conditional deterministic conflict-resolution tasks (`conflict_policy_v1`
+     │   — zero LLM calls; the conditional review LLM was deleted, not repaired)
      ├─ ticker decisions (deterministic; durable evidence writeback)
      └─ portfolio join + certification + ONE session-linked snapshot
   claim tasks (SQL atomic claim w/ lease) → execute → mark terminal
@@ -177,7 +178,7 @@ anything.
 | collect_evidence_lane | ticker+lane | none | normalized lane evidence (existing lane runners / per-ticker fetchers); artifact id in `output.artifact_id` for SEC/ETF/macro lanes (`output_ref` is legacy/internal — PR 2 lineage never derives from it; see §7a) |
 | build_evidence_bundle | ticker | all required lanes terminal | immutable bundle on `intel_run_tickers.evidence_bundle` + fingerprint; state → evidence_ready |
 | specialist_analysis | batch+axis | bundles of batch tickers ready | one `intel_run_specialist_outputs` row per ticker in batch |
-| review_conflict | ticker | conflicting specialist outputs (deterministic trigger) | axis='review' output row |
+| review_conflict | ticker | conflicting specialist outputs (deterministic trigger, `conflict_policy_v1.assess_conflict`) | axis='review' output row — deterministic resolution, zero LLM calls |
 | ticker_decision | ticker | required axes terminal (or exhausted) | durable evidence writeback (agent_runs/agent_insights/recommendations) + deterministic `decide()` record on ticker row |
 | portfolio_join_publish | session | all tickers terminal | ONE session-linked certified snapshot; session terminal state |
 
@@ -336,23 +337,27 @@ rebuilt via the SAME `axis_evidence_context` helper from the CURRENT
 session's own bundle lineage, so a reused result can never carry forward a
 prior session's task ids as current provenance.
 
-**Review-derived lineage.** Only VALID non-review specialist rows (score AND
-confidence both present) are reviewable inputs. A successful `review_conflict`
-output's `evidence_refs` is a derived manifest (`derived_from_axes`,
-`missing_ref_axes`, `status`, `refs`) built from each input's INDEPENDENTLY
-RE-VALIDATED manifest (never trusted from its persisted status) — it unions
-and deduplicates their valid references and never fabricates a new source.
-`full` only when every reconciled input's own re-derived lineage was `full`.
-The review prompt itself carries, per reviewed axis: stance/score/confidence,
-bounded findings/risks, `lineage_status`, `linked_lanes`, `missing_ref_lanes`
-and a bounded source projection — never a raw payload or an invitation to
-invent a citation. The persisted `input_fingerprint` (previously always `""`)
-is built from the EXACT normalized/bounded prompt input the LLM saw, plus
-ticker and prompt version, sorted for order-independence — it changes when
-any reviewed finding, risk, score, confidence, lineage status, missing lane,
-or source identity visible to the review changes. Review model, token
-budget, retry logic, fallback behavior and call count are all UNCHANGED —
-PR 3 still owns review reliability.
+**Conflict-resolution-derived lineage (PR 3: the review LLM is DELETED, not
+repaired).** Only VALID non-review specialist rows (score AND confidence both
+present) participate in `conflict_policy_v1.assess_conflict` and in a
+successful `review_conflict` output's derived lineage. The persisted
+`evidence_refs` manifest (`derived_from_axes`, `missing_ref_axes`, `status`,
+`refs`) is built from each input's INDEPENDENTLY RE-VALIDATED manifest (never
+trusted from its persisted status) via `source_lineage_v1.build_review_prompt_
+context`/`build_review_lineage_manifest` — now purely as deterministic
+audit/fingerprint material, since no LLM ever sees them. `full` only when
+every reconciled input's own re-derived lineage was `full`. The persisted
+`input_fingerprint` is `conflict_policy_v1.conflict_fingerprint` — the ONE
+function the executor, the decision reader, and the trust contract all call,
+covering ticker, schema version, the exact bounded prompt context, the
+conflict assessment, and safely normalized major-position state; it changes
+when any reviewed finding, risk, score, confidence, lineage status, missing
+lane, source identity, or major-position state changes.
+There is no review model, token budget, retry logic, or fallback behavior
+left to own — `execute_conflict_resolution_task` makes ZERO calls to
+`llm.ask_json` or any other provider; the directional signal is neutralized
+to HOLD and confidence is capped at 0.49 by `conflict_policy_v1`, and
+`decision_policy_v1.decide()` remains the only visible-action authority.
 
 **Fingerprint correctness.** The bundle's `input_fingerprint` never hashes
 raw source-reference objects (they carry internal replay locators — task_id,
@@ -429,12 +434,58 @@ only that ticker's axis; valid tickers persist. LLM reuse: an existing output
 for (user, ticker, axis) with the same `input_fingerprint` and unexpired
 `valid_until` is copied into the session instead of a new LLM call.
 
-Review agent (`review_conflict`): created ONLY when deterministic rules fire —
-score spread across required axes > 1.0 with confidence ≥ 0.6 on both sides;
-or a strong negative axis (score ≤ -0.5) opposing a strong positive axis for a
-holding with weight ≥ 5%; or required-axis confidence < 0.3 on a ≥5% holding.
-It consumes specialist outputs + cited refs, fetches nothing, and its output is
-one more advisory row (axis='review') — it cannot set actions.
+Deterministic conflict resolution (`review_conflict`, PR 3 — no LLM): created
+ONLY when `conflict_policy_v1.assess_conflict` fires — score spread across
+required axes > 1.0 with confidence ≥ 0.6 on both sides; or a strong negative
+axis (score ≤ -0.5) opposing a strong positive axis for a holding with weight
+≥ 5%; or required-axis confidence < 0.3 on a ≥5% holding (thresholds moved
+verbatim from the prior `run_scheduler_v1.should_review`, now a thin delegator
+to the same single authority). The task recomputes the SAME assessment from
+the SAME immutable inputs, fails closed (`conflict_task_without_conflict`) if
+they no longer meet the contract, and persists one advisory row
+(axis='review', stance='neutral', score=0.0, confidence=0.49,
+model=prompt_version='deterministic_conflict_policy_v1') — it cannot set
+actions. `aggregate_advisory_signal` in `decision_tasks_v1` aggregates only
+non-review outputs (via `conflict_policy_v1.normalize_valid_inputs`, which it
+enforces itself and always excludes `axis=review` even if a caller passes
+the full output list); when a valid deterministic conflict row exists, the
+post-conflict `advisory_signal` (HOLD, confidence capped at 0.49) is what
+`decide()` sees, while the ordinary `pre_conflict_advisory_signal` is
+preserved alongside it in the decision audit record for replay.
+
+**Strict activation contract (PR 3 round 2).** A deterministic row may alter
+`advisory_signal` ONLY when ALL of: its `TASK_REVIEW_CONFLICT` task is
+`TASK_SUCCEEDED`; exactly one `axis=review` row exists; model/prompt_version/
+stance/score/confidence match the deterministic shape exactly; its lineage
+validates against the CURRENT strict-normalized non-review inputs; the
+assessment recomputed from those current inputs still has
+`conflict_detected=true`; and its `input_fingerprint` equals
+`conflict_policy_v1.conflict_fingerprint` recomputed fresh.
+`decision_tasks_v1.resolve_conflict_advisory` and
+`run_trust_contract_v1._has_valid_review_output` both call this same
+contract (`conflict_policy_v1.validate_current_conflict_row`) — a pending/
+failed/orphaned/stale/forged row never neutralizes a decision and never
+reads as a successful trust-contract review. A genuine historical
+(pre-deterministic) LLM review row keeps its original simple validity gate —
+never reinterpreted under current rules.
+
+**Historical replay truth.** An already-decided ticker's retry path
+(`_replay_persisted_decision`) rebuilds the verdict/aggregate from the
+PERSISTED decision audit record (`advisory_signal`, `decision_input`) —
+`decide()` and `resolve_conflict_advisory` are never re-run, so a historical
+LLM-reviewed decision replays its exact action even if current specialist
+inputs would newly conflict under today's rules.
+
+**Method-neutral UI copy.** The `conflict_review_status` vocabulary is
+shared across historical LLM-reviewed and new deterministic holdings, so its
+labels are truthful for either generation: "Specialist signal handling
+completed/could not complete safely/is still pending for this holding";
+"No specialist conflict or low-confidence case was detected" (not_required);
+session line "N specialist conflict or low-confidence cases — M completed,
+K failed". Disagreement-vs-low-confidence wording
+(`conflict_policy_v1.conflict_summary_sentence`) is truthful and only names
+axes actually implicated, via a bounded axis-display map (never a raw schema
+identifier).
 
 ## 9. ONE final deterministic decision authority + session-native publication
 
@@ -558,30 +609,32 @@ Env vars (all additive):
 - `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` becomes irrelevant to Run Intel
   (documented; retained for nothing new).
 
-### Model cost routing (specialist Haiku, conditional review Sonnet)
+### Model cost routing (specialist Haiku only — conflict resolution has no model)
 
-`WorkerSupervisor` builds two separate `LLMClient` instances instead of one
-shared client — standard specialist analysis never auto-escalates to the
-more expensive review model:
+`WorkerSupervisor` builds ONE `LLMClient` instance, for specialist analysis
+only. There is no `review_llm` property, no Sonnet client, and no fallback
+model for conflict handling — `TASK_REVIEW_CONFLICT` is executed as ordinary
+deterministic work (no LLM semaphore, no `llm_calls`/per-model metrics; one
+compact `deterministic_conflicts_resolved` counter instead):
 
 - `specialist_llm` (`TASK_SPECIALIST_ANALYSIS`) — `intel_v3_distributed_specialist_model`
   (default `claude-haiku-4-5-20251001`), fallback disabled. A specialist
   failure retries the durable task on the same model; it never falls back to
   Sonnet.
-- `review_llm` (`TASK_REVIEW_CONFLICT`) — `intel_v3_distributed_review_model`
-  (default `claude-sonnet-5`), falling back once to
-  `intel_v3_distributed_review_fallback_model` (default
-  `claude-haiku-4-5-20251001`).
 - `decision_policy_v1.decide()` remains the only visible Buy/Hold/Trim/Sell
-  authority regardless of which model produced the advisory specialist/review
-  signal. `TASK_TICKER_DECISION` and publication never touch an LLM client.
+  authority regardless of which model produced the advisory specialist
+  signal. `TASK_TICKER_DECISION`, `TASK_REVIEW_CONFLICT`, and publication
+  never touch an LLM client.
+
+`intel_v3_distributed_review_model` / `intel_v3_distributed_review_fallback_model`
+and their env vars (`INTEL_V3_DISTRIBUTED_REVIEW_MODEL` /
+`INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL`) are DELETED — no remaining
+runtime consumer.
 
 Env vars (all additive; existing deployments work unchanged without setting
 any of them):
 
 - `INTEL_V3_DISTRIBUTED_SPECIALIST_MODEL` (default `claude-haiku-4-5-20251001`)
-- `INTEL_V3_DISTRIBUTED_REVIEW_MODEL` (default `claude-sonnet-5`)
-- `INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL` (default `claude-haiku-4-5-20251001`)
 
 `LLMClient.fallback_model` is now `Optional[str]`: no fallback is attempted
 when it is `None`, empty, or identical to the primary model. Legacy callers
@@ -650,8 +703,9 @@ Superseded data: unfinished v1 sessions → `superseded` by migration 027.
 4. Cache/freshness: TTL reuse, fingerprint invalidation, no duplicate LLM.
 5. Specialist batching: asset-compatible, bounded, bundle-complete, per-ticker
    persistence, malformed-ticker isolation, zero provider calls.
-6. Conditional review: aligned → no review; conflict → review; review cannot
-   set action.
+6. Deterministic conflict handling (PR 3, no LLM): aligned → no conflict
+   task; conflict → deterministic resolution neutralizes the directional
+   signal to HOLD and caps confidence at 0.49; it cannot set TRIM/SELL/BUY.
 7. Deterministic authority: actions only from `decide()`; LLM cannot override;
    missing evidence → suppression/NO CALL, not fabricated freshness.
 8. Failure isolation (34 holdings): lane/specialist/ticker/worker-crash/

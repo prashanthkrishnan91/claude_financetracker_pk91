@@ -47,24 +47,27 @@ A terminal task is not proof of anything by itself:
   * a conflict review "succeeds" only when its task reached
     ``TASK_SUCCEEDED`` AND a valid persisted ``axis=review`` output exists.
     ``TASK_DEGRADED`` is never review success. A terminal-success task with
-    no valid review output is FAILED (succeeded-without-output).
+    no valid review output is FAILED. A ``deterministic_conflict_policy_v1``
+    -tagged row additionally must pass
+    ``conflict_policy_v1.validate_current_conflict_row`` — stale/forged/
+    mismatched is FAILED. A genuine historical LLM review row keeps its
+    original validity gate untouched — never rewritten or reinterpreted.
 
 ## Source lineage
 
-Lineage is evaluated over every VALID output that actually feeds
-``aggregate_advisory_signal`` for a ticker — every tracked axis output AND
-the review output when one exists (aggregate_advisory_signal is called with
-the full output set, review included). Per ticker this yields one of
-``full`` (every decision-influencing output has a source reference),
-``partial`` (some but not all do) or ``missing`` (none do, or there are no
-valid decision-influencing outputs at all). ``source_validated`` requires
-``full`` — never merely "at least one axis has a reference somewhere".
+Lineage is evaluated over every VALID output recorded for a ticker — every
+tracked axis output AND the review output when one exists. Per ticker this
+yields one of ``full`` (every decision-influencing output has a source
+reference), ``partial`` (some but not all do) or ``missing`` (none do, or
+there are no valid decision-influencing outputs at all). ``source_validated``
+requires ``full``.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import conflict_policy_v1
 from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
 from .task_contracts_v1 import (
@@ -367,6 +370,29 @@ def _readiness_label(status: str, confidence: Optional[float]) -> str:
     return READINESS_MISSING
 
 
+def _has_valid_review_output(
+    review_row: Optional[dict[str, Any]],
+    *,
+    ticker: str,
+    non_review_outputs_valid: list[dict[str, Any]],
+    task_succeeded: bool,
+    weight_pct: Optional[float],
+) -> bool:
+    """Legacy (pre-deterministic) rows keep the ORIGINAL validity gate —
+    never reinterpreted. A ``deterministic_conflict_policy_v1``-tagged row
+    counts as successful ONLY when it is a CURRENT, valid resolution."""
+    if review_row is None:
+        return False
+    if str(review_row.get("model") or "") != conflict_policy_v1.SCHEMA_VERSION:
+        return True
+    if not task_succeeded:
+        return False
+    return conflict_policy_v1.validate_current_conflict_row(
+        review_row, ticker=ticker, non_review_outputs=non_review_outputs_valid,
+        weight_pct=weight_pct,
+    ) is not None
+
+
 def _lineage_status_for_outputs(outputs: list[dict[str, Any]]) -> str:
     """Per-ticker lineage over every decision-influencing output.
 
@@ -424,10 +450,10 @@ def build_run_trust_contract(
     valid_outputs_by_ticker_all_axes: dict[str, list[dict[str, Any]]] = {}
     valid_outputs_by_ticker_tracked_axes: dict[str, list[dict[str, Any]]] = {}
     for output in specialist_outputs:
-        if not _is_valid_output(output):
-            continue
         ticker = str(output.get("ticker") or "")
         axis = str(output.get("axis") or "")
+        if not _is_valid_output(output):
+            continue
         valid_outputs_by_ticker_axis[(ticker, axis)] = output
         valid_outputs_by_ticker_all_axes.setdefault(ticker, []).append(output)
         if axis != AXIS_REVIEW:
@@ -471,7 +497,19 @@ def build_run_trust_contract(
             )
             for axis in TRACKED_AXES
         }
-        has_valid_review_output = (ticker, AXIS_REVIEW) in valid_outputs_by_ticker_axis
+        review_row = valid_outputs_by_ticker_axis.get((ticker, AXIS_REVIEW))
+        review_task_succeeded = any(
+            str(t.get("task_type") or "") == TASK_REVIEW_CONFLICT
+            and str(t.get("ticker") or "") == ticker
+            and str(t.get("state") or "") == TASK_SUCCEEDED
+            for t in tasks
+        )
+        has_valid_review_output = _has_valid_review_output(
+            review_row, ticker=ticker,
+            non_review_outputs_valid=valid_outputs_by_ticker_tracked_axes.get(ticker, []),
+            task_succeeded=review_task_succeeded,
+            weight_pct=row.get("portfolio_weight_pct"),
+        )
         review_status_by_ticker[ticker] = _review_status_for_ticker(
             tasks, ticker, has_valid_review_output=has_valid_review_output,
         )

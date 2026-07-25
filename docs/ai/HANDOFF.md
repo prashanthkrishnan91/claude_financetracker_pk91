@@ -1,6 +1,30 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-24 (Run Intel source-reference lineage PR 2/7, patched
+Last updated: 2026-07-25 (Deterministic conflict handling / review-LLM
+deletion, PR #487 — IN PROGRESS. Deletes the conditional Sonnet/Haiku review
+LLM (`REVIEW_SYSTEM_PROMPT`, `execute_review_task`, `WorkerSupervisor.review_llm`,
+`intel_v3_distributed_review_model`/`_fallback_model`) and replaces it with a
+small deterministic policy (`conflict_policy_v1.py`, ≤180 lines): the SAME
+review-trigger thresholds (moved from `run_scheduler_v1.should_review`, now a
+thin delegator), deterministic conflict assessment, and a fixed guardrail —
+directional signal neutralized to HOLD, confidence capped at 0.49. The
+`TASK_REVIEW_CONFLICT` task type, `axis="review"` output row, existing DB
+schema, `conflict_review_status` vocabulary, and source-lineage review
+manifest are all REINTERPRETED (not replaced) as deterministic conflict
+resolution — `execute_conflict_resolution_task` reuses `source_lineage_v1`'s
+existing review-input/lineage helpers purely as audit material, makes ZERO
+`llm.ask_json`/provider calls, and fails closed
+(`conflict_task_without_conflict`) if a durable conflict task's current
+inputs no longer show a conflict. `decision_tasks_v1.aggregate_advisory_signal`
+now aggregates only non-review outputs; a valid deterministic conflict row
+overlays `advisory_signal` (HOLD, confidence ≤ 0.49) onto the ordinary
+`pre_conflict_advisory_signal`, both preserved in the decision audit record.
+`decision_policy_v1.decide()` is UNTOUCHED and remains the only visible-action
+authority — existing portfolio-fit/risk priority still independently produces
+TRIM/SELL over a neutralized conflict signal. See the reduced finish plan
+below — this entry is item 3.)
+
+Previously (2026-07-24, Run Intel source-reference lineage PR 2/7, patched
 same-PR TWICE — makes `evidence_bundle.source_refs`/specialist
 `evidence_refs`/review `evidence_refs` genuinely source-linked instead of
 PR 1's honest "0 of N", then closes six release-blocker semantic gaps
@@ -9,8 +33,7 @@ PR 1's honest "0 of N", then closes six release-blocker semantic gaps
 supplied-lane precision, terminal-task-outcome vs effective-evidence
 separation, internal-artifact-id-free fingerprints, one normalized
 review-prompt/fingerprint object, and derived (never self-asserted) review
-manifest validation. See the locked seven-PR sequence below — this entry is
-PR 2.)
+manifest validation.)
 
 Previously (2026-07-23, Run Intel trust contract PR 1/7 — production session
 `a51e977b-561a-4e98-baa8-59ad56a877ff` audit found 31/31 decided but 0 evidence
@@ -62,20 +85,22 @@ Operational subpages (not primary nav): `/dashboard/import`, `/settings`,
 `/dashboard/position/[ticker]`, login. `/dashboard` redirects to Positions; all legacy product
 routes redirect (map in `v2/frontend/src/lib/route-redirects.ts`).
 
-## Run Intel trust-recovery sequence (LOCKED — active scope)
+## Run Intel trust-recovery sequence (LOCKED — active scope, reduced finish plan)
 
-Seven-PR sequence restoring truthful Run Intel trust after the 2026-07-23
-production audit of session `a51e977b-561a-4e98-baa8-59ad56a877ff` (31 frozen
-holdings, 31 persisted decisions, session `completed` — but 0 evidence
-bundles/specialist outputs carried a source reference, 5 of 7 required
-conflict reviews failed with no visible trace, distributed publication wrote
+Restoring truthful Run Intel trust after the 2026-07-23 production audit of
+session `a51e977b-561a-4e98-baa8-59ad56a877ff` (31 frozen holdings, 31
+persisted decisions, session `completed` — but 0 evidence bundles/specialist
+outputs carried a source reference, 5 of 7 required conflict reviews failed
+with no visible trace, distributed publication wrote
 `research_axis_readiness={}` so 31/31 successful technical and 31/31
 successful sentiment outputs displayed as unusable, and the UI collapsed
 every nonempty decision blocker into "Evidence blocked" regardless of
-category — including a merely-suppressed price context and a portfolio-
-overweight constraint). This sequence is the active scope for Run Intel work
-until production certification passes; do not start unrelated Run Intel
-slices ahead of it.
+category). This sequence is the active scope for Run Intel work until
+production certification passes; do not start unrelated Run Intel slices
+ahead of it. The original seven-PR plan is REDUCED to the five items below —
+PR 3 deletes the conflict-review LLM instead of repairing it, which retires
+the old items 3 (conflict-review reliability) and 7 (performance) as
+separate PRs:
 
 1. **Publish and display a truthful Run Intel trust contract — COMPLETED —
    PR #485.** New pure projection
@@ -193,7 +218,8 @@ slices ahead of it.
    untouched. **Runtime caveat:** fixture/unit/integration test validation is
    complete; production verification that a fresh Run Intel run now
    genuinely produces nonzero source-linked lineage is deferred to the final
-   fresh Run Intel certification run (PR 7) so Anthropic funds aren't spent
+   fresh Run Intel certification run (the final certification run, item 5
+   in the reduced finish plan) so Anthropic funds aren't spent
    on a dedicated verification run after every recovery PR.
 
    **Same-PR patch (six release-blocker semantic defects, still PR #486):**
@@ -236,7 +262,8 @@ slices ahead of it.
    prompt input (order-independent) plus ticker+prompt_version — changes
    with any reviewed finding/risk/score/confidence/lineage-status/missing-
    lane/source-identity change; review model/token-budget/retry/call-count
-   are untouched (still PR 3's scope). (6) `run_trust_contract_v1` tracks
+   were untouched at the time (PR 3 later deleted the review LLM entirely
+   rather than repairing this — see PR 3 above). (6) `run_trust_contract_v1` tracks
    full/partial/missing OUTPUT counts separately
    (`outputs_full_lineage`/`outputs_partial_lineage`/`outputs_missing_lineage`,
    additive alongside the preserved `outputs_with_source_refs`/
@@ -250,7 +277,7 @@ slices ahead of it.
    (up from 8580 pre-patch; +39 net new focused tests across
    `test_source_lineage_v1.py` and `test_run_trust_contract_v1.py` covering
    every explicit scenario above). Production source-lineage behavior
-   remains NOT runtime-proven — same PR 7 deferral as above.
+   remains NOT runtime-proven — same final-certification-run deferral as above.
 
    **Round-3 same-PR patch (six further normal-path lineage-trust gaps,
    still PR #486):** the round-2 patch fixed source-health/ownership/
@@ -322,8 +349,8 @@ slices ahead of it.
    calls (verified via `test_distributed_golden_run.py`'s exact call-count
    accounting, unchanged), no SQL, no env vars, no frontend files,
    `decision_policy_v1`/visible actions/allocation/Deploy Cash unchanged,
-   PR 3 (conflict-review reliability: model/routing/retry/call-count) and
-   PR 4 (currency/unit/relevance) scope untouched. Full backend suite:
+   review-LLM deletion (PR 3) and the final operational-reliability PR (item
+   4) scope untouched. Full backend suite:
    **8670 passed, 0 failed** (up from 8619 pre-round-3; +51 net new focused
    tests, mostly in `test_source_lineage_v1.py` — axis-candidate-lane
    enforcement, malformed-input fail-closed proofs, truncated-ref-count
@@ -337,23 +364,95 @@ slices ahead of it.
    `run_trust_contract_v1.py`, `test_source_lineage_v1.py`,
    `test_run_trust_contract_v1.py`. Production source-lineage behavior
    remains NOT runtime-proven — unchanged, still deferred to the single
-   final certification run after PR 7.
-3. Conflict-review reliability — NOT STARTED. Owns why 5 of 7 reviews failed
-   (prompts, model routing, retry behavior) — PR 1 explicitly does not touch
-   review prompts/routing/retries, only surfaces the failures truthfully.
-4. **Evidence normalization and relevance — NOT STARTED** (renamed from
-   "Currency normalization" to state its full locked scope up front).
-   Reserves: currency/unit normalization; ADR/reporting-currency handling;
-   ticker relevance filtering for news/sentiment; valid publication
-   timestamps and freshness; rejection of unrelated or timestamp-zero news
-   items. None of this is implemented by PR 2 — PR 2's `provider_observation`
-   references record whatever timestamp/ticker the provider output already
-   carried, they do not validate or filter it.
-5. Financial-truth refresh — NOT STARTED.
-6. Repeat-run reliability — NOT STARTED.
-7. Performance — NOT STARTED. Followed by the single final production
-   certification run (after PR 7) that is the only place this sequence
-   claims live production success.
+   final certification run (item 5 in the reduced finish plan).
+3. Deterministic conflict handling / review-LLM deletion — **OPEN —
+   PR #487, patched round 2** (this entry, see the reduced finish plan
+   above). Deletes the conditional Sonnet/Haiku review LLM rather than
+   repairing it: `conflict_policy_v1.py` (≤180 lines, currently exactly 180)
+   is the ONE strict deterministic authority — trigger thresholds, conflict
+   assessment, the HOLD/≤0.49-confidence guardrail, disagreement-vs-
+   low-confidence copy, the shared fingerprint, and the current-row
+   activation contract. `execute_conflict_resolution_task` replaces
+   `execute_review_task`; `WorkerSupervisor.review_llm` and the review
+   model/fallback settings are deleted (verified zero remaining references
+   repo-wide). Zero `llm.ask_json`/provider calls for conflict handling.
+   **Round-2 fixes (producer-to-screen audit, 5 defects):**
+   - **Strict input authority**: `conflict_policy_v1.normalize_valid_inputs`
+     is the single source every consumer (assessment, aggregation,
+     execution, fingerprinting, decision-time validation) calls — a
+     duplicate axis excludes EVERY occurrence, order-independent, malformed
+     rows/weights never raise. `aggregate_advisory_signal` enforces this
+     itself and always excludes `AXIS_REVIEW`, even if a caller passes the
+     full output list.
+   - **Activation contract**: a deterministic row alters `advisory_signal`
+     ONLY when its `TASK_REVIEW_CONFLICT` task is `TASK_SUCCEEDED`, exactly
+     one `axis=review` row exists, model/prompt_version/stance/score/
+     confidence match exactly, lineage validates against CURRENT strict
+     inputs, conflict is still detected on recompute, and its
+     `input_fingerprint` matches `conflict_policy_v1.conflict_fingerprint`
+     recomputed fresh — the executor and the decision/trust readers call
+     the identical function. `run_trust_contract_v1._has_valid_review_output`
+     applies this ONLY to `deterministic_conflict_policy_v1`-tagged rows;
+     genuine historical LLM-review rows keep their original validity gate,
+     never reinterpreted.
+   - **Historical replay truth**: the already-decided retry branch now calls
+     `_replay_persisted_decision`, never `resolve_conflict_advisory` —
+     it rebuilds the verdict/aggregate from the PERSISTED audit record
+     (`advisory_signal`, `decision_input`), never recomputes under current
+     conflict rules. A historical LLM-reviewed decision replays its exact
+     action even if current specialist inputs would newly conflict (proven
+     by a fixture test with `decide`/`resolve_conflict_advisory` monkeypatched
+     to raise if called). The persisted decision-record shape is additive
+     (new audit fields) — not byte-for-byte identical to pre-PR3 records.
+   - **Truthful, method-neutral UI copy**: per-holding status text
+     ("Specialist signal handling completed/could not complete safely/is
+     still pending for this holding"; not_required: "No specialist conflict
+     or low-confidence case was detected") and the session line ("N
+     specialist conflict or low-confidence cases — M completed, K failed")
+     are shared vocabulary across historical LLM-reviewed and new
+     deterministic holdings — never a global "handled deterministically"
+     claim. Disagreement vs. low-confidence wording is truthful and
+     axis-display-mapped (no raw schema identifiers). Fixture screenshot
+     regenerated against the corrected copy.
+   - **Acceptance matrix**: new focused tests for strict-input edge cases,
+     the full activation-contract matrix (pending/failed/orphan/wrong-model/
+     wrong-prompt-version/wrong-stance/wrong-score/wrong-confidence/stale-
+     fingerprint/aligned-current-inputs/invalid-lineage), exact actions
+     (material conflict → HOLD/LOW; +OVERWEIGHT → TRIM; +CRITICAL risk+BREACH
+     → SELL; low-confidence-only-major-holding → HOLD/LOW with no
+     "disagreed" wording), and the historical-replay fixture.
+   `decision_policy_v1.decide()` is untouched — portfolio-fit/risk priority
+   remains the sole visible-action authority over a neutralized signal.
+   No SQL, no new env vars, no provider changes.
+   **Test totals:** full backend **8679 passed, 0 failed** (the one
+   previously-flaky `test_ttl_reused_lane_keeps_honest_identity_zero_
+   provider_calls` was diagnosed as a genuine bug — a hardcoded absolute
+   calendar timestamp racing the real-wall-clock 24h TTL cutoff — and fixed
+   to use a wall-clock-relative timestamp without weakening its
+   zero-provider-call assertion); full frontend **664 passed, 0 failed**;
+   TypeScript clean; frontend production build clean.
+   **LOC:** `conflict_policy_v1.py` stays at exactly 180 lines. Final net
+   production-source delta vs `main` is **+190 lines** (measured across
+   every changed production file, tests/docs excluded) — over the original
+   ≤+100 target, after trimming docstrings and deleting the now-orphaned
+   `source_lineage_v1.review_input_fingerprint` (dead since Phase 1 replaced
+   its only caller; −36 lines, plus its dedicated dead test class removed).
+   The remaining overshoot is the strict shared activation-contract
+   validation (reused identically by the executor, the decision reader, and
+   the trust contract) plus the historical-replay-preservation path, both
+   required to close the 5 round-2 defects without cutting correctness or
+   test coverage; docstrings were compressed wherever reducible without
+   losing the invariant they document. **Runtime caveat:** fixture/unit/
+   integration validation is complete; production behavior is NOT
+   runtime-proven — deferred to the single final certification run (item 5
+   above), same deferral pattern as PR #485/#486.
+4. One final operational-reliability PR — NOT STARTED. Reserves:
+   currency/unit normalization; ADR/reporting-currency handling; ticker
+   relevance filtering for news/sentiment; valid publication timestamps and
+   freshness; financial-truth preflight; hour/day/week repeat-run reuse and
+   stale-lane refresh; performance. None of this is implemented by PR 3.
+5. One final paid production certification run — NOT STARTED. The only
+   place this sequence claims live production success.
 
 ## The decision spine (one spine, no competitors)
 
@@ -607,7 +706,7 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   same module, not scope creep); `certify_v4_1.py`: all PASS. **Runtime
   caveat unchanged**: production source-lineage behavior remains NOT
   runtime-proven — deferred to the single final certification run after
-  PR 7, same as every prior entry in this sequence.
+  the final certification run (item 5), same as every prior entry in this sequence.
 
 ## SQL / env state
 

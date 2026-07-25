@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ....agents.llm import NON_RETRYABLE_PROVIDER_CLASSES
+from . import conflict_policy_v1
 from . import run_task_store_v1 as store
 from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
@@ -662,32 +663,23 @@ async def execute_specialist_task(
     return outcome
 
 
-# ── Conditional review agent ─────────────────────────────────────────────────
-
-REVIEW_SYSTEM_PROMPT = """You are a senior investment research reviewer.
-You receive several specialist research outputs for ONE ticker that disagree
-or carry low confidence. Reconcile them using ONLY the provided outputs and
-their cited evidence references. Do not fetch data, do not invent evidence,
-and do NOT make a buy/hold/trim/sell decision — a deterministic policy engine
-owns actions.
-
-Return STRICT JSON only:
-{"ticker": "...", "stance": "positive"|"neutral"|"negative",
- "score": <float -1..1>, "confidence": <float 0..1>,
- "key_findings": ["which specialist view is better supported and why", ...],
- "risks": ["..."], "missing_evidence": ["..."], "limitations": ["..."]}"""
+# ── Deterministic conflict resolution ────────────────────────────────────────
+#
+# Replaces the deleted conditional review LLM. Zero provider/LLM calls: the
+# directional specialist signal is neutralized to HOLD and upstream
+# confidence is capped — conflict_policy_v1 is the single deterministic
+# authority for both the trigger and the resolution. The canonical
+# decision_policy_v1.decide() remains the only visible-action authority.
 
 
-async def execute_review_task(
+async def execute_conflict_resolution_task(
     client: Any,
     *,
     task: dict[str, Any],
-    llm: Any,
     now: Optional[datetime] = None,
 ) -> SpecialistBatchOutcome:
-    """Reconcile conflicting specialist outputs for one ticker (advisory)."""
-    import json
-
+    """Resolve conflicting specialist outputs for one ticker deterministically
+    (advisory audit row only — never a visible action)."""
     now = now or _now()
     outcome = SpecialistBatchOutcome()
     session_id = str(task.get("run_session_id") or "")
@@ -699,85 +691,53 @@ async def execute_review_task(
         outcome.error = "claim_lost"
         return outcome
 
-    # Only VALID specialist rows (score AND confidence both present) are
-    # reviewable inputs — the same validity gate ``aggregate_advisory_signal``
-    # and the trust contract use. A row that never produced a usable
-    # score/confidence contributes nothing to reconcile (contract §5).
-    def _is_valid_specialist_row(o: dict[str, Any]) -> bool:
-        return o.get("score") is not None and o.get("confidence") is not None
+    # The ONE strict specialist-input authority — same function the trigger,
+    # the fingerprint and decision-time validation all use.
+    raw_outputs = store.list_specialist_outputs(
+        client, run_session_id=session_id, ticker=ticker,
+    )
+    reviewed_inputs = conflict_policy_v1.normalize_valid_inputs(raw_outputs)
 
-    reviewed_inputs = [
-        {
-            "axis": o.get("axis"),
-            "stance": o.get("stance"),
-            "score": o.get("score"),
-            "confidence": o.get("confidence"),
-            "key_findings": o.get("key_findings"),
-            "risks": o.get("risks"),
-            "evidence_refs": o.get("evidence_refs"),
-        }
-        for o in store.list_specialist_outputs(
-            client, run_session_id=session_id, ticker=ticker,
-        )
-        if o.get("axis") != AXIS_REVIEW and _is_valid_specialist_row(o)
-    ]
-    if len(reviewed_inputs) < 1:
-        outcome.skipped_insufficient.append(ticker)
+    ticker_row = next(
+        (
+            r for r in store.list_ticker_rows(client, run_session_id=session_id)
+            if str(r.get("ticker") or "") == ticker
+        ),
+        None,
+    )
+    weight_pct = (ticker_row or {}).get("portfolio_weight_pct")
+
+    # Fail closed: a durable conflict task exists, but the CURRENT immutable
+    # inputs no longer meet the conflict contract (recomputed via the same
+    # single authority the scheduler used to create this task).
+    assessment = conflict_policy_v1.assess_conflict(reviewed_inputs, weight_pct)
+    if not assessment["conflict_detected"]:
+        outcome.error = "conflict_task_without_conflict"
         return outcome
 
-    # Bounded, prompt-safe view for the LLM (contract §5) — the reviewer sees
-    # WHICH sources back each specialist view (lineage status + linked/
-    # missing lanes + a bounded source projection), but is never asked to
-    # invent or select a citation; the persisted review lineage below is
-    # built deterministically from the same re-validated manifests, never
-    # from anything the LLM returns. ONE normalized, bounded object drives
-    # BOTH the LLM prompt and the audit fingerprint (contract §5) — each
-    # input's manifest is independently re-derived (never trusted from its
-    # own persisted status) inside ``build_review_prompt_context``.
-    prompt_outputs = source_lineage_v1.build_review_prompt_context(
+    # Deterministic audit/lineage inputs — reuses the SAME normalized-input
+    # and lineage helpers the prior LLM review used, now purely as audit
+    # material (no LLM ever sees them).
+    prompt_inputs = source_lineage_v1.build_review_prompt_context(
         reviewed_inputs, ticker=ticker,
     )
-
-    outcome.llm_calls += 1
-    call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}
-    response = await llm.ask_json(
-        REVIEW_SYSTEM_PROMPT,
-        f"Ticker: {ticker}\nSpecialist outputs (JSON):\n"
-        + json.dumps(prompt_outputs, default=str)[:30000],
-        max_tokens=500,
-        metadata=call_meta,
+    review_lineage = source_lineage_v1.build_review_lineage_manifest(
+        reviewed_inputs, ticker=ticker,
     )
-    model_used = call_meta.get("model_used")
-    if model_used:
-        outcome.models_used.append(str(model_used))
-    normalized = validate_specialist_result(
-        {**response, "ticker": ticker} if isinstance(response, dict) else None
+    # Same fingerprint function the decision reader recomputes — covers
+    # ticker, schema version, the exact bounded lineage input, the
+    # assessment, and major-position state, so staleness is detectable.
+    input_fingerprint = conflict_policy_v1.conflict_fingerprint(
+        ticker=ticker, prompt_context=prompt_inputs, assessment=assessment,
+        major=conflict_policy_v1.safe_major_position(weight_pct),
     )
-    if normalized is None:
-        outcome.error = "review_llm_call_failed"
-        return outcome
+    summary_sentence = conflict_policy_v1.conflict_summary_sentence(assessment)
 
-    # Claim fence (post-LLM, pre-write).
+    # Claim fence (recheck before persistence).
     if not store.owns_claim(client, task):
         outcome.error = "claim_lost"
         return outcome
 
-    model_name = (
-        outcome.models_used[-1] if outcome.models_used
-        else getattr(llm, "primary_model", None) or "claude"
-    )
-    # A review never fabricates a new source — its lineage is deterministic
-    # code output derived from the exact inputs it reconciled (contract §5),
-    # never anything the LLM response itself carries. The audit fingerprint
-    # is built from the EXACT bounded/normalized prompt input the LLM saw
-    # (findings, risks, score, confidence, lineage status, missing lanes,
-    # source identity) plus ticker + prompt version — never the empty string.
-    review_lineage = source_lineage_v1.build_review_lineage_manifest(
-        reviewed_inputs, ticker=ticker,
-    )
-    review_fingerprint = source_lineage_v1.review_input_fingerprint(
-        prompt_outputs, ticker=ticker, prompt_version=PROMPT_VERSION,
-    )
     persisted = store.upsert_specialist_output(
         client,
         run_session_id=session_id,
@@ -785,18 +745,24 @@ async def execute_review_task(
         ticker=ticker,
         axis=AXIS_REVIEW,
         output={
-            "stance": normalized["stance"],
-            "score": normalized["score"],
-            "confidence": normalized["confidence"],
-            "key_findings": normalized["key_findings"],
-            "risks": normalized["risks"],
+            "stance": "neutral",
+            "score": 0.0,
+            "confidence": conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+            "key_findings": [summary_sentence],
+            "risks": [
+                "Conflicting specialist evidence increases the risk of "
+                "acting prematurely.",
+            ],
+            "missing_evidence": [],
+            "limitations": [
+                "Directional signal neutralized until the evidence "
+                "becomes more consistent.",
+            ],
             "evidence_refs": review_lineage,
-            "missing_evidence": normalized["missing_evidence"],
-            "limitations": normalized["limitations"],
             "valid_until": (now + timedelta(hours=OUTPUT_VALID_HOURS)).isoformat(),
-            "model": str(model_name),
-            "prompt_version": PROMPT_VERSION,
-            "input_fingerprint": review_fingerprint,
+            "model": conflict_policy_v1.SCHEMA_VERSION,
+            "prompt_version": conflict_policy_v1.SCHEMA_VERSION,
+            "input_fingerprint": input_fingerprint,
             "batch_key": None,
         },
         now=now,
@@ -804,5 +770,5 @@ async def execute_review_task(
     if persisted:
         outcome.persisted.append(ticker)
     else:
-        outcome.error = "review_persist_failed"
+        outcome.error = "conflict_resolution_persist_failed"
     return outcome

@@ -31,10 +31,13 @@ from ..decision_contracts import (
 )
 from ..decision_policy_v1 import decide
 from ..portfolio_governor_lite import compute_portfolio_fit
+from . import conflict_policy_v1
 from . import run_task_store_v1 as store
 from .task_contracts_v1 import (
     AXIS_REVIEW,
     AXIS_RISK_FILING,
+    TASK_REVIEW_CONFLICT,
+    TASK_SUCCEEDED,
     TICKER_DECIDED,
     TICKER_NO_CALL,
     required_axes_for_asset,
@@ -46,6 +49,10 @@ logger = logging.getLogger(__name__)
 # signal consumed by decide(); decide() remains the only action authority).
 _ADVISORY_BUY_THRESHOLD = 0.35
 _ADVISORY_REDUCE_THRESHOLD = -0.35
+
+_ANALYSIS_CONFLICT_ACTION_REASON = (
+    "The directional signal was neutralized until the evidence becomes more consistent."
+)
 
 
 def _now() -> datetime:
@@ -66,18 +73,15 @@ def aggregate_advisory_signal(
 ) -> dict[str, Any]:
     """Deterministic confidence-weighted aggregation of specialist scores.
 
-    Pure math over persisted rows — reproducible from the database alone.
-    The review axis, when present, replaces nothing: it is one more weighted
-    voice (its whole purpose is to carry reconciliation weight).
-    """
+    Pure math, reproducible from the database alone. Always enforces
+    ``conflict_policy_v1``'s strict input authority and always excludes
+    ``AXIS_REVIEW`` — even when a caller supplies the full output list."""
     weighted_sum = 0.0
     weight_total = 0.0
     confidences: list[float] = []
-    for output in outputs:
+    for output in conflict_policy_v1.normalize_valid_inputs(outputs):
         score = output.get("score")
         confidence = output.get("confidence")
-        if score is None or confidence is None:
-            continue
         weight = max(0.05, float(confidence))
         weighted_sum += float(score) * weight
         weight_total += weight
@@ -99,6 +103,83 @@ def aggregate_advisory_signal(
         "aggregate_score": round(aggregate, 4),
         "mean_confidence": round(mean_confidence, 4),
     }
+
+
+def resolve_conflict_advisory(
+    *,
+    ticker: str,
+    outputs: list[dict[str, Any]],
+    non_review: list[dict[str, Any]],
+    weight_pct: Optional[float],
+    review_task_state: Optional[str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Pure, idempotent: ``(pre_conflict_advisory_signal, advisory_signal,
+    verdict)``. The HOLD/confidence-cap overlay applies ONLY when the task
+    is ``TASK_SUCCEEDED``, exactly one ``axis=review`` row exists, and it
+    passes ``conflict_policy_v1.validate_current_conflict_row`` — a
+    pending/failed/orphaned/stale/forged row never neutralizes a decision."""
+    pre_conflict = aggregate_advisory_signal(non_review)
+    verdict = compose_analyst_verdict(ticker, non_review, pre_conflict)
+
+    review_rows = [o for o in outputs if str(o.get("axis")) == AXIS_REVIEW]
+    assessment = None
+    if review_task_state == TASK_SUCCEEDED and len(review_rows) == 1:
+        assessment = conflict_policy_v1.validate_current_conflict_row(
+            review_rows[0], ticker=ticker, non_review_outputs=non_review,
+            weight_pct=weight_pct,
+        )
+    if assessment is None:
+        return pre_conflict, pre_conflict, verdict
+
+    pre_confidence = pre_conflict.get("mean_confidence")
+    capped = min(
+        pre_confidence if pre_confidence is not None
+        else conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+        conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+    )
+    advisory_signal = {
+        **pre_conflict,
+        "advisory_action": conflict_policy_v1.CONFLICT_ACTION,
+        "mean_confidence": round(capped, 4),
+        "conflict_detected": True,
+        "conflict_assessment": assessment,
+    }
+    verdict = compose_analyst_verdict(ticker, non_review, advisory_signal)
+    verdict = {
+        **verdict,
+        "primary_driver": conflict_policy_v1.conflict_summary_sentence(assessment)[:280],
+        "action_reason": _ANALYSIS_CONFLICT_ACTION_REASON[:280],
+    }
+    return pre_conflict, advisory_signal, verdict
+
+
+def _replay_persisted_decision(
+    existing_decision: dict[str, Any], *, ticker: str, non_review: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Idempotent-retry authority: rebuilds ``(aggregate, verdict)`` from the
+    ALREADY-PERSISTED decision audit record — never recomputed under
+    current conflict rules. Falls back to a fresh, bounded computation only
+    when the persisted audit fields are genuinely absent (pre-audit rows)."""
+    persisted_signal = existing_decision.get("advisory_signal")
+    persisted_input = existing_decision.get("decision_input") or {}
+    if isinstance(persisted_signal, dict) and persisted_signal.get("mean_confidence") is not None:
+        aggregate = persisted_signal
+    else:
+        aggregate = aggregate_advisory_signal(non_review)
+    if persisted_input.get("primary_driver") or persisted_input.get("action_reason"):
+        verdict = {
+            "primary_driver": persisted_input.get("primary_driver") or "",
+            "action_reason": persisted_input.get("action_reason") or "",
+            "risk_flag": persisted_input.get("risk_flag_text")
+            or "No specialist-flagged risk this run",
+            "conviction_level": persisted_input.get("upstream_conviction")
+            or _conviction_level(aggregate.get("mean_confidence")),
+            "analysis_source": "distributed_specialists_v1",
+            "specialist_axes": list(persisted_input.get("analyst_drivers") or []),
+        }
+    else:
+        verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+    return aggregate, verdict
 
 
 def _conviction_level(mean_confidence: Optional[float]) -> str:
@@ -360,6 +441,13 @@ async def execute_ticker_decision_task(
             )
         ]
         non_review = [o for o in outputs if str(o.get("axis")) != AXIS_REVIEW]
+        review_tasks = store.list_tasks(
+            client, run_session_id=session_id, task_type=TASK_REVIEW_CONFLICT,
+            ticker=ticker,
+        )
+        review_task_state = (
+            str(review_tasks[0].get("state")) if len(review_tasks) == 1 else None
+        )
         required_axes = required_axes_for_asset(asset_type)
         axes_present = {str(o.get("axis")) for o in non_review}
         required_missing_axes = [
@@ -382,15 +470,17 @@ async def execute_ticker_decision_task(
 
         # Idempotent retry: the deterministic decision already persisted but a
         # previous attempt died writing the compatibility projections. Rewrite
-        # ONLY the projections from the persisted final action — decide() is
-        # never re-run for an already-decided ticker.
+        # ONLY the projections from the PERSISTED audit record — decide() is
+        # never re-run, and a historical (possibly LLM-reviewed) decision is
+        # replayed exactly, never reinterpreted under current conflict rules.
         if (
             str(row.get("state")) == TICKER_DECIDED
             and existing_decision.get("agent_run_id")
             and existing_decision.get("action")
         ):
-            aggregate = aggregate_advisory_signal(outputs)
-            verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+            aggregate, verdict = _replay_persisted_decision(
+                existing_decision, ticker=ticker, non_review=non_review,
+            )
             evidence_ok = _write_durable_evidence(
                 client,
                 user_id=user_id,
@@ -451,8 +541,11 @@ async def execute_ticker_decision_task(
         # session ticker row → 5. compatibility evidence rows carrying the
         # FINAL deterministic action. No BUY/HOLD/TRIM/SELL row exists before
         # canonical policy determined it.
-        aggregate = aggregate_advisory_signal(outputs)
-        verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+        pre_conflict, aggregate, verdict = resolve_conflict_advisory(
+            ticker=ticker, outputs=outputs, non_review=non_review,
+            weight_pct=row.get("portfolio_weight_pct"),
+            review_task_state=review_task_state,
+        )
         run_id = str(uuid.uuid4())
 
         suppression: dict[str, Any] = {}
@@ -475,9 +568,12 @@ async def execute_ticker_decision_task(
             upstream_conviction=verdict.get("conviction_level"),
             suppression_reasons={
                 **suppression,
+                "price_context": "Price/valuation banding evidence is "
+                "not available for this run.",
                 **(
-                    {"price_context": "Price/valuation banding evidence is "
-                     "not available for this run."}
+                    {"analysis_conflict": f"{conflict_policy_v1.conflict_summary_sentence(aggregate['conflict_assessment'])} "
+                     "The directional signal was neutralized and confidence was capped."}
+                    if aggregate.get("conflict_detected") else {}
                 ),
             },
             primary_driver=verdict.get("primary_driver"),
@@ -528,6 +624,7 @@ async def execute_ticker_decision_task(
                 "asset_type_hint": decision_input.asset_type_hint,
             },
             "advisory_signal": aggregate,
+            "pre_conflict_advisory_signal": pre_conflict,
             "agent_run_id": run_id,
             "policy_schema_version": decision.schema_version,
             "decided_at": now.isoformat(),

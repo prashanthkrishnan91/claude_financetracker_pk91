@@ -1,5 +1,5 @@
-"""Specialist batching, strict-output validation, LLM reuse and conditional
-review.
+"""Specialist batching, strict-output validation, LLM reuse and deterministic
+conflict resolution.
 
 Proves:
   * batches are asset-compatible and bounded (≤ max batch size);
@@ -8,9 +8,10 @@ Proves:
   * one malformed ticker degrades only itself (repair retry bounded to one);
   * specialists make ZERO provider calls (they only read persisted bundles);
   * unchanged input fingerprints reuse prior outputs (no duplicate LLM call);
-  * aligned high-confidence specialists skip review; material conflict on a
-    major holding creates exactly one review task; review output cannot set a
-    visible action.
+  * aligned high-confidence specialists skip conflict resolution; material
+    conflict on a major holding creates exactly one conflict task; the
+    deterministic resolution makes ZERO LLM calls and cannot set a visible
+    action.
 """
 from __future__ import annotations
 
@@ -19,10 +20,11 @@ import uuid
 import pytest
 
 import app.services.intelligence.v3.distributed.run_task_store_v1 as store
+from app.services.intelligence.v3.distributed import conflict_policy_v1
 from app.services.intelligence.v3.distributed import run_scheduler_v1 as scheduler
 from app.services.intelligence.v3.distributed import session_control_v1 as control
 from app.services.intelligence.v3.distributed.specialist_agents_v1 import (
-    execute_review_task,
+    execute_conflict_resolution_task,
     execute_specialist_task,
 )
 from app.services.intelligence.v3.distributed.evidence_bundle_v1 import (
@@ -295,12 +297,24 @@ class TestConditionalReview:
             {"axis": AXIS_TECHNICAL, "score": score_b, "confidence": confidence},
         ]
 
+    def _conflict_detected(self, outputs, weight_pct):
+        return conflict_policy_v1.assess_conflict(outputs, weight_pct)[
+            "conflict_detected"
+        ]
+
     def test_aligned_high_confidence_skips_review(self):
+        assert self._conflict_detected(
+            self._outputs(0.6, 0.5), weight_pct=10.0
+        ) is False
+        # The scheduler's trigger delegates to the same single authority.
         assert scheduler.should_review(
             self._outputs(0.6, 0.5), weight_pct=10.0
         ) is False
 
     def test_material_conflict_triggers_review(self):
+        assert self._conflict_detected(
+            self._outputs(0.7, -0.6), weight_pct=10.0
+        ) is True
         assert scheduler.should_review(
             self._outputs(0.7, -0.6), weight_pct=10.0
         ) is True
@@ -310,11 +324,11 @@ class TestConditionalReview:
             {"axis": AXIS_FUNDAMENTAL, "score": 0.2, "confidence": 0.2},
             {"axis": AXIS_TECHNICAL, "score": 0.3, "confidence": 0.9},
         ]
-        assert scheduler.should_review(outputs, weight_pct=8.0) is True
-        assert scheduler.should_review(outputs, weight_pct=1.0) is False
+        assert self._conflict_detected(outputs, weight_pct=8.0) is True
+        assert self._conflict_detected(outputs, weight_pct=1.0) is False
 
     @pytest.mark.asyncio
-    async def test_conflict_creates_exactly_one_review_task(self, monkeypatch):
+    async def test_conflict_creates_exactly_one_conflict_task(self, monkeypatch):
         client = FakeSupabase()
         session_id = await _session_with_ready_bundles(
             client, monkeypatch, ["AAPL"],
@@ -349,31 +363,120 @@ class TestConditionalReview:
             ).eq("id", task["id"]).execute()
 
         scheduler.run_scheduler_pass(client, session=session)
-        review_tasks = [
+        conflict_tasks = [
             t for t in client.rows("intel_run_tasks")
             if t["task_type"] == TASK_REVIEW_CONFLICT
         ]
-        assert len(review_tasks) == 1
-        # Idempotent: another pass creates no second review.
+        assert len(conflict_tasks) == 1
+        # Idempotent: another pass creates no second conflict task.
         scheduler.run_scheduler_pass(client, session=session)
         assert len([
             t for t in client.rows("intel_run_tasks")
             if t["task_type"] == TASK_REVIEW_CONFLICT
         ]) == 1
 
-        # Review executes, persists an advisory row, fetches nothing, and its
-        # output shape carries NO action vocabulary field.
-        review_task = claim_task_row(client, review_tasks[0])
-        outcome = await execute_review_task(
-            client, task=review_task, llm=FakeLLM(),
+        # Deterministic resolution executes with ZERO LLM calls, persists an
+        # audit row whose shape carries NO action vocabulary field and no
+        # LLM-attributable model.
+        conflict_task = claim_task_row(client, conflict_tasks[0])
+        outcome = await execute_conflict_resolution_task(
+            client, task=conflict_task,
         )
         assert outcome.persisted == ["AAPL"]
+        assert outcome.llm_calls == 0
         review_output = next(
             o for o in client.rows("intel_run_specialist_outputs")
             if o["axis"] == AXIS_REVIEW
         )
         assert "action" not in review_output
-        assert review_output["stance"] in ("positive", "neutral", "negative")
+        assert review_output["stance"] == "neutral"
+        assert review_output["score"] == 0.0
+        assert review_output["confidence"] == conflict_policy_v1.CONFLICT_CONFIDENCE_CAP
+        assert review_output["model"] == conflict_policy_v1.SCHEMA_VERSION
+        assert review_output["prompt_version"] == conflict_policy_v1.SCHEMA_VERSION
+        assert review_output["batch_key"] is None
+        assert review_output["key_findings"]
+        assert review_output["input_fingerprint"]
+
+    @pytest.mark.asyncio
+    async def test_conflict_task_without_conflict_fails_closed(self, monkeypatch):
+        """A durable conflict task exists, but the current immutable inputs
+        (aligned specialists) do not meet the conflict contract."""
+        client = FakeSupabase()
+        session_id = await _session_with_ready_bundles(
+            client, monkeypatch, ["AAPL"],
+        )
+        session = client.rows("intel_run_sessions")[0]
+        for axis in (AXIS_FUNDAMENTAL, AXIS_TECHNICAL):
+            store.upsert_specialist_output(
+                client, run_session_id=session_id, user_id=USER, ticker="AAPL",
+                axis=axis,
+                output={
+                    "stance": "positive", "score": 0.5, "confidence": 0.8,
+                    "key_findings": ["aligned"], "risks": [],
+                    "missing_evidence": [], "limitations": [],
+                    "evidence_refs": [], "valid_until": "2027-01-01T00:00:00+00:00",
+                    "model": "fake", "prompt_version": "test",
+                    "input_fingerprint": "sha256:test", "batch_key": None,
+                },
+            )
+        conflict_task = store.create_task(
+            client, run_session_id=session_id, user_id=USER,
+            task_type=TASK_REVIEW_CONFLICT, ticker="AAPL",
+        )
+        conflict_task = claim_task_row(client, conflict_task)
+        outcome = await execute_conflict_resolution_task(
+            client, task=conflict_task,
+        )
+        assert outcome.error == "conflict_task_without_conflict"
+        assert outcome.persisted == []
+        assert outcome.llm_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_conflict_resolution_retry_is_idempotent(self, monkeypatch):
+        client = FakeSupabase()
+        session_id = await _session_with_ready_bundles(
+            client, monkeypatch, ["AAPL"],
+        )
+        session = client.rows("intel_run_sessions")[0]
+        for axis, score in ((AXIS_FUNDAMENTAL, 0.8), (AXIS_TECHNICAL, -0.8)):
+            store.upsert_specialist_output(
+                client, run_session_id=session_id, user_id=USER, ticker="AAPL",
+                axis=axis,
+                output={
+                    "stance": "positive" if score > 0 else "negative",
+                    "score": score, "confidence": 0.9,
+                    "key_findings": ["x"], "risks": [],
+                    "missing_evidence": [], "limitations": [],
+                    "evidence_refs": [], "valid_until": "2027-01-01T00:00:00+00:00",
+                    "model": "fake", "prompt_version": "test",
+                    "input_fingerprint": "sha256:test", "batch_key": None,
+                },
+            )
+        conflict_task = store.create_task(
+            client, run_session_id=session_id, user_id=USER,
+            task_type=TASK_REVIEW_CONFLICT, ticker="AAPL",
+        )
+        first = await execute_conflict_resolution_task(
+            client, task=claim_task_row(client, conflict_task),
+        )
+        assert first.persisted == ["AAPL"]
+        first_row = next(
+            o for o in client.rows("intel_run_specialist_outputs")
+            if o["axis"] == AXIS_REVIEW
+        )
+
+        second = await execute_conflict_resolution_task(
+            client, task=claim_task_row(client, conflict_task),
+        )
+        assert second.persisted == ["AAPL"]
+        assert second.llm_calls == 0
+        rows = [
+            o for o in client.rows("intel_run_specialist_outputs")
+            if o["axis"] == AXIS_REVIEW
+        ]
+        assert len(rows) == 1
+        assert rows[0]["input_fingerprint"] == first_row["input_fingerprint"]
 
 
 class TestDeadEndGuards:

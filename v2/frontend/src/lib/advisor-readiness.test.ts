@@ -1031,11 +1031,32 @@ describe("deriveRunTrustSummary", () => {
     expect(summary.axisCoverageLine).not.toContain("Crypto");
   });
 
-  it("conflict review line states required/succeeded/failed honestly", () => {
+  it("conflict review line states completed/failed honestly (method-neutral wording)", () => {
     const snap = makeSnapshot({ run_trust_contract: makeRunTrustContract() });
     const summary = deriveRunTrustSummary(snap)!;
-    expect(summary.conflictReviewLine).toContain("2 of 7 required conflict reviews succeeded");
+    expect(summary.conflictReviewLine).toContain(
+      "7 specialist conflict or low-confidence cases",
+    );
+    expect(summary.conflictReviewLine).toContain("2 completed");
     expect(summary.conflictReviewLine).toContain("5 failed");
+    expect(summary.conflictReviewLine.toLowerCase()).not.toContain("review passed");
+    expect(summary.conflictReviewLine.toLowerCase()).not.toContain("consensus");
+    expect(summary.conflictReviewLine.toLowerCase()).not.toContain("handled deterministically");
+  });
+
+  it("all-succeeded conflict line matches the locked copy example", () => {
+    const snap = makeSnapshot({
+      run_trust_contract: makeRunTrustContract({
+        conflict_review_coverage: {
+          required_count: 7, succeeded_count: 7, failed_count: 0, pending_count: 0,
+          required_tickers: [], succeeded_tickers: [], failed_tickers: [], pending_tickers: [],
+        },
+      }),
+    });
+    const summary = deriveRunTrustSummary(snap)!;
+    expect(summary.conflictReviewLine).toBe(
+      "7 specialist conflict or low-confidence cases — 7 completed.",
+    );
   });
 
   it("source lineage line reports zero references explicitly, never a bare dash", () => {
@@ -1115,10 +1136,12 @@ describe("deriveRunTrustSummary", () => {
     expect(summary.sessionCoverageLine).not.toContain("0 of 0");
   });
 
-  it("unknown overlay → never claims 'no conflict reviews were required'", () => {
+  it("unknown overlay → never claims 'no specialist conflict or low-confidence cases were detected'", () => {
     const snap = makeSnapshot({ run_trust_contract: makeUnknownOverlayContract() });
     const summary = deriveRunTrustSummary(snap)!;
-    expect(summary.conflictReviewLine).not.toContain("No conflict reviews were required");
+    expect(summary.conflictReviewLine).not.toContain(
+      "No specialist conflict or low-confidence cases were detected",
+    );
   });
 
   it("unknown overlay → never claims 'no specialist axes applied' or 'not applicable'", () => {

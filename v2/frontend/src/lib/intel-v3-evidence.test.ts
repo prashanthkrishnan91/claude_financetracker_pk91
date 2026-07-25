@@ -95,36 +95,51 @@ describe("committeeStatusToPlainLabel", () => {
 // ── conflictReviewStatusToLabel / sourceLineageToLabel (run_trust_contract_v1) ─
 
 describe("conflictReviewStatusToLabel", () => {
-  it("succeeded → passed", () => {
-    expect(conflictReviewStatusToLabel("succeeded")).toContain("passed");
+  it("succeeded → method-neutral completion text, never 'review passed'", () => {
+    const label = conflictReviewStatusToLabel("succeeded");
+    expect(label).toContain("Specialist signal handling completed");
+    expect(label.toLowerCase()).not.toContain("review passed");
   });
 
-  it("failed → explicit failure, without successful reconciliation", () => {
+  it("failed → explicit failure, never implies an AI review ran", () => {
     const label = conflictReviewStatusToLabel("failed");
-    expect(label).toContain("failed");
-    expect(label).toContain("without successful reconciliation");
+    expect(label).toContain("could not complete safely");
+    expect(label.toLowerCase()).not.toContain("reconciliation");
   });
 
   it("pending → still pending", () => {
     expect(conflictReviewStatusToLabel("pending")).toContain("pending");
   });
 
-  it("not_required → explicit no-review-needed text, never a bare dash", () => {
+  it("not_required → explicit no-conflict-detected text, never a bare dash", () => {
     expect(conflictReviewStatusToLabel("not_required")).not.toBe("—");
-    expect(conflictReviewStatusToLabel("not_required")).toContain("No conflict review");
+    expect(conflictReviewStatusToLabel("not_required")).toContain("No specialist conflict");
   });
 
   it("unknown → explicit re-verification text, never silently 'not required'", () => {
     const label = conflictReviewStatusToLabel("unknown");
     expect(label).not.toBe("—");
-    expect(label).not.toContain("No conflict review was required");
+    expect(label).not.toContain("No specialist conflict was detected");
     expect(label).toContain("not be re-verified");
   });
 
   it("null/undefined (no info at all) → honest 'unavailable', never a bare dash and never claims not_required", () => {
     expect(conflictReviewStatusToLabel(undefined)).not.toBe("—");
     expect(conflictReviewStatusToLabel(null)).not.toBe("—");
-    expect(conflictReviewStatusToLabel(null)).not.toContain("No conflict review was required");
+    expect(conflictReviewStatusToLabel(null)).not.toContain("No specialist conflict was detected");
+  });
+
+  it("no LLM-review vocabulary in any status label", () => {
+    for (const status of [
+      "succeeded", "failed", "pending", "unknown", "not_required", null, undefined,
+    ]) {
+      const label = conflictReviewStatusToLabel(status as string | null | undefined).toLowerCase();
+      for (const forbidden of [
+        "senior reviewer", "review model", "review passed", "reconciliation by ai", "consensus",
+      ]) {
+        expect(label).not.toContain(forbidden);
+      }
+    }
   });
 });
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.intelligence.v3.distributed import conflict_policy_v1
 from app.services.intelligence.v3.distributed import run_trust_contract_v1 as trust
 from app.services.intelligence.v3.distributed import source_lineage_v1 as lineage
 from app.services.intelligence.v3.distributed.task_contracts_v1 import (
@@ -698,6 +699,149 @@ class TestConflictReviewTruth:
         # The review's own lineage is forced to MISSING by the cross-check —
         # capping the ticker-level aggregate below full.
         assert entry["lineage_status"] != trust.LINEAGE_FULL
+
+
+def _deterministic_review_fixture(
+    ticker: str = "AAA", *, weight_pct: float = 8.0,
+    scores: tuple = ((AXIS_FUNDAMENTAL, 0.8, 0.9), (AXIS_TECHNICAL, -0.8, 0.9)),
+    tamper: Optional[dict] = None,
+) -> tuple[list[dict], dict]:
+    """A CURRENT, valid deterministic ``axis=review`` row plus its matching
+    non-review outputs — built with the SAME pure functions the executor
+    and decision reader use, so ``_has_valid_review_output``'s strict path
+    actually validates it. ``tamper`` overrides fields on the review row to
+    build a stale/forged/mismatched negative case."""
+    non_review = [
+        {
+            "ticker": ticker, "axis": axis, "stance": "positive" if score > 0 else "negative",
+            "score": score, "confidence": confidence,
+            "key_findings": [f"{ticker} {axis} finding"], "risks": [],
+            "evidence_refs": [], "missing_evidence": [], "limitations": [],
+            "model": "fake", "prompt_version": "test",
+        }
+        for axis, score, confidence in scores
+    ]
+    normalized = conflict_policy_v1.normalize_valid_inputs(non_review)
+    assessment = conflict_policy_v1.assess_conflict(normalized, weight_pct)
+    manifest = lineage.build_review_lineage_manifest(normalized, ticker=ticker)
+    prompt_context = lineage.build_review_prompt_context(normalized, ticker=ticker)
+    fingerprint = conflict_policy_v1.conflict_fingerprint(
+        ticker=ticker, prompt_context=prompt_context, assessment=assessment,
+        major=conflict_policy_v1.safe_major_position(weight_pct),
+    )
+    review = {
+        "ticker": ticker, "axis": AXIS_REVIEW, "stance": "neutral", "score": 0.0,
+        "confidence": conflict_policy_v1.CONFLICT_CONFIDENCE_CAP,
+        "key_findings": [conflict_policy_v1.conflict_summary_sentence(assessment)],
+        "risks": [], "missing_evidence": [], "limitations": [],
+        "evidence_refs": manifest,
+        "model": conflict_policy_v1.SCHEMA_VERSION,
+        "prompt_version": conflict_policy_v1.SCHEMA_VERSION,
+        "input_fingerprint": fingerprint,
+    }
+    review.update(tamper or {})
+    return non_review, review
+
+
+class TestDeterministicConflictRowActivation:
+    """Acceptance matrix row C — the strict current-row activation contract
+    a ``deterministic_conflict_policy_v1``-tagged row must pass to count as
+    a successful conflict resolution in the trust contract."""
+
+    def _contract(self, non_review, review, *, task_state=TASK_SUCCEEDED, weight_pct=8.0):
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        rows[0]["portfolio_weight_pct"] = weight_pct
+        tasks = [{"task_type": TASK_REVIEW_CONFLICT, "ticker": "AAA", "state": task_state}]
+        outputs = list(non_review) + [review]
+        return trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=tasks, specialist_outputs=outputs,
+        )
+
+    def test_current_valid_row_with_succeeded_task_activates(self):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        contract = self._contract(non_review, review, weight_pct=8.0)
+        entry = contract["ticker_trust"][0]
+        assert entry["conflict_review_status"] == trust.REVIEW_SUCCEEDED
+
+    def test_pending_task_never_activates(self):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        contract = self._contract(
+            non_review, review, task_state=TASK_PENDING, weight_pct=8.0,
+        )
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_PENDING
+
+    def test_failed_task_never_activates(self):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        contract = self._contract(
+            non_review, review, task_state=TASK_FAILED, weight_pct=8.0,
+        )
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_FAILED
+
+    @pytest.mark.parametrize("bad_field,bad_value", [
+        ("model", "some-other-model"),
+        ("prompt_version", "some-other-prompt"),
+        ("stance", "positive"),
+        ("score", 0.1),
+        ("confidence", 0.9),
+    ])
+    def test_wrong_shape_never_activates(self, bad_field, bad_value):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        review[bad_field] = bad_value
+        contract = self._contract(non_review, review, weight_pct=8.0)
+        entry = contract["ticker_trust"][0]
+        # A model mismatch is treated as a genuine legacy row (pass-through);
+        # every OTHER tampered field is a forged/malformed deterministic row.
+        if bad_field == "model":
+            assert entry["conflict_review_status"] == trust.REVIEW_SUCCEEDED
+        else:
+            assert entry["conflict_review_status"] == trust.REVIEW_FAILED
+
+    def test_stale_fingerprint_never_activates(self):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        review["input_fingerprint"] = "sha256:stale"
+        contract = self._contract(non_review, review, weight_pct=8.0)
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_FAILED
+
+    def test_aligned_current_inputs_never_activate(self):
+        """The persisted row was valid when written, but the CURRENT
+        specialist inputs no longer conflict — recomputed assessment says
+        conflict_detected=False, so the row must not activate."""
+        non_review, review = _deterministic_review_fixture(
+            weight_pct=8.0,
+            scores=((AXIS_FUNDAMENTAL, 0.8, 0.9), (AXIS_TECHNICAL, -0.8, 0.9)),
+        )
+        # Current inputs have since changed to aligned, non-conflicting scores.
+        aligned_non_review = [
+            {**o, "score": 0.5} for o in non_review
+        ]
+        contract = self._contract(aligned_non_review, review, weight_pct=8.0)
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_FAILED
+
+    def test_invalid_lineage_never_activates(self):
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        review["evidence_refs"] = {
+            "schema_version": lineage.SCHEMA_VERSION,
+            "derived_from_axes": ["some_other_axis"],
+            "input_axis_lineage": [],
+        }
+        contract = self._contract(non_review, review, weight_pct=8.0)
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_FAILED
+
+    def test_orphaned_row_without_task_never_activates(self):
+        """A review output exists but NO durable conflict task at all —
+        never activates, and never required (no task = not_required is
+        the honest read only when there's truly no task; here the output
+        alone must not fabricate success)."""
+        non_review, review = _deterministic_review_fixture(weight_pct=8.0)
+        session = _one_ticker_session()
+        rows = [_one_ticker_row(evidence_quality="STRONG")]
+        rows[0]["portfolio_weight_pct"] = 8.0
+        outputs = list(non_review) + [review]
+        contract = trust.build_run_trust_contract(
+            session=session, ticker_rows=rows, tasks=[], specialist_outputs=outputs,
+        )
+        assert contract["ticker_trust"][0]["conflict_review_status"] == trust.REVIEW_NOT_REQUIRED
 
 
 class TestSourceLineageFullPartialMissing:

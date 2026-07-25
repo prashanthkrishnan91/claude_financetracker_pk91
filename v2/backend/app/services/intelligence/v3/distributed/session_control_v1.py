@@ -17,7 +17,10 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from ....financial_truth_baseline_v1 import run_financial_truth_baseline
+from ....financial_truth_baseline_v1 import (
+    FinancialTruthReadError,
+    run_financial_truth_baseline_strict,
+)
 from ....portfolio_service import PortfolioService
 from ..intel_run_session_store_v1 import get_session
 from . import run_task_store_v1 as store
@@ -86,52 +89,12 @@ def _safe_float(value: Any) -> Optional[float]:
 
 # ── Scope freeze (DB reads only) ─────────────────────────────────────────────
 
-def _load_active_positions(client: Any, user_id: str) -> list[dict[str, Any]]:
-    res = (
-        client.table("positions")
-        .select("*")
-        .eq("user_id", user_id)
-        .execute()
-    )
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in _rows(res):
-        ticker = str(row.get("ticker") or "").strip()
-        if not ticker:
-            continue
-        key = ticker.upper()
-        category = str(row.get("category") or "")
-        shares = _safe_float(row.get("shares")) or 0.0
-        drip = _safe_float(row.get("drip_shares")) or 0.0
-        if category.upper() == "SELL" or (shares + drip) <= 0:
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(row)
-    return out
-
-
-def _load_latest_close_prices(
-    client: Any, tickers: list[str]
-) -> dict[str, float]:
-    """Latest stored close per ticker from price_history — DB read only,
-    zero provider calls. Missing prices are simply absent (honest)."""
-    if not tickers:
-        return {}
-    try:
-        res = (
-            client.table("price_history")
-            .select("ticker,price_date,close_price")
-            .in_("ticker", tickers)
-            .order("price_date", desc=True)
-            .limit(max(500, len(tickers) * 10))
-            .execute()
-        )
-    except Exception:
-        return {}
+def _latest_price_map(price_rows: list[dict[str, Any]]) -> dict[str, float]:
+    """First occurrence per ticker in ``price_rows`` — a pure projection of
+    the EXACT rows the strict preflight already read (ordered desc by
+    ``price_date`` by that same query), never a second price_history read."""
     prices: dict[str, float] = {}
-    for row in _rows(res):
+    for row in price_rows:
         ticker = str(row.get("ticker") or "").upper()
         close = _safe_float(row.get("close_price"))
         if ticker and close is not None and ticker not in prices:
@@ -237,10 +200,28 @@ def build_frozen_scope_rows(
 
 PREFLIGHT_SCHEMA_VERSION = "run_intel_preflight_v1"
 
-_PREFLIGHT_BLOCKED_MESSAGE = (
-    "Run Intel did not start because the portfolio totals could not be "
-    "verified. Refresh or repair the portfolio data, then try again."
-)
+# Truthful, code-specific copy (never one generic sentence for every block).
+_PREFLIGHT_MESSAGES: dict[str, str] = {
+    "portfolio_truth_unavailable": (
+        "Run Intel did not start because the portfolio totals could not be "
+        "verified. Refresh or repair the portfolio data, then try again."
+    ),
+    "portfolio_snapshot_stale": (
+        "Run Intel did not start because the portfolio snapshot is still "
+        "out of date after an automatic refresh attempt. Refresh the "
+        "portfolio snapshot, then try again."
+    ),
+    "portfolio_reconciliation_failed": (
+        "Run Intel did not start because portfolio totals do not reconcile "
+        "with recorded positions. Resolve the reconciliation issue, then "
+        "try again."
+    ),
+    "portfolio_refresh_failed": (
+        "Run Intel did not start because the portfolio snapshot is stale "
+        "and the automatic refresh failed. Refresh the portfolio again."
+    ),
+    "portfolio_scope_empty": "Add positions before running Intel.",
+}
 
 
 def _preflight_blocked(
@@ -249,7 +230,7 @@ def _preflight_blocked(
     return {
         "blocked": True,
         "code": code,
-        "message": _PREFLIGHT_BLOCKED_MESSAGE,
+        "message": _PREFLIGHT_MESSAGES[code],
         "repair_action": (repair_action or "See portfolio diagnostics for the exact repair step.")[:300],
         "snapshot_refreshed": snapshot_refreshed,
     }
@@ -258,22 +239,28 @@ def _preflight_blocked(
 async def _run_truth_preflight(
     *, client: Any, user_id: str, now: datetime,
 ) -> dict[str, Any]:
-    """Deterministic portfolio financial-truth preflight.
+    """Deterministic portfolio financial-truth preflight — ONE strict result
+    owns both the verdict and the exact canonical open-position/price rows
+    that produced it, so the frozen scope can never diverge from
+    reconciliation (no time-of-check/time-of-use gap, no second query).
 
-    Reads the existing ``financial_truth_baseline_v1`` contract at most
-    twice, invoking the existing canonical portfolio-snapshot refresh
-    (``PortfolioService.create_snapshot``) at most once on staleness or
-    unavailability. Never relaxes thresholds or duplicates reconciliation
-    math — every verdict is read verbatim from the baseline. Fails closed
-    on any read error.
+    Reads ``financial_truth_baseline_v1``'s strict evaluation at most twice,
+    invoking the existing canonical portfolio-snapshot refresh at most once
+    on staleness/unavailability. Never relaxes thresholds or duplicates
+    reconciliation math. A core read failure (distinguishable from a
+    legitimate empty result) fails closed rather than reporting an empty or
+    healthy portfolio.
     """
     try:
-        baseline = await run_financial_truth_baseline(client, str(user_id))
+        result = await run_financial_truth_baseline_strict(client, str(user_id))
+    except FinancialTruthReadError as exc:
+        logger.error("run_intel.preflight_read_failed user=%s tables=%s", user_id, exc.failed_tables)
+        return _preflight_blocked("portfolio_truth_unavailable", None)
     except Exception as exc:
         logger.error("run_intel.preflight_read_failed user=%s err=%s", user_id, exc)
         return _preflight_blocked("portfolio_truth_unavailable", None)
 
-    snap = baseline["snapshot_truth"]
+    snap = result["snapshot_truth"]
     refreshed = False
     if snap.get("status") != "ok" or snap.get("snapshot_is_stale"):
         try:
@@ -282,20 +269,24 @@ async def _run_truth_preflight(
         except Exception as exc:
             logger.warning("run_intel.preflight_refresh_failed user=%s err=%s", user_id, exc)
             return _preflight_blocked(
-                "portfolio_refresh_failed", baseline["verdict"].get("next_required_fix"),
+                "portfolio_refresh_failed", result["verdict"].get("next_required_fix"),
             )
+        # Final strict read — its own open-position/price rows are the ONLY
+        # ones the frozen scope may use; a position inserted/removed/changed
+        # since the first read is reflected here, never in a stale earlier
+        # read.
         try:
-            baseline = await run_financial_truth_baseline(client, str(user_id))
+            result = await run_financial_truth_baseline_strict(client, str(user_id))
         except Exception as exc:
             logger.error("run_intel.preflight_reread_failed user=%s err=%s", user_id, exc)
             return _preflight_blocked(
                 "portfolio_truth_unavailable", None, snapshot_refreshed=True,
             )
-        snap = baseline["snapshot_truth"]
+        snap = result["snapshot_truth"]
 
-    verdict = baseline["verdict"]
-    recon = baseline["reconciliation"]
-    pos = baseline["position_derived_truth"]
+    verdict = result["verdict"]
+    recon = result["reconciliation"]
+    pos = result["position_derived_truth"]
 
     if snap.get("status") != "ok":
         return _preflight_blocked(
@@ -307,15 +298,21 @@ async def _run_truth_preflight(
             "portfolio_snapshot_stale", verdict.get("next_required_fix"),
             snapshot_refreshed=refreshed,
         )
-    if pos.get("status") != "ok" or not pos.get("market_value_feasible"):
-        # No positions row at all (vs. positions present but truth otherwise
-        # broken, e.g. missing prices) is a distinct, independently-coded
-        # block — the scope is empty, not the truth unverifiable.
-        if pos.get("status") != "ok" and pos.get("reason") == "no_positions_found":
-            return _preflight_blocked(
-                "portfolio_scope_empty", "Add or import at least one open position.",
-                snapshot_refreshed=refreshed,
-            )
+    if not pos.get("open_position_count"):
+        return _preflight_blocked(
+            "portfolio_scope_empty", "Add or import at least one open position.",
+            snapshot_refreshed=refreshed,
+        )
+    if pos.get("duplicate_active_tickers"):
+        # Duplicate active rows are a financial-truth defect, not a valid
+        # scope — never silently deduplicated.
+        dupes = ", ".join(pos["duplicate_active_tickers"][:5])
+        return _preflight_blocked(
+            "portfolio_reconciliation_failed",
+            f"Remove or close duplicate active positions: {dupes}",
+            snapshot_refreshed=refreshed,
+        )
+    if not pos.get("market_value_feasible"):
         return _preflight_blocked(
             "portfolio_truth_unavailable", verdict.get("next_required_fix"),
             snapshot_refreshed=refreshed,
@@ -328,6 +325,8 @@ async def _run_truth_preflight(
 
     return {
         "blocked": False,
+        "open_positions": result["_open_positions"],
+        "price_rows": result["_price_rows"],
         "summary": {
             "schema_version": PREFLIGHT_SCHEMA_VERSION,
             "status": "passed",
@@ -345,21 +344,18 @@ def _preflight_not_created(session_id: str, preflight: dict[str, Any]) -> dict[s
     # portfolio_scope_empty keeps the pre-existing "no_active_holdings"
     # reason/copy for backward-compatible frontend rendering (the button
     # stays the idle "Add positions" state, not a retry-failure state).
-    if code == "portfolio_scope_empty":
-        reason, plain = "no_active_holdings", "Add positions before running Intel."
-    else:
-        reason, plain = code, preflight["message"]
+    reason = "no_active_holdings" if code == "portfolio_scope_empty" else code
     return {
         "created": False,
         "run_session_id": session_id,
         "session_status": "not_created",
         "current_stage": None,
         "reason": reason,
-        "plain_status": plain,
+        "plain_status": preflight["message"],
         "retryable": code in ("portfolio_refresh_failed", "portfolio_truth_unavailable"),
         "status": "blocked",
         "code": code,
-        "message": plain,
+        "message": preflight["message"],
         "repair_action": preflight["repair_action"],
         "provider_calls": 0,
         "llm_calls": 0,
@@ -417,28 +413,11 @@ async def create_distributed_session(
     if preflight["blocked"]:
         return _preflight_not_created(session_id, preflight)
 
-    positions = await asyncio.to_thread(_load_active_positions, client, str(user_id))
-    if not positions:
-        return {
-            "created": False,
-            "run_session_id": session_id,
-            "session_status": "not_created",
-            "current_stage": None,
-            "reason": "no_active_holdings",
-            "plain_status": "Add positions before running Intel.",
-            "retryable": False,
-            "status": "blocked",
-            "code": "portfolio_scope_empty",
-            "message": "Add positions before running Intel.",
-            "repair_action": "Add or import at least one open position.",
-            "provider_calls": 0,
-            "llm_calls": 0,
-        }
-
-    tickers = [str(p.get("ticker") or "").strip() for p in positions]
-    prices = await asyncio.to_thread(
-        _load_latest_close_prices, client, [t.upper() for t in tickers]
-    )
+    # The frozen scope comes EXCLUSIVELY from the exact rows the passed
+    # preflight already read and reconciled against — no second positions/
+    # price_history query, no time-of-check/time-of-use gap.
+    positions = preflight["open_positions"]
+    prices = _latest_price_map(preflight["price_rows"])
     prior_actions = await asyncio.to_thread(_load_prior_actions, client, str(user_id))
     scope_rows = build_frozen_scope_rows(positions, prices, prior_actions)
 
@@ -601,9 +580,11 @@ async def repair_session_graph(
     session_id = str(session.get("id"))
     now = now or _now()
     try:
-        positions = await asyncio.to_thread(
-            _load_active_positions, client, str(user_id)
-        )
+        try:
+            truth = await run_financial_truth_baseline_strict(client, str(user_id))
+        except Exception:
+            truth = None
+        positions = truth["_open_positions"] if truth else []
         if not positions:
             # Scope no longer loadable — reserved honest terminal failure.
             await asyncio.to_thread(
@@ -618,10 +599,7 @@ async def repair_session_graph(
                 .execute()
             )
             return False
-        tickers = [str(p.get("ticker") or "").strip() for p in positions]
-        prices = await asyncio.to_thread(
-            _load_latest_close_prices, client, [t.upper() for t in tickers]
-        )
+        prices = _latest_price_map(truth["_price_rows"])
         prior_actions = await asyncio.to_thread(
             _load_prior_actions, client, str(user_id)
         )
@@ -878,16 +856,25 @@ def _plain_status(
 
 
 def _evidence_summary_line(metrics: Optional[dict[str, Any]]) -> Optional[str]:
-    """Compact, truthful technical-detail line from REAL session metrics
-    only — never a zero placeholder when metrics are unavailable."""
+    """Compact, truthful technical-detail line built ONLY from literal
+    session counters (contract §6) — never a placeholder when metrics are
+    entirely unavailable. A counter's own key is absent (never 0) when
+    nothing of that kind ever happened this session — e.g. an immediate
+    rerun that reuses every lane never sets ``lanes_refreshed`` at all — so
+    the line still renders once EITHER sibling counter in a pair exists,
+    treating the other as a genuine zero rather than suppressing the line."""
     metrics = metrics or {}
     parts: list[str] = []
-    lanes_reused, lanes_refreshed = metrics.get("cache_hits"), metrics.get("lanes_refreshed")
-    if isinstance(lanes_reused, int) and isinstance(lanes_refreshed, int) and (lanes_reused or lanes_refreshed):
-        parts.append(f"Evidence: {lanes_reused} lanes reused, {lanes_refreshed} refreshed.")
-    llm_reused, llm_calls = metrics.get("llm_reused"), metrics.get("llm_calls")
-    if isinstance(llm_reused, int) and isinstance(llm_calls, int) and (llm_reused or llm_calls):
-        parts.append(f"Specialist analysis: {llm_reused} reused, {llm_calls} refreshed.")
+    if "cache_hits" in metrics or "lanes_refreshed" in metrics:
+        lanes_reused = int(metrics.get("cache_hits") or 0)
+        lanes_refreshed = int(metrics.get("lanes_refreshed") or 0)
+        if lanes_reused or lanes_refreshed:
+            parts.append(f"Evidence: {lanes_reused} lanes reused, {lanes_refreshed} refreshed.")
+    if "llm_reused" in metrics or "llm_calls" in metrics:
+        llm_reused = int(metrics.get("llm_reused") or 0)
+        llm_calls = int(metrics.get("llm_calls") or 0)
+        if llm_reused or llm_calls:
+            parts.append(f"Specialist analysis: {llm_reused} reused, {llm_calls} refreshed.")
     return " ".join(parts) if parts else None
 
 

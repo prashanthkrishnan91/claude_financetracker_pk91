@@ -15,6 +15,7 @@ from tests.distributed_run_intel_test_utils import (
     FakeSupabase,
     GOLDEN_34,
     seed_golden_portfolio,
+    seed_position,
     seed_reconciled_snapshot,
     now_utc,
 )
@@ -65,7 +66,7 @@ async def test_active_session_skips_preflight_entirely(monkeypatch):
     )
     assert first["created"] is True
 
-    monkeypatch.setattr(control, "run_financial_truth_baseline", _forbidden)
+    monkeypatch.setattr(control, "run_financial_truth_baseline_strict", _forbidden)
     monkeypatch.setattr(control, "PortfolioService", _forbidden)
 
     result = await control.create_distributed_session(
@@ -188,7 +189,7 @@ async def test_database_read_failure_fails_closed(monkeypatch):
     async def _boom(*_args, **_kwargs):
         raise RuntimeError("db down")
 
-    monkeypatch.setattr(control, "run_financial_truth_baseline", _boom)
+    monkeypatch.setattr(control, "run_financial_truth_baseline_strict", _boom)
     result = await control.create_distributed_session(
         client=client, user_id=USER, session_id=str(uuid.uuid4()),
     )
@@ -196,3 +197,87 @@ async def test_database_read_failure_fails_closed(monkeypatch):
     assert result["provider_calls"] == 0
     assert result["llm_calls"] == 0
     assert client.rows("intel_run_sessions") == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_active_tickers_block_instead_of_deduplicating():
+    client = FakeSupabase()
+    seed_position(client, USER, "AAPL")
+    seed_position(client, USER, "AAPL", allow_duplicate=True)  # a truth defect
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    assert result["code"] == "portfolio_reconciliation_failed"
+    assert "AAPL" in result["repair_action"]
+    assert client.rows("intel_run_sessions") == []
+
+
+@pytest.mark.asyncio
+async def test_position_inserted_during_refresh_is_reflected_not_missed(monkeypatch):
+    """TOCTOU proof: a position that appears only after the canonical refresh
+    (the FINAL strict read) must be part of the frozen scope — the session
+    must never freeze from the stale first read."""
+    client = FakeSupabase()
+    seed_position(client, USER, "AAPL")
+    client.rows("portfolio_snapshots")[0]["snapshot_at"] = (
+        now_utc() - timedelta(hours=48)
+    ).isoformat()
+
+    class _RefreshAndInsert:
+        def __init__(self, *, user_id, client=None, **_kw):
+            self._user_id = str(user_id)
+            self._client = client
+
+        async def create_snapshot(self):
+            # Simulate a concurrent import landing between the first read
+            # and the refresh.
+            seed_position(self._client, self._user_id, "MSFT")
+            return {}
+
+    monkeypatch.setattr(control, "PortfolioService", _RefreshAndInsert)
+    session_id = str(uuid.uuid4())
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=session_id,
+    )
+    assert result["created"] is True
+    session = client.rows("intel_run_sessions")[0]
+    assert sorted(session["holdings_scope"]) == ["AAPL", "MSFT"]
+    ticker_rows = {r["ticker"] for r in client.rows("intel_run_tickers")}
+    assert ticker_rows == {"AAPL", "MSFT"}
+
+
+@pytest.mark.asyncio
+async def test_position_query_failure_blocks_not_reported_as_empty_scope(monkeypatch):
+    client = FakeSupabase()
+    seed_golden_portfolio(client, USER)
+
+    def _raise_on_positions(name):
+        if name == "positions":
+            raise RuntimeError("positions query failed")
+        return FakeSupabase.table(client, name)
+
+    monkeypatch.setattr(client, "table", _raise_on_positions)
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=str(uuid.uuid4()),
+    )
+    # Must be reported as an unverifiable truth read, never as an empty
+    # portfolio (which would otherwise render the misleading "Add positions"
+    # idle state instead of an honest failure).
+    assert result["code"] == "portfolio_truth_unavailable"
+    assert result["reason"] != "no_active_holdings"
+    assert client.rows("intel_run_sessions") == []
+
+
+@pytest.mark.asyncio
+async def test_frozen_scope_values_come_from_the_passed_preflight_result():
+    client = FakeSupabase()
+    seed_position(client, USER, "AAPL", shares=10.0, avg_cost=100.0, close_price=150.0)
+    session_id = str(uuid.uuid4())
+    result = await control.create_distributed_session(
+        client=client, user_id=USER, session_id=session_id,
+    )
+    assert result["created"] is True
+    row = next(r for r in client.rows("intel_run_tickers") if r["ticker"] == "AAPL")
+    assert row["quantity"] == 10.0
+    assert row["market_value"] == 1500.0
+    assert row["cost_basis"] == 1000.0

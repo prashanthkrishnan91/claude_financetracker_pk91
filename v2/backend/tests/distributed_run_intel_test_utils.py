@@ -195,9 +195,16 @@ def seed_position(
     shares: float = 10.0,
     avg_cost: float = 100.0,
     close_price: Optional[float] = 120.0,
+    allow_duplicate: bool = False,
 ) -> None:
-    client.store.setdefault("positions", []).append({
-        "id": str(uuid.uuid4()),
+    """Upsert-by-(user, ticker) — re-seeding the same ticker (e.g. to
+    represent a later session's unchanged holding) updates the existing row
+    rather than creating a second active row for it, since duplicate active
+    tickers are now a financial-truth defect the preflight blocks on. Pass
+    ``allow_duplicate=True`` to deliberately create a genuine duplicate row
+    for tests that exercise that block."""
+    rows = client.store.setdefault("positions", [])
+    payload = {
         "user_id": user_id,
         "ticker": ticker,
         "category": category,
@@ -207,7 +214,15 @@ def seed_position(
         "drip_cost": 0,
         "lt_eligible": False,
         "lt_date": None,
-    })
+    }
+    existing = None if allow_duplicate else next(
+        (r for r in rows if str(r.get("user_id")) == str(user_id) and r.get("ticker") == ticker),
+        None,
+    )
+    if existing is not None:
+        existing.update(payload)
+    else:
+        rows.append({"id": str(uuid.uuid4()), **payload})
     if close_price is not None:
         client.store.setdefault("price_history", []).append({
             "id": str(uuid.uuid4()),

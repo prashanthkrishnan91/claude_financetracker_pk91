@@ -1,40 +1,36 @@
-"""financial_evidence_normalization_v1 — versioned monetary + news evidence
-normalization applied before durable persistence or LLM/specialist exposure.
-
-Pure functions only: no IO, no providers, no LLM calls. Bumping either
-version constant invalidates cross-session reuse of the affected lane's
-pre-normalization outputs (evidence_bundle_v1's fingerprint covers the
-normalized shape, never the raw provider dict).
+"""financial_evidence_normalization_v1 — versioned monetary + news
+normalization before durable persistence/LLM exposure. Pure functions only.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-NORMALIZATION_VERSION = "financial_evidence_normalization_v1"
-NEWS_NORMALIZATION_VERSION = "financial_evidence_normalization_v1"
+# v2: quote vs. statement currency split; EPS is per_share not a ratio;
+# NaN/infinite rejected; non-ISO/mixed-case units (GBX/GBp) rejected.
+NORMALIZATION_VERSION = "financial_evidence_normalization_v2"
+NEWS_NORMALIZATION_VERSION = "financial_evidence_normalization_v2"
 
-_MONETARY_FIELDS = (
-    "market_cap", "free_cash_flow", "operating_cash_flow", "net_income",
-    "revenue", "total_debt", "cash", "ebitda", "target_mean_price",
-)
+_STATEMENT_FIELDS = ("revenue", "free_cash_flow", "operating_cash_flow", "net_income", "total_debt", "cash", "ebitda")  # reporting currency
+_QUOTE_MONETARY_FIELDS = ("market_cap", "target_mean_price")  # quote currency
 _RATIO_FIELDS = (
-    "pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "eps",
-    "profit_margin", "gross_margin", "revenue_growth", "earnings_growth",
-    "debt_to_equity", "return_on_equity", "beta", "dividend_yield",
-    "recommendation_mean",
+    "pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "profit_margin", "gross_margin",
+    "revenue_growth", "earnings_growth", "debt_to_equity", "return_on_equity", "beta",
+    "dividend_yield", "recommendation_mean",
 )
-_SCALE_LABELS = (
-    (1_000_000_000_000.0, "trillion"),
-    (1_000_000_000.0, "billion"),
-    (1_000_000.0, "million"),
-)
-
+_SCALE_LABELS = ((1_000_000_000_000.0, "trillion"), (1_000_000_000.0, "billion"), (1_000_000.0, "million"))
+_ISO_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+_NON_ISO_CODES = frozenset({"GBX"})  # pence-quoted UK listings — never == GBP
 
 def _valid_iso_currency(value: Any) -> Optional[str]:
-    return value.upper() if isinstance(value, str) and len(value) == 3 and value.isalpha() else None
+    ok = isinstance(value, str) and _ISO_CURRENCY_RE.fullmatch(value) and value not in _NON_ISO_CODES
+    return value if ok else None
 
+def _finite(value: Any) -> Optional[float]:
+    value = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    return value if value is not None and math.isfinite(value) else None
 
 def _format_scaled(value: float, currency: str) -> str:
     magnitude = abs(value)
@@ -43,87 +39,95 @@ def _format_scaled(value: float, currency: str) -> str:
             return f"{currency} {value / threshold:.1f} {label}"
     return f"{currency} {value:,.2f}"
 
-
 def normalize_fundamentals(raw: dict[str, Any]) -> dict[str, Any]:
-    """Separate market-price currency from reporting currency, label every
-    monetary metric with its verified ISO-4217 reporting currency, leave
-    ratios/percentages dimensionless, and never guess a currency. An ADR's
-    quote currency (USD) is never applied to its TWD/EUR/JPY financials."""
+    """Label each field by its real currency domain — never substituted."""
     reporting_currency = _valid_iso_currency(raw.get("financial_currency"))
-    market_price_currency = _valid_iso_currency(raw.get("quote_currency")) or reporting_currency
-
+    quote_currency = _valid_iso_currency(raw.get("quote_currency"))
     monetary: dict[str, Any] = {}
     compact: dict[str, str] = {}
     gaps: list[str] = []
-    for field in _MONETARY_FIELDS:
-        value = raw.get(field)
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or value != value:
-            continue
-        if reporting_currency is None:
+
+    def _add(field: str, currency: Optional[str], *, unit: Optional[str] = None) -> None:
+        value = _finite(raw.get(field))
+        if value is None:
+            return
+        if currency is None:
             gaps.append(field)
-            continue
-        monetary[field] = {
-            "value": float(value), "currency": reporting_currency,
-            "as_reported": True, "source_field": field,
-        }
-        compact[field] = _format_scaled(float(value), reporting_currency)
+            return
+        label = f"{currency} {value:,.2f} per share" if unit else _format_scaled(value, currency)
+        entry = {"value": value, "currency": currency, "as_reported": True, "source_field": field}
+        monetary[field] = {**entry, "unit": unit} if unit else entry
+        compact[field] = label
 
-    ratios = {
-        field: raw[field] for field in _RATIO_FIELDS
-        if isinstance(raw.get(field), (int, float)) and not isinstance(raw.get(field), bool)
-    }
+    for field in _STATEMENT_FIELDS:
+        _add(field, reporting_currency)
+    for field in _QUOTE_MONETARY_FIELDS:
+        _add(field, quote_currency)
+    _add("eps", quote_currency, unit="per_share")
 
+    ratios = {f: _finite(raw.get(f)) for f in _RATIO_FIELDS if _finite(raw.get(f)) is not None}
     return {
         "schema_version": NORMALIZATION_VERSION,
-        "market_price_currency": market_price_currency,
+        "market_price_currency": quote_currency,
         "reporting_currency": reporting_currency,
         "monetary": monetary,
         "ratios": ratios,
         "compact": compact,
-        "normalization_gaps": gaps,
+        "normalization_gaps": sorted(set(gaps)),
     }
 
-# ── News relevance / timestamp / freshness (section 3) ──────────────────────
 _MAX_ACCEPTED_ARTICLES = 8
 _MAX_ARTICLE_AGE_DAYS = 14
-_TOKEN_PATTERN_CACHE: dict[str, "re.Pattern[str]"] = {}
 
-
-def _ticker_token_pattern(ticker: str) -> "re.Pattern[str]":
-    pattern = _TOKEN_PATTERN_CACHE.get(ticker)
-    if pattern is None:
-        pattern = re.compile(r"\b" + re.escape(ticker) + r"\b", re.IGNORECASE)
-        _TOKEN_PATTERN_CACHE[ticker] = pattern
-    return pattern
-
+def _normalize_news_item(raw: dict[str, Any]) -> dict[str, Any]:
+    # Unifies the legacy top-level shape + the nested {content: {...}} shape.
+    content = raw.get("content") if isinstance(raw.get("content"), dict) else {}
+    provider = content.get("provider") if isinstance(content.get("provider"), dict) else {}
+    canonical = content.get("canonicalUrl") if isinstance(content.get("canonicalUrl"), dict) else {}
+    return {
+        "headline": content.get("title") or raw.get("headline") or raw.get("title"),
+        "summary": content.get("summary") or content.get("description") or raw.get("summary"),
+        "datetime": content.get("pubDate") or raw.get("datetime") or raw.get("providerPublishTime"),
+        "source": provider.get("displayName") or raw.get("source") or raw.get("publisher"),
+        "id": raw.get("id") or raw.get("uuid") or content.get("id"),
+        "link": canonical.get("url") or raw.get("link"),
+        "related_tickers": raw.get("related_tickers") or raw.get("relatedTickers") or content.get("relatedTickers") or [],
+    }
 
 def _valid_publication(raw_dt: Any, now: datetime) -> Optional[datetime]:
-    try:
-        ts = float(raw_dt)
-    except (TypeError, ValueError):
-        return None
-    if ts != ts or ts in (float("inf"), float("-inf")) or ts <= 0:
-        return None
-    try:
-        published = datetime.fromtimestamp(ts, tz=timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        return None
-    if published > now + timedelta(hours=1):
-        return None
-    if published < now - timedelta(days=_MAX_ARTICLE_AGE_DAYS):
+    # Finite Unix timestamp OR ISO/RFC3339 datetime — never fetch time.
+    if isinstance(raw_dt, str):
+        try:
+            published = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+    else:
+        try:
+            ts = float(raw_dt)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(ts) or ts <= 0:
+            return None
+        try:
+            published = datetime.fromtimestamp(ts, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if published > now + timedelta(hours=1) or published < now - timedelta(days=_MAX_ARTICLE_AGE_DAYS):
         return None
     return published
 
-
 def _is_relevant(item: dict[str, Any], ticker: str) -> bool:
+    # related_tickers, when nonempty, is AUTHORITATIVE — no text override on
+    # mismatch. Exact-token text is a fallback only when absent (no fuzzy).
     related = item.get("related_tickers") or []
-    if isinstance(related, list) and any(
-        str(r).strip().upper() == ticker.upper() for r in related
-    ):
-        return True
+    if isinstance(related, list) and related:
+        return any(str(r).strip().upper() == ticker.upper() for r in related)
+    if len(ticker) < 3:
+        return False
     text = f"{item.get('headline') or ''} {item.get('summary') or ''}"
-    return bool(_ticker_token_pattern(ticker).search(text))
-
+    return bool(re.search(r"\b" + re.escape(ticker) + r"\b", text, re.IGNORECASE))
 
 def _identity_key(item: dict[str, Any]) -> Optional[str]:
     for field in ("id", "link"):
@@ -133,21 +137,19 @@ def _identity_key(item: dict[str, Any]) -> Optional[str]:
     headline = (item.get("headline") or "").strip().lower()
     return f"headline:{headline}:{item.get('datetime')}" if headline else None
 
-
 def filter_news_items(
-    items: list[dict[str, Any]], ticker: str, now: Optional[datetime] = None,
+    raw_items: list[dict[str, Any]], ticker: str, now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Deterministic ticker relevance + valid-timestamp + dedup gate. Only
-    accepted articles may enter durable lane evidence, the bundle, and the
-    sentiment specialist prompt — a fetch-time timestamp never substitutes
-    for an invalid publication timestamp."""
+    """Normalize both provider shapes, then relevance+timestamp+dedup gate —
+    only accepted articles reach durable evidence/prompt. URLs never logged."""
     now = now or datetime.now(timezone.utc)
     accepted: list[dict[str, Any]] = []
     seen: set[str] = set()
     rejected_invalid_timestamp = 0
     rejected_irrelevant = 0
     duplicate = 0
-    for item in items or []:
+    for raw in raw_items or []:
+        item = _normalize_news_item(raw)
         published = _valid_publication(item.get("datetime"), now)
         if published is None:
             rejected_invalid_timestamp += 1

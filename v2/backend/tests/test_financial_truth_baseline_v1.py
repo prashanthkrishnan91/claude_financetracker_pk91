@@ -17,6 +17,7 @@ from app.services.financial_truth_baseline_v1 import (
     RECONCILIATION_CERTIFIED_PCT,
     RECONCILIATION_DEGRADED_PCT,
     SNAPSHOT_STALE_HOURS,
+    FinancialTruthReadError,
     _business_days_since,
     _intel_truth,
     _is_price_stale,
@@ -27,6 +28,7 @@ from app.services.financial_truth_baseline_v1 import (
     _transaction_truth,
     _verdict,
     run_financial_truth_baseline,
+    run_financial_truth_baseline_strict,
 )
 
 
@@ -151,6 +153,7 @@ class _MockDB:
         agent_rows: list | None = None,
         intel_snap_rows: list | None = None,
         intel_snap_raise: bool = True,
+        raise_tables: frozenset[str] = frozenset(),
     ):
         self._snap = snap_rows or []
         self._pos = pos_rows or []
@@ -160,6 +163,7 @@ class _MockDB:
         self._agent = agent_rows or []
         self._intel_snap = intel_snap_rows
         self._intel_snap_raise = intel_snap_raise
+        self._raise_tables = raise_tables
 
     def table(self, name: str) -> _MockQuery:
         mapping = {
@@ -174,7 +178,7 @@ class _MockDB:
             if self._intel_snap_raise:
                 return _MockQuery([], raise_on_execute=True)
             return _MockQuery(self._intel_snap or [])
-        return _MockQuery(mapping.get(name, []))
+        return _MockQuery(mapping.get(name, []), raise_on_execute=name in self._raise_tables)
 
 
 USER_ID = str(uuid4())
@@ -654,3 +658,69 @@ class TestPriceTruncationGuard:
         result = _price_truth(prices, tickers, price_rows_loaded_count=500)
         assert result["price_query_truncated"] is False
         assert not any("truncated" in w for w in result["warnings"])
+
+
+# ── Strict mode (Run Intel preflight): core-read failures never silently
+#    become empty results; exact raw open-position/price rows are exposed ──
+
+class TestFinancialTruthBaselineStrict:
+    @pytest.mark.asyncio
+    async def test_positions_query_failure_raises_not_empty_portfolio(self):
+        db = _MockDB(
+            snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"positions"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "positions" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_price_history_query_failure_raises_not_empty_portfolio(self):
+        db = _MockDB(
+            snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"price_history"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "price_history" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_snapshot_query_failure_raises(self):
+        db = _MockDB(
+            pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"portfolio_snapshots"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "portfolio_snapshots" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_legitimate_empty_portfolio_does_not_raise(self):
+        db = _MockDB(snap_rows=[], pos_rows=[], price_rows=[])
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["_core_read_failed"] is False
+        assert result["position_derived_truth"]["open_position_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_strict_result_exposes_exact_open_positions_and_price_rows(self):
+        pos = [_pos("AAPL", 500.0, 150.0)]
+        prices = [_price("AAPL", 200.0, days_old=0)]
+        db = _MockDB(snap_rows=[_snap(100_000.0, 80_000.0)], pos_rows=pos, price_rows=prices)
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["_open_positions"] == pos
+        assert result["_price_rows"] == prices
+
+    @pytest.mark.asyncio
+    async def test_public_diagnostic_never_exposes_underscore_fields(self):
+        db = _MockDB(snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")])
+        result = await run_financial_truth_baseline(db, USER_ID)
+        assert not any(k.startswith("_") for k in result)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_active_tickers_reported_not_deduplicated(self):
+        pos = [_pos("AAPL", 10.0, 150.0), _pos("AAPL", 5.0, 140.0)]
+        db = _MockDB(snap_rows=[_snap()], pos_rows=pos, price_rows=[_price("AAPL")])
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["position_derived_truth"]["duplicate_active_tickers"] == ["AAPL"]
+        # Both raw rows are preserved — never silently deduplicated to one.
+        assert len(result["_open_positions"]) == 2

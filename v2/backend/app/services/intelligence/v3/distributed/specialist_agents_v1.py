@@ -39,7 +39,6 @@ from .task_contracts_v1 import (
     LANE_ETF_FUND_DATA,
     LANE_FUNDAMENTALS,
     LANE_NEWS_SENTIMENT,
-    LANE_PRICE,
     LANE_SEC_CATALYST,
     LANE_SEC_COMPANY_FACTS,
     LANE_TECHNICALS,
@@ -153,7 +152,7 @@ def _now() -> datetime:
 
 
 _FUNDAMENTAL_RATIO_KEYS = (
-    "pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "eps", "profit_margin",
+    "pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "profit_margin",
     "gross_margin", "revenue_growth", "earnings_growth", "debt_to_equity",
     "return_on_equity", "beta", "dividend_yield", "sector", "industry",
 )
@@ -188,7 +187,15 @@ def _compact_fundamental(
 
 
 def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
-    """Trim the bundle to what the axis needs (prompt-size control)."""
+    """Trim the bundle to what the axis needs (prompt-size control).
+
+    Never includes ``market`` (volatile intraday tick — the ``technical``
+    lane's daily history already carries the price signal specialists reason
+    over) or ``prior_action`` (an immediate rerun's own just-published
+    decision). Both are excluded from the prompt AND the fingerprint
+    (``axis_evidence_context``) together — a field must never be visible to
+    the LLM while invisible to reuse, or vice versa. Both remain available on
+    the raw ``bundle`` for deterministic portfolio/decision consumers."""
     base = {
         "ticker": bundle.get("ticker"),
         "asset_type": bundle.get("asset_type"),
@@ -199,11 +206,7 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
             "unrealized_gain_pct": (bundle.get("portfolio_context") or {}).get(
                 "unrealized_gain_pct"
             ),
-            "prior_action": (bundle.get("portfolio_context") or {}).get(
-                "prior_action"
-            ),
         },
-        "market": bundle.get("market"),
         "missing_lanes": bundle.get("missing_lanes"),
         "degraded_lanes": bundle.get("degraded_lanes"),
     }
@@ -232,24 +235,6 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
     return base
 
 
-def axis_input_fingerprint(bundle: dict[str, Any], axis: str) -> str:
-    """Per-axis analytical fingerprint: the axis's OWN compact prompt
-    projection (``_compact_bundle_for_axis``), minus the volatile intraday
-    ``market`` price (same exclusion rationale as the bundle-wide
-    fingerprint) and every other replay-locator/timestamp key. A refreshed
-    lane an axis doesn't read (e.g. news_sentiment for the technical axis)
-    never invalidates that axis's reuse — selective specialist refresh."""
-    compact = dict(_compact_bundle_for_axis(bundle, axis))
-    compact.pop("market", None)
-    # prior_action is an immediate rerun's OWN just-published decision (same
-    # treatment as the bundle-wide fingerprint) — it reaches the prompt
-    # unchanged, it just never gates reuse.
-    context = dict(compact.get("portfolio_context") or {})
-    context.pop("prior_action", None)
-    compact["portfolio_context"] = context
-    return stable_fingerprint(evidence_bundle_v1._strip_volatile(compact))
-
-
 def _nonempty(value: Any) -> bool:
     if isinstance(value, dict):
         return any(v not in (None, "", [], {}) for v in value.values())
@@ -264,10 +249,10 @@ def _axis_supplied_lanes(compact: dict[str, Any], axis: str) -> list[str]:
     bundle-wide ``usable_lanes`` list, and never a superset of what the axis
     itself was actually given (e.g. ``risk_filing``'s narrowed fundamental
     subset counts only when THAT subset is nonempty, even if the full
-    fundamentals lane succeeded)."""
+    fundamentals lane succeeded). ``market``/price is never sent to any axis
+    prompt (see ``_compact_bundle_for_axis``), so no axis ever claims
+    LANE_PRICE lineage."""
     supplied: set[str] = set()
-    if _nonempty(compact.get("market")):
-        supplied.add(LANE_PRICE)
     if _nonempty(compact.get("technical")):
         supplied.add(LANE_TECHNICALS)
     if _nonempty(compact.get("fundamental")) or _nonempty(compact.get("valuation")):
@@ -301,9 +286,11 @@ def _axis_supplied_lanes(compact: dict[str, Any], axis: str) -> list[str]:
 def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
     """Single shared source of truth for "what evidence was actually
     supplied to this axis" (contract §2). Used IDENTICALLY by prompt
-    construction, persisted ``evidence_refs``, cross-session reuse
-    rebinding, and the bounded prompt-safe source projection — nobody
-    derives supplied lanes or a lineage manifest any other way.
+    construction, the specialist reuse lookup, the persisted
+    ``input_fingerprint``, ``evidence_refs`` rebinding on reuse, and the
+    bounded prompt-safe source projection — nobody derives supplied lanes, a
+    lineage manifest, or a fingerprint any other way; there is exactly one
+    prompt/fingerprint shape.
 
     Artifact-backed lanes only ever appear in ``compact_bundle`` (and
     therefore only ever count as supplied) when ``evidence_bundle_v1`` has
@@ -326,10 +313,19 @@ def axis_evidence_context(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
     compact_with_sources["evidence_sources"] = source_lineage_v1.compact_projection(
         manifest["refs"]
     )
+    # The ONE fingerprint for this axis: hashes exactly the object serialized
+    # into the LLM prompt (``compact_with_sources``, including
+    # ``evidence_sources``) minus only timestamps/cache markers/internal
+    # storage identifiers (``_strip_volatile``) — nothing visible to the LLM
+    # is excluded here, and nothing excluded here is visible to the LLM.
+    input_fingerprint = stable_fingerprint(
+        evidence_bundle_v1._strip_volatile(compact_with_sources)
+    )
     return {
         "compact_bundle": compact_with_sources,
         "supplied_lanes": supplied_lanes,
         "manifest": manifest,
+        "input_fingerprint": input_fingerprint,
     }
 
 
@@ -451,7 +447,13 @@ class SpecialistBatchOutcome:
 
 
 def _axis_has_evidence(bundle: dict[str, Any], axis: str) -> bool:
-    """Cost control: no LLM call for a ticker with no usable axis evidence."""
+    """Cost control: no LLM call for a ticker with no usable axis evidence.
+
+    Checked against the axis's own compact prompt projection — ``market`` is
+    never part of it (contract §5), so a ticker with price data alone but no
+    technical/fundamental/sentiment substance is correctly insufficient: the
+    LLM would otherwise be asked to analyze evidence it never actually sees.
+    """
     compact = _compact_bundle_for_axis(bundle, axis)
     for key in ("fundamental", "technical", "sentiment", "sec", "asset_specific",
                 "catalysts", "valuation"):
@@ -462,10 +464,6 @@ def _axis_has_evidence(bundle: dict[str, Any], axis: str) -> bool:
             return True
         if isinstance(value, list) and value:
             return True
-    # Price-only axes (etf_exposure fallback) still count when market exists.
-    market = compact.get("market")
-    if axis == AXIS_ETF_EXPOSURE and isinstance(market, dict) and market:
-        return True
     return False
 
 
@@ -507,7 +505,8 @@ async def execute_specialist_task(
         if not isinstance(bundle, dict) or not bundle:
             outcome.skipped_insufficient.append(ticker)
             continue
-        fingerprint = axis_input_fingerprint(bundle, axis)
+        context = axis_evidence_context(bundle, axis)
+        fingerprint = context["input_fingerprint"]
         fingerprints[ticker] = fingerprint
 
         # Reuse an unchanged prior output instead of a new LLM call. Reuse
@@ -532,7 +531,7 @@ async def execute_specialist_task(
                 # helper the initial analysis and prompt use — a reused
                 # result must never carry forward a prior session's
                 # (possibly stale) source references (contract §4).
-                rebuilt_refs = axis_evidence_context(bundle, axis)["manifest"]
+                rebuilt_refs = context["manifest"]
                 store.upsert_specialist_output(
                     client,
                     run_session_id=session_id,

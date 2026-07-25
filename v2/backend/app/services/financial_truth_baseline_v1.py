@@ -610,16 +610,25 @@ def _verdict(
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
-async def run_financial_truth_baseline(
-    db_client: Any,
-    user_id: str,
-) -> dict[str, Any]:
-    """Stage 11A — Financial Truth Baseline Diagnostic.
+class FinancialTruthReadError(Exception):
+    """A CORE truth query (snapshot/positions/price-history) failed — never
+    silently reinterpreted as an empty/healthy portfolio. Distinguishable
+    from a legitimate empty result (no rows is a valid outcome; a query
+    exception is not)."""
 
-    Read-only. No writes. No provider calls. No LLM calls.
-    Returns a structured audit of the app's financial data integrity.
-    """
+    def __init__(self, failed_tables: list[str]):
+        self.failed_tables = failed_tables
+        super().__init__(f"financial_truth_core_read_failed: {','.join(failed_tables)}")
+
+
+async def _gather_truth_sections(db_client: Any, user_id: str) -> dict[str, Any]:
+    """The ONE query+derivation pass backing both the public diagnostic and
+    the strict Run Intel preflight — no parallel truth formula. Additive
+    underscore-prefixed keys carry the exact raw rows and core-query-failure
+    state; ``run_financial_truth_baseline`` strips them for backward
+    compatibility."""
     generated_at = _now_utc().isoformat()
+    failed_tables: list[str] = []
 
     # ── 1. Portfolio snapshots ────────────────────────────────────────────────
     try:
@@ -633,7 +642,7 @@ async def run_financial_truth_baseline(
         snap_rows: list[dict] = snap_res.data or []
         snap_section = _snapshot_truth(snap_rows)
     except Exception as exc:
-        snap_rows = []
+        failed_tables.append("portfolio_snapshots")
         snap_section = {
             "status": "unavailable",
             "reason": f"query_failed: {type(exc).__name__}: {exc}",
@@ -646,24 +655,28 @@ async def run_financial_truth_baseline(
             "warnings": [],
         }
 
-    # ── 2. Positions ──────────────────────────────────────────────────────────
+    # ── 2. Positions (full row — Run Intel scope freeze needs the same exact
+    #      rows that produced this verdict: shares/avg_cost/category plus
+    #      drip/tax fields, never a second independently-derived query) ──────
     try:
         pos_res = (
             db_client.table("positions")
-            .select("ticker,shares,avg_cost,category,source")
+            .select("ticker,shares,avg_cost,category,source,drip_shares,drip_cost,lt_eligible,lt_date")
             .eq("user_id", user_id)
             .execute()
         )
         pos_rows: list[dict] = pos_res.data or []
     except Exception:
+        failed_tables.append("positions")
         pos_rows = []
 
-    open_tickers: list[str] = [
-        r.get("ticker") for r in pos_rows
+    open_positions = [
+        r for r in pos_rows
         if r.get("ticker")
         and (r.get("category") or "").upper() != "SELL"
         and (_safe_float(r.get("shares")) or 0.0) > 0
     ]
+    open_tickers: list[str] = [r.get("ticker") for r in open_positions]
 
     # ── 3. Price history ──────────────────────────────────────────────────────
     try:
@@ -680,6 +693,7 @@ async def run_financial_truth_baseline(
         else:
             price_rows = []
     except Exception:
+        failed_tables.append("price_history")
         price_rows = []
 
     pos_section = _position_truth(pos_rows, price_rows)
@@ -762,4 +776,40 @@ async def run_financial_truth_baseline(
         "intelligence_layer": intel_section,
         "reconciliation": recon_section,
         "verdict": verdict_section,
+        "_core_read_failed": bool(failed_tables),
+        "_failed_tables": failed_tables,
+        "_open_positions": open_positions,
+        "_price_rows": price_rows,
     }
+
+
+async def run_financial_truth_baseline(
+    db_client: Any,
+    user_id: str,
+) -> dict[str, Any]:
+    """Stage 11A — Financial Truth Baseline Diagnostic.
+
+    Read-only. No writes. No provider calls. No LLM calls.
+    Returns a structured audit of the app's financial data integrity.
+    """
+    full = await _gather_truth_sections(db_client, user_id)
+    return {k: v for k, v in full.items() if not k.startswith("_")}
+
+
+async def run_financial_truth_baseline_strict(
+    db_client: Any,
+    user_id: str,
+) -> dict[str, Any]:
+    """Same computation as ``run_financial_truth_baseline`` (one truth
+    formula, never duplicated), but for the Run Intel preflight ONLY: raises
+    ``FinancialTruthReadError`` when a CORE table query (snapshot/positions/
+    price-history) failed — never silently reports an empty/healthy
+    portfolio — and additionally returns the exact raw open-position rows
+    (``_open_positions``) and price rows (``_price_rows``) that produced
+    this verdict, so the caller can freeze its scope from these SAME rows
+    with no second query and no time-of-check/time-of-use gap.
+    """
+    full = await _gather_truth_sections(db_client, user_id)
+    if full["_core_read_failed"]:
+        raise FinancialTruthReadError(full["_failed_tables"])
+    return full

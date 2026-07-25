@@ -49,6 +49,7 @@ from .task_contracts_v1 import (
     LANE_SEC_COMPANY_FACTS,
     LANE_TECHNICALS,
     LANE_TTL_HOURS,
+    TASK_COLLECT_MACRO_CONTEXT,
     TASK_DEGRADED,
     TASK_SUCCEEDED,
 )
@@ -91,6 +92,12 @@ def _rows(res: Any) -> list[dict[str, Any]]:
 
 # ── TTL reuse ────────────────────────────────────────────────────────────────
 
+class CacheReadError(Exception):
+    """The cache lookup query itself failed — distinguishable from a
+    legitimate miss. Callers must fail closed (TASK_FAILED_RETRYABLE, zero
+    provider calls), never reinterpret an outage as expired evidence."""
+
+
 def _reuse_contract_compatible(lane: str, output: dict[str, Any]) -> bool:
     """A pre-normalization fundamentals/news output is never a compatible
     cache entry once the normalization contract version bumps."""
@@ -101,17 +108,36 @@ def _reuse_contract_compatible(lane: str, output: dict[str, Any]) -> bool:
     return True
 
 
+def _usable_recent_output(row: dict[str, Any], lane: Optional[str], now: datetime) -> Optional[dict[str, Any]]:
+    completed_at = row.get("completed_at")
+    if not isinstance(completed_at, str):
+        return None  # missing completed_at — age cannot be established
+    try:
+        if datetime.fromisoformat(completed_at.replace("Z", "+00:00")) > now:
+            return None  # future-dated — age cannot be trusted
+    except ValueError:
+        return None  # unparsable
+    output = row.get("output")
+    if not isinstance(output, dict):
+        return None  # structurally unusable
+    if lane is not None and not _reuse_contract_compatible(lane, output):
+        return None
+    return output
+
+
 def find_recent_lane_output(
     client: Any,
     *,
     user_id: str,
     ticker: str,
     lane: str,
+    asset_type: str,
     ttl_hours: float,
     now: Optional[datetime] = None,
 ) -> Optional[dict[str, Any]]:
-    """Most recent succeeded output for (user, ticker, lane) within TTL —
-    across sessions. Returns the stored ``output`` dict or None."""
+    """Most recent succeeded output for (user, ticker, asset_type, lane)
+    within TTL — across sessions. None = legitimate miss/ineligible; raises
+    ``CacheReadError`` on an actual query failure (never silently a miss)."""
     if ttl_hours <= 0:
         return None
     now = now or _now()
@@ -122,6 +148,7 @@ def find_recent_lane_output(
             .select("output,completed_at,state")
             .eq("user_id", user_id)
             .eq("ticker", ticker)
+            .eq("asset_type", asset_type)
             .eq("lane", lane)
             .eq("state", TASK_SUCCEEDED)
             .gte("completed_at", cutoff)
@@ -129,24 +156,41 @@ def find_recent_lane_output(
             .limit(1)
             .execute()
         )
-        rows = _rows(res)
-        if not rows:
-            return None
-        row = rows[0]
-        completed_at = row.get("completed_at")
-        try:
-            if isinstance(completed_at, str) and datetime.fromisoformat(
-                completed_at.replace("Z", "+00:00")
-            ) > now:
-                return None  # future-dated — age cannot be trusted
-        except ValueError:
-            return None  # unparsable — age cannot be established
-        output = row.get("output")
-        if not isinstance(output, dict) or not _reuse_contract_compatible(lane, output):
-            return None
-        return output
-    except Exception:
+    except Exception as exc:
+        raise CacheReadError(f"lane:{lane}") from exc
+    rows = _rows(res)
+    return _usable_recent_output(rows[0], lane, now) if rows else None
+
+
+def find_recent_macro_output(
+    client: Any, *, user_id: str, ttl_hours: float, now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """24h macro reuse via the SAME durable task table — user + session/
+    portfolio-scoped identity (task_type, no fabricated ticker), never a
+    second cache/table. Same fail-closed contract as lane reuse."""
+    if ttl_hours <= 0:
         return None
+    now = now or _now()
+    cutoff = (now - timedelta(hours=ttl_hours)).isoformat()
+    try:
+        res = (
+            client.table(TASKS_TABLE)
+            .select("output,completed_at,state")
+            .eq("user_id", user_id)
+            .eq("task_type", TASK_COLLECT_MACRO_CONTEXT)
+            .eq("state", TASK_SUCCEEDED)
+            .gte("completed_at", cutoff)
+            .order("completed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        raise CacheReadError("macro") from exc
+    rows = _rows(res)
+    if not rows:
+        return None
+    output = _usable_recent_output(rows[0], None, now)
+    return output if output and output.get("artifact_id") else None
 
 
 # ── Lane collectors ──────────────────────────────────────────────────────────
@@ -337,6 +381,25 @@ async def _collect_artifact_lane(
     )
 
 
+async def _collect_macro_with_reuse(
+    *, client: Any, user_id: str, session_id: str, settings: Any
+) -> CollectorResult:
+    """24h macro reuse before any provider call — same fail-closed contract
+    as lane reuse (a cache read failure never falls through to a fetch)."""
+    ttl_hours = LANE_TTL_HOURS.get(LANE_MACRO, 24.0)
+    try:
+        cached = await asyncio.to_thread(
+            lambda: find_recent_macro_output(client, user_id=user_id, ttl_hours=ttl_hours)
+        )
+    except CacheReadError:
+        return CollectorResult(TASK_FAILED_RETRYABLE, error_code="macro_cache_read_failed")
+    if cached is not None:
+        return CollectorResult(TASK_SUCCEEDED, output={**cached, "cache_hit": True}, cache_hit=True)
+    return await _collect_macro(
+        client=client, user_id=user_id, session_id=session_id, settings=settings,
+    )
+
+
 async def _collect_macro(
     *, client: Any, user_id: str, session_id: str, settings: Any
 ) -> CollectorResult:
@@ -446,18 +509,22 @@ async def execute_collector_task(
             client=client, user_id=user_id, session_id=session_id
         )
     if task_type == "collect_macro_context":
-        return await _collect_macro(
-            client=client, user_id=user_id, session_id=session_id,
-            settings=settings,
+        return await _collect_macro_with_reuse(
+            client=client, user_id=user_id, session_id=session_id, settings=settings,
         )
 
-    # TTL reuse before any provider call.
+    # TTL reuse before any provider call — a cache READ failure is honestly
+    # retryable, never reinterpreted as "no cache, go fetch".
     ttl = LANE_TTL_HOURS.get(lane, 0.0)
-    cached = await asyncio.to_thread(
-        lambda: find_recent_lane_output(
-            client, user_id=user_id, ticker=ticker, lane=lane, ttl_hours=ttl,
+    try:
+        cached = await asyncio.to_thread(
+            lambda: find_recent_lane_output(
+                client, user_id=user_id, ticker=ticker, lane=lane,
+                asset_type=asset_type, ttl_hours=ttl,
+            )
         )
-    )
+    except CacheReadError:
+        return CollectorResult(TASK_FAILED_RETRYABLE, error_code="cache_read_failed")
     if cached is not None:
         return CollectorResult(
             TASK_SUCCEEDED,
@@ -486,9 +553,8 @@ async def execute_collector_task(
             settings=settings,
         )
     if lane == LANE_MACRO:
-        return await _collect_macro(
-            client=client, user_id=user_id, session_id=session_id,
-            settings=settings,
+        return await _collect_macro_with_reuse(
+            client=client, user_id=user_id, session_id=session_id, settings=settings,
         )
     return CollectorResult(
         "failed", error_code="unknown_lane", error_detail=lane,

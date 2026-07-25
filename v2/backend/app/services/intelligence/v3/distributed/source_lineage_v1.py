@@ -101,25 +101,23 @@ _MAX_REASONABLE_TRUNCATED_REF_COUNT = 10_000
 _MAX_PROMPT_LIST_ITEMS = 2
 
 # Axis -> lanes that axis's compact prompt bundle actually reads (mirrors
-# specialist_agents_v1._compact_bundle_for_axis). Every axis's compact bundle
-# also carries the unconditional ``market`` section, hence LANE_PRICE
-# everywhere. This is intentionally separate from task_contracts_v1's
+# specialist_agents_v1._compact_bundle_for_axis). ``market``/LANE_PRICE is
+# never sent to any axis's prompt (the volatile intraday tick is excluded
+# from both the prompt and the fingerprint — the ``technical`` lane's daily
+# history already carries the price signal), so no axis ever claims
+# LANE_PRICE lineage. This is intentionally separate from task_contracts_v1's
 # AXIS_BACKING_LANES (a scheduling-gate concept owned by run_scheduler_v1) —
 # PR 2 must not change scheduling, only lineage. ``supplied_lanes`` (passed
 # into build_axis_lineage_manifest by specialist_agents_v1.axis_evidence_context)
 # is intersected with this candidate set — it is NEVER derived from this set
 # alone, and never from the bundle-wide usable_lanes list.
 AXIS_CANDIDATE_LANES: dict[str, tuple[str, ...]] = {
-    AXIS_FUNDAMENTAL: (
-        LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST,
-    ),
-    AXIS_TECHNICAL: (LANE_PRICE, LANE_TECHNICALS),
-    AXIS_SENTIMENT: (LANE_PRICE, LANE_NEWS_SENTIMENT, LANE_SEC_CATALYST),
-    AXIS_RISK_FILING: (
-        LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST,
-    ),
-    AXIS_ETF_EXPOSURE: (LANE_PRICE, LANE_TECHNICALS, LANE_ETF_FUND_DATA, LANE_FUNDAMENTALS),
-    AXIS_CRYPTO_MARKET: (LANE_PRICE, LANE_CRYPTO_MARKET, LANE_TECHNICALS),
+    AXIS_FUNDAMENTAL: (LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST),
+    AXIS_TECHNICAL: (LANE_TECHNICALS,),
+    AXIS_SENTIMENT: (LANE_NEWS_SENTIMENT, LANE_SEC_CATALYST),
+    AXIS_RISK_FILING: (LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST),
+    AXIS_ETF_EXPOSURE: (LANE_TECHNICALS, LANE_ETF_FUND_DATA, LANE_FUNDAMENTALS),
+    AXIS_CRYPTO_MARKET: (LANE_CRYPTO_MARKET, LANE_TECHNICALS),
 }
 
 

@@ -303,6 +303,8 @@ class WorkerSupervisor:
                 )
                 if result.cache_hit:
                     buffer["cache_hits"] = buffer.get("cache_hits", 0) + 1
+                else:
+                    buffer["lanes_refreshed"] = buffer.get("lanes_refreshed", 0) + 1
                 await asyncio.to_thread(
                     lambda: store.complete_task(
                         self.client,

@@ -731,3 +731,68 @@ Superseded data: unfinished v1 sessions → `superseded` by migration 027.
 - NO CALL is recorded at session/ticker/status/snapshot-metadata level; the
   visible card contract is unchanged in this slice (deterministic policy's
   existing suppression semantics still govern card actions).
+
+## 17. Operational reliability (final PR: preflight, normalization, selective reuse)
+
+**Portfolio financial-truth preflight.** `session_control_v1.create_distributed_session`
+runs `_run_truth_preflight` after the active-session adoption check and
+before scope freeze: reads `financial_truth_baseline_v1.run_financial_truth_baseline`
+(existing contract, no duplicated math), and on `snapshot_truth.status != "ok"`
+or `snapshot_is_stale` invokes the existing canonical refresh
+(`PortfolioService.create_snapshot`) at most once, then re-reads. A session is
+created only when snapshot availability+freshness, position-derived
+market-value feasibility, and reconciliation (`reconciliation_status == "pass"`)
+all pass; each failure returns one of `portfolio_truth_unavailable` /
+`portfolio_snapshot_stale` / `portfolio_reconciliation_failed` /
+`portfolio_refresh_failed` / `portfolio_scope_empty` via the existing
+`not_created` response shape. A bounded `run_intel_preflight_v1` summary
+persists on the new session's `metrics` JSONB.
+
+**Versioned monetary normalization** (`distributed/evidence_normalization_v1.py`,
+`financial_evidence_normalization_v1`). Every currency-bearing fundamental
+metric is labeled with its verified ISO-4217 reporting currency
+(`financialCurrency` from yfinance `.info`) — never the market-price quote
+currency (`currency`) an ADR happens to trade in. Ratios/percentages stay
+dimensionless. An unknown reporting currency excludes the field from the
+compact specialist projection and records a `normalization_gaps` entry —
+never a guessed `$`. `collectors_v1.find_recent_lane_output` rejects a
+pre-normalization-contract fundamentals/news cache entry even inside TTL
+(`_reuse_contract_compatible`) and any future-dated `completed_at`.
+
+**Accepted-news contract** (same module, `filter_news_items`). An article is
+durable/prompt-eligible only with a finite, non-epoch, non-future, ≤14-day-old
+publication timestamp AND deterministic ticker relevance (provider
+`related_tickers` metadata, else an exact ticker token in headline/summary —
+never fuzzy matching), deduped by provider id/link/normalized-headline+time,
+bounded to 8 accepted articles. Zero accepted articles is an honest degraded
+lane — the sentiment specialist is never called over evidence that doesn't
+exist.
+
+**Lane TTL/reuse matrix (unchanged from §6):** price 0.25h, technicals/
+fundamentals/sec_catalyst/macro 24h, news_sentiment 1h, sec_company_facts
+168h, etf_fund_data 2160h — cross-session reuse via the pre-existing
+`find_recent_lane_output`, now with the two eligibility fixes above.
+
+**Selective specialist refresh — two real fixes.** (1) `prior_action` is
+excluded from both the bundle-wide fingerprint
+(`evidence_bundle_v1._fingerprint_source`) and the new per-axis fingerprint —
+an immediate rerun's own just-published decision was becoming the next
+session's `prior_action`, forcing every decided ticker to re-analyze
+regardless of whether evidence changed; it still reaches the prompt
+unchanged, it just never gates reuse (same treatment as the volatile
+intraday `market` price). (2) `specialist_agents_v1.axis_input_fingerprint`
+computes reuse eligibility from the axis's OWN compact prompt projection
+(`_compact_bundle_for_axis`) rather than the whole-bundle fingerprint, so a
+refreshed lane an axis doesn't read (e.g. a fresh news fetch for the
+technical axis) no longer invalidates that axis's reuse. `PROMPT_VERSION`
+bumped to `distributed_specialist_v3`. Both fixes were found and proven by
+real end-to-end `WorkerSupervisor`-driven tests (two full sessions run back
+to back over the same durable store), not asserted from source reading.
+
+**Cost/technical-detail line.** `worker_supervisor_v1` tracks a
+`lanes_refreshed` session-metrics counter alongside the existing
+`cache_hits`; `session_control_v1.get_session_status` derives an additive,
+optional `evidence_summary_line` ("Evidence: N lanes reused, M refreshed.
+Specialist analysis: N reused, M refreshed.") from real terminal-session
+metrics only, omitted (never a zero placeholder) when unavailable — rendered
+by the existing `AdvisorReadinessPanel` run-progress region.

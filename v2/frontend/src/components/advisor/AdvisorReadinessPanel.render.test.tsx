@@ -247,6 +247,46 @@ describe("AdvisorReadinessPanel — completed-with-gaps snapshot", () => {
   });
 });
 
+describe("AdvisorReadinessPanel — evidence reuse/refresh summary line", () => {
+  it("renders the compact lanes/specialist reuse line on a completed run", () => {
+    const completedRun = {
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        plain_status: "Completed — your recommendations are up to date.",
+        terminal: true,
+        retryable: false,
+        completed_snapshot_id: "snap_2",
+        evidence_summary_line: "Evidence: 80 lanes reused, 13 refreshed. Specialist analysis: 70 reused, 23 refreshed.",
+      }),
+    };
+    const model = renderPanel(completedRun, completedRun.lastRunResult, () => {});
+    expect(model.run.evidenceSummaryLine).toContain("lanes reused");
+    const text = container.textContent ?? "";
+    expect(text).toContain("80 lanes reused, 13 refreshed");
+    expect(text).toContain("70 reused, 23 refreshed");
+  });
+
+  it("omits the line when the backend reports no metrics — never a zero placeholder", () => {
+    const completedRun = {
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        plain_status: "Completed — your recommendations are up to date.",
+        terminal: true,
+        retryable: false,
+        completed_snapshot_id: "snap_3",
+      }),
+    };
+    const model = renderPanel(completedRun, completedRun.lastRunResult, () => {});
+    expect(model.run.evidenceSummaryLine).toBeNull();
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("lanes reused");
+  });
+});
+
 // ── Fail-closed "unknown" trust overlay — truthful render, release-blocker ───
 
 function makeUnknownOverlaySnapshot(): IntelV3Snapshot {

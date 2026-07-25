@@ -277,8 +277,11 @@ class TestSpecialistExecution:
         second = await execute_specialist_task(client, task=task2, llm=llm)
         assert second.reused == ["AAPL"]
         assert second.llm_calls == 0, "unchanged fingerprint still called LLM"
-        # Changed fingerprint invalidates reuse.
-        changed = dict(bundle, input_fingerprint="sha256:changed")
+        # Changed evidence (not just the stale whole-bundle field) invalidates
+        # reuse — the axis fingerprint is derived from the axis's own compact
+        # projection, so a genuine fundamental value change must alter it.
+        changed_fundamental = dict(bundle.get("fundamental") or {}, pe=999.0)
+        changed = dict(bundle, input_fingerprint="sha256:changed", fundamental=changed_fundamental)
         client.table("intel_run_tickers").update({
             "evidence_bundle": changed,
         }).eq("run_session_id", session2).eq("ticker", "AAPL").execute()

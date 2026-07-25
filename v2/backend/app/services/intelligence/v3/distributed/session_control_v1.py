@@ -15,7 +15,10 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
+from uuid import UUID
 
+from ....financial_truth_baseline_v1 import run_financial_truth_baseline
+from ....portfolio_service import PortfolioService
 from ..intel_run_session_store_v1 import get_session
 from . import run_task_store_v1 as store
 from .task_contracts_v1 import (
@@ -230,6 +233,139 @@ def build_frozen_scope_rows(
     return rows
 
 
+# ── Portfolio financial-truth preflight (invariants #2-#4) ──────────────────
+
+PREFLIGHT_SCHEMA_VERSION = "run_intel_preflight_v1"
+
+_PREFLIGHT_BLOCKED_MESSAGE = (
+    "Run Intel did not start because the portfolio totals could not be "
+    "verified. Refresh or repair the portfolio data, then try again."
+)
+
+
+def _preflight_blocked(
+    code: str, repair_action: Optional[str], *, snapshot_refreshed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "blocked": True,
+        "code": code,
+        "message": _PREFLIGHT_BLOCKED_MESSAGE,
+        "repair_action": (repair_action or "See portfolio diagnostics for the exact repair step.")[:300],
+        "snapshot_refreshed": snapshot_refreshed,
+    }
+
+
+async def _run_truth_preflight(
+    *, client: Any, user_id: str, now: datetime,
+) -> dict[str, Any]:
+    """Deterministic portfolio financial-truth preflight.
+
+    Reads the existing ``financial_truth_baseline_v1`` contract at most
+    twice, invoking the existing canonical portfolio-snapshot refresh
+    (``PortfolioService.create_snapshot``) at most once on staleness or
+    unavailability. Never relaxes thresholds or duplicates reconciliation
+    math — every verdict is read verbatim from the baseline. Fails closed
+    on any read error.
+    """
+    try:
+        baseline = await run_financial_truth_baseline(client, str(user_id))
+    except Exception as exc:
+        logger.error("run_intel.preflight_read_failed user=%s err=%s", user_id, exc)
+        return _preflight_blocked("portfolio_truth_unavailable", None)
+
+    snap = baseline["snapshot_truth"]
+    refreshed = False
+    if snap.get("status") != "ok" or snap.get("snapshot_is_stale"):
+        try:
+            await PortfolioService(user_id=UUID(str(user_id)), client=client).create_snapshot()
+            refreshed = True
+        except Exception as exc:
+            logger.warning("run_intel.preflight_refresh_failed user=%s err=%s", user_id, exc)
+            return _preflight_blocked(
+                "portfolio_refresh_failed", baseline["verdict"].get("next_required_fix"),
+            )
+        try:
+            baseline = await run_financial_truth_baseline(client, str(user_id))
+        except Exception as exc:
+            logger.error("run_intel.preflight_reread_failed user=%s err=%s", user_id, exc)
+            return _preflight_blocked(
+                "portfolio_truth_unavailable", None, snapshot_refreshed=True,
+            )
+        snap = baseline["snapshot_truth"]
+
+    verdict = baseline["verdict"]
+    recon = baseline["reconciliation"]
+    pos = baseline["position_derived_truth"]
+
+    if snap.get("status") != "ok":
+        return _preflight_blocked(
+            "portfolio_truth_unavailable", verdict.get("next_required_fix"),
+            snapshot_refreshed=refreshed,
+        )
+    if snap.get("snapshot_is_stale"):
+        return _preflight_blocked(
+            "portfolio_snapshot_stale", verdict.get("next_required_fix"),
+            snapshot_refreshed=refreshed,
+        )
+    if pos.get("status") != "ok" or not pos.get("market_value_feasible"):
+        # No positions row at all (vs. positions present but truth otherwise
+        # broken, e.g. missing prices) is a distinct, independently-coded
+        # block — the scope is empty, not the truth unverifiable.
+        if pos.get("status") != "ok" and pos.get("reason") == "no_positions_found":
+            return _preflight_blocked(
+                "portfolio_scope_empty", "Add or import at least one open position.",
+                snapshot_refreshed=refreshed,
+            )
+        return _preflight_blocked(
+            "portfolio_truth_unavailable", verdict.get("next_required_fix"),
+            snapshot_refreshed=refreshed,
+        )
+    if recon.get("reconciliation_status") != "pass":
+        return _preflight_blocked(
+            "portfolio_reconciliation_failed", verdict.get("next_required_fix"),
+            snapshot_refreshed=refreshed,
+        )
+
+    return {
+        "blocked": False,
+        "summary": {
+            "schema_version": PREFLIGHT_SCHEMA_VERSION,
+            "status": "passed",
+            "checked_at": now.isoformat(),
+            "snapshot_at": snap.get("latest_snapshot_at"),
+            "snapshot_age_hours": snap.get("snapshot_age_hours"),
+            "reconciliation_status": recon.get("reconciliation_status"),
+            "snapshot_refreshed": refreshed,
+        },
+    }
+
+
+def _preflight_not_created(session_id: str, preflight: dict[str, Any]) -> dict[str, Any]:
+    code = preflight["code"]
+    # portfolio_scope_empty keeps the pre-existing "no_active_holdings"
+    # reason/copy for backward-compatible frontend rendering (the button
+    # stays the idle "Add positions" state, not a retry-failure state).
+    if code == "portfolio_scope_empty":
+        reason, plain = "no_active_holdings", "Add positions before running Intel."
+    else:
+        reason, plain = code, preflight["message"]
+    return {
+        "created": False,
+        "run_session_id": session_id,
+        "session_status": "not_created",
+        "current_stage": None,
+        "reason": reason,
+        "plain_status": plain,
+        "retryable": code in ("portfolio_refresh_failed", "portfolio_truth_unavailable"),
+        "status": "blocked",
+        "code": code,
+        "message": plain,
+        "repair_action": preflight["repair_action"],
+        "provider_calls": 0,
+        "llm_calls": 0,
+    }
+
+
 # ── Session creation ─────────────────────────────────────────────────────────
 
 async def create_distributed_session(
@@ -277,6 +413,10 @@ async def create_distributed_session(
         status["adopted_active_session"] = True
         return status
 
+    preflight = await _run_truth_preflight(client=client, user_id=user_id, now=now_dt)
+    if preflight["blocked"]:
+        return _preflight_not_created(session_id, preflight)
+
     positions = await asyncio.to_thread(_load_active_positions, client, str(user_id))
     if not positions:
         return {
@@ -287,6 +427,12 @@ async def create_distributed_session(
             "reason": "no_active_holdings",
             "plain_status": "Add positions before running Intel.",
             "retryable": False,
+            "status": "blocked",
+            "code": "portfolio_scope_empty",
+            "message": "Add positions before running Intel.",
+            "repair_action": "Add or import at least one open position.",
+            "provider_calls": 0,
+            "llm_calls": 0,
         }
 
     tickers = [str(p.get("ticker") or "").strip() for p in positions]
@@ -305,7 +451,7 @@ async def create_distributed_session(
         "holdings_scope": [r["ticker"] for r in scope_rows],
         "stale_tickers": [],
         "expected_ticker_job_count": 0,
-        "metrics": {},
+        "metrics": {"preflight": preflight["summary"]},
         "created_at": now_dt.isoformat(),
         "updated_at": now_dt.isoformat(),
     }
@@ -731,6 +877,20 @@ def _plain_status(
     return "Working…"
 
 
+def _evidence_summary_line(metrics: Optional[dict[str, Any]]) -> Optional[str]:
+    """Compact, truthful technical-detail line from REAL session metrics
+    only — never a zero placeholder when metrics are unavailable."""
+    metrics = metrics or {}
+    parts: list[str] = []
+    lanes_reused, lanes_refreshed = metrics.get("cache_hits"), metrics.get("lanes_refreshed")
+    if isinstance(lanes_reused, int) and isinstance(lanes_refreshed, int) and (lanes_reused or lanes_refreshed):
+        parts.append(f"Evidence: {lanes_reused} lanes reused, {lanes_refreshed} refreshed.")
+    llm_reused, llm_calls = metrics.get("llm_reused"), metrics.get("llm_calls")
+    if isinstance(llm_reused, int) and isinstance(llm_calls, int) and (llm_reused or llm_calls):
+        parts.append(f"Specialist analysis: {llm_reused} reused, {llm_calls} refreshed.")
+    return " ".join(parts) if parts else None
+
+
 async def get_session_status(
     *,
     client: Any,
@@ -782,7 +942,7 @@ async def get_session_status(
     stage = session.get("current_stage")
     terminal = session_status in SESSION_TERMINAL_STATES
 
-    return {
+    result = {
         "run_session_id": str(session.get("id")),
         "session_status": session_status,
         "workflow_version": int(session.get("workflow_version") or 1),
@@ -803,3 +963,8 @@ async def get_session_status(
         "retryable": not terminal,
         "terminal": terminal,
     }
+    if session_status in (SESSION_COMPLETED, SESSION_COMPLETED_WITH_GAPS):
+        summary_line = _evidence_summary_line(session.get("metrics"))
+        if summary_line:
+            result["evidence_summary_line"] = summary_line
+    return result

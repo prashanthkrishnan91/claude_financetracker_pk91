@@ -200,6 +200,9 @@ export function AdvisorReadinessPanel({
           count — never task tables, queue metrics, or internal codes. */}
       <div aria-live="polite" className="space-y-1.5 border-t border-border/50 pt-3">
         <p className="text-xs text-text-secondary">{run.nextActionSentence}</p>
+        {run.evidenceSummaryLine && (
+          <p className="text-[11px] text-text-muted">{run.evidenceSummaryLine}</p>
+        )}
         {showTickerProgress && (
           <p className="text-[11px] text-text-muted font-mono tabular-nums">
             {progress.decidedTickers} of {progress.totalTickers} holdings analyzed

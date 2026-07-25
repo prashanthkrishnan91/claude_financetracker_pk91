@@ -272,8 +272,13 @@ def _fingerprint_source(bundle: dict[str, Any]) -> dict[str, Any]:
     portfolio values, and the RAW source-reference structures (they carry
     internal replay locators — task_id/artifact_id/artifact_source_id — and,
     for the price lane, a digest of the volatile intraday price itself; see
-    ``source_lineage_v1.fingerprint_source_refs``). Included portfolio
-    context: weight rounded to the whole percent, prior action and tax
+    ``source_lineage_v1.fingerprint_source_refs``), and ``prior_action`` —
+    an immediate rerun's OWN just-published decision becomes the next
+    session's prior_action, so including it would force every decided
+    ticker to re-analyze on every rerun regardless of whether the evidence
+    changed. It still reaches the specialist prompt unchanged (narrative
+    continuity), it simply never gates reuse — same treatment as `market`.
+    Included portfolio context: weight rounded to the whole percent and tax
     summary — the inputs that actually change analysis. Included source
     identity: a canonical, session/task-independent projection so a genuine
     provider/source change (or a sourced-vs-gap transition) still alters the
@@ -292,7 +297,6 @@ def _fingerprint_source(bundle: dict[str, Any]) -> dict[str, Any]:
     weight = context.get("portfolio_weight_pct")
     source["portfolio_context"] = {
         "weight_pct_rounded": round(float(weight)) if weight is not None else None,
-        "prior_action": context.get("prior_action"),
         "tax_summary": context.get("tax_summary"),
     }
     source["source_identity"] = source_lineage_v1.fingerprint_source_refs(
@@ -520,12 +524,18 @@ def build_evidence_bundle(
     source_ref_gaps = sorted(set(source_ref_gaps))
 
     fundamentals = outputs.get(LANE_FUNDAMENTALS) or {}
+    normalized_fundamentals = fundamentals.get("normalized") or {}
     valuation = {
         key: fundamentals.get(key)
-        for key in ("pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda",
-                    "dividend_yield", "market_cap")
+        for key in ("pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "dividend_yield")
         if fundamentals.get(key) is not None
     }
+    # market_cap is currency-bearing — only the verified, labeled compact
+    # projection is exposed; an unknown reporting currency is a disclosed
+    # normalization gap, never a guessed "$" value.
+    market_cap_compact = normalized_fundamentals.get("compact", {}).get("market_cap")
+    if market_cap_compact:
+        valuation["market_cap"] = market_cap_compact
 
     frozen_context = {
         "quantity": ticker_row.get("quantity"),

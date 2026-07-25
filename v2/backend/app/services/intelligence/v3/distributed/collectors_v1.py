@@ -31,6 +31,12 @@ from ....agents.data_sources import (
     fetch_price_action,
     fetch_yfinance_news,
 )
+from .evidence_normalization_v1 import (
+    NEWS_NORMALIZATION_VERSION,
+    NORMALIZATION_VERSION,
+    filter_news_items,
+    normalize_fundamentals,
+)
 from .task_contracts_v1 import (
     ASSET_CRYPTO,
     LANE_CRYPTO_MARKET,
@@ -85,6 +91,16 @@ def _rows(res: Any) -> list[dict[str, Any]]:
 
 # ── TTL reuse ────────────────────────────────────────────────────────────────
 
+def _reuse_contract_compatible(lane: str, output: dict[str, Any]) -> bool:
+    """A pre-normalization fundamentals/news output is never a compatible
+    cache entry once the normalization contract version bumps."""
+    if lane == LANE_FUNDAMENTALS:
+        return (output.get("normalized") or {}).get("schema_version") == NORMALIZATION_VERSION
+    if lane == LANE_NEWS_SENTIMENT:
+        return output.get("schema_version") == NEWS_NORMALIZATION_VERSION
+    return True
+
+
 def find_recent_lane_output(
     client: Any,
     *,
@@ -114,9 +130,21 @@ def find_recent_lane_output(
             .execute()
         )
         rows = _rows(res)
-        if rows and isinstance(rows[0].get("output"), dict):
-            return rows[0]["output"]
-        return None
+        if not rows:
+            return None
+        row = rows[0]
+        completed_at = row.get("completed_at")
+        try:
+            if isinstance(completed_at, str) and datetime.fromisoformat(
+                completed_at.replace("Z", "+00:00")
+            ) > now:
+                return None  # future-dated — age cannot be trusted
+        except ValueError:
+            return None  # unparsable — age cannot be established
+        output = row.get("output")
+        if not isinstance(output, dict) or not _reuse_contract_compatible(lane, output):
+            return None
+        return output
     except Exception:
         return None
 
@@ -188,33 +216,30 @@ async def _collect_fundamentals(ticker: str) -> CollectorResult:
         )
     return CollectorResult(
         TASK_SUCCEEDED,
-        output={**fundamentals, "source": "yfinance", "as_of": _now().isoformat()},
+        output={
+            **fundamentals,
+            "normalized": normalize_fundamentals(fundamentals),
+            "source": "yfinance", "as_of": _now().isoformat(),
+        },
         provider_calls=1,
     )
 
 
 async def _collect_news(ticker: str) -> CollectorResult:
     news = await fetch_yfinance_news(ticker)
-    items = [
-        {
-            "headline": item.get("headline"),
-            "source": item.get("source"),
-            "datetime": item.get("datetime"),
-        }
-        for item in (news or [])
-        if item.get("headline")
-    ][:10]
-    if not items:
-        # Honest degradation — no news is not a failure worth retrying forever.
+    filtered = filter_news_items(news or [], ticker)
+    if not filtered["items"]:
+        # Honest degradation — no accepted news is not a failure worth
+        # retrying forever, and never becomes fabricated neutral sentiment.
         return CollectorResult(
             TASK_DEGRADED,
-            output={"items": [], "as_of": _now().isoformat()},
+            output={**filtered, "as_of": _now().isoformat()},
             error_code="no_news_items",
             provider_calls=1,
         )
     return CollectorResult(
         TASK_SUCCEEDED,
-        output={"items": items, "source": "yfinance", "as_of": _now().isoformat()},
+        output={**filtered, "source": "yfinance", "as_of": _now().isoformat()},
         provider_calls=1,
     )
 

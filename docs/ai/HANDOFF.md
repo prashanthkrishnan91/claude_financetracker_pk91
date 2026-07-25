@@ -1,7 +1,25 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-25 (Deterministic conflict handling / review-LLM
-deletion, PR #487 — IN PROGRESS. Deletes the conditional Sonnet/Haiku review
+Last updated: 2026-07-25 (Run Intel operational-reliability PR — item 4 of the
+Run Intel trust-recovery sequence, IN PROGRESS, PR number filled in below once
+opened. Portfolio financial-truth preflight wired into the ONE session-start
+path (`financial_truth_baseline_v1`, reused verbatim); versioned monetary
+normalization (`evidence_normalization_v1.normalize_fundamentals`) labels
+every currency-bearing fundamental with its verified reporting currency
+(never the quote/ADR currency) before it reaches the specialist prompt;
+deterministic news relevance/timestamp/dedup filtering
+(`evidence_normalization_v1.filter_news_items`) before durable persistence;
+and two real reuse-correctness fixes found and proven by end-to-end
+supervisor tests — `prior_action` excluded from both fingerprints (an
+immediate rerun's own just-published decision was forcing every decided
+ticker to re-analyze) and a new per-axis specialist fingerprint
+(`specialist_agents_v1.axis_input_fingerprint`, scoped to each axis's own
+compact prompt projection) so a refreshed lane an axis doesn't read (e.g.
+news for the technical axis) no longer invalidates that axis's reuse. See
+the finish-plan item 4 entry below for full detail.)
+
+Previously (2026-07-25, Deterministic conflict handling / review-LLM
+deletion, PR #487 — COMPLETED. Deletes the conditional Sonnet/Haiku review
 LLM (`REVIEW_SYSTEM_PROMPT`, `execute_review_task`, `WorkerSupervisor.review_llm`,
 `intel_v3_distributed_review_model`/`_fallback_model`) and replaces it with a
 small deterministic policy (`conflict_policy_v1.py`, ≤180 lines): the SAME
@@ -365,9 +383,8 @@ separate PRs:
    `test_run_trust_contract_v1.py`. Production source-lineage behavior
    remains NOT runtime-proven — unchanged, still deferred to the single
    final certification run (item 5 in the reduced finish plan).
-3. Deterministic conflict handling / review-LLM deletion — **OPEN —
-   PR #487, patched round 2** (this entry, see the reduced finish plan
-   above). Deletes the conditional Sonnet/Haiku review LLM rather than
+3. Deterministic conflict handling / review-LLM deletion — **COMPLETED —
+   PR #487, merged.** Deletes the conditional Sonnet/Haiku review LLM rather than
    repairing it: `conflict_policy_v1.py` (≤180 lines, currently exactly 180)
    is the ONE strict deterministic authority — trigger thresholds, conflict
    assessment, the HOLD/≤0.49-confidence guardrail, disagreement-vs-
@@ -446,11 +463,135 @@ separate PRs:
    integration validation is complete; production behavior is NOT
    runtime-proven — deferred to the single final certification run (item 5
    above), same deferral pattern as PR #485/#486.
-4. One final operational-reliability PR — NOT STARTED. Reserves:
-   currency/unit normalization; ADR/reporting-currency handling; ticker
-   relevance filtering for news/sentiment; valid publication timestamps and
-   freshness; financial-truth preflight; hour/day/week repeat-run reuse and
-   stale-lane refresh; performance. None of this is implemented by PR 3.
+4. One final operational-reliability PR — **IN PROGRESS — PR number filled
+   in below once opened.** Makes Run Intel dependable whether clicked while
+   active, immediately after completion, or an hour/day/week later.
+   - **Portfolio financial-truth preflight**
+     (`session_control_v1._run_truth_preflight`, wired into the ONE
+     `create_distributed_session` path, after the active-session check and
+     before scope freeze): reads the EXISTING `financial_truth_baseline_v1`
+     contract (unchanged, no duplicated reconciliation math), and on a
+     stale/unavailable snapshot invokes the EXISTING canonical snapshot
+     refresh (`PortfolioService.create_snapshot`, now accepts an injected
+     `client` so preflight and tests share one client) at most once, then
+     re-reads. Creates NO session/tasks/provider/LLM work until snapshot
+     availability+freshness, position-derived market-value feasibility, and
+     reconciliation all pass — each failure mode returns its own code
+     (`portfolio_truth_unavailable` / `portfolio_snapshot_stale` /
+     `portfolio_reconciliation_failed` / `portfolio_refresh_failed` /
+     `portfolio_scope_empty`) via the pre-existing `not_created` response
+     shape (`reason`/`plain_status`), so the existing
+     `deriveRunModel`/`AdvisorReadinessPanel` render it with zero frontend
+     changes. A bounded `run_intel_preflight_v1` summary
+     (`status`, `checked_at`, `snapshot_at`, `snapshot_age_hours`,
+     `reconciliation_status`, `snapshot_refreshed`) is persisted on the new
+     session's existing `metrics` JSONB — no migration.
+   - **Versioned monetary normalization**
+     (`distributed/evidence_normalization_v1.py`, new, 178 lines —
+     `financial_evidence_normalization_v1`): `data_sources.py`'s yfinance
+     fundamentals fetch now reads `financialCurrency` (reporting currency,
+     e.g. TWD for TSM) and `currency` (market-price quote currency, e.g.
+     USD) — previously read at all. `normalize_fundamentals` labels every
+     monetary metric (`market_cap`/`free_cash_flow`/`operating_cash_flow`/
+     `net_income`/`revenue`/`total_debt`/`cash`/`ebitda`/
+     `target_mean_price`) with the verified reporting currency
+     (`{value, currency, as_reported, source_field}`) plus a compact
+     projection ("TWD 4.4 trillion"), leaves ratios/percentages
+     dimensionless and untouched, and excludes+flags any monetary field
+     under an unknown currency (`normalization_gaps`) rather than guessing.
+     `evidence_bundle_v1`'s `valuation.market_cap` and
+     `specialist_agents_v1._compact_fundamental` (new, used by every
+     fundamental/risk/ETF axis's compact prompt projection) now show ONLY
+     the labeled compact string to the LLM — never the raw ambiguous
+     number. `collectors_v1.find_recent_lane_output` gained a contract-
+     version gate (`_reuse_contract_compatible`) so a pre-normalization
+     fundamentals/news lane output is never adopted as a compatible cache
+     entry even inside TTL, plus a future-dated-`completed_at` rejection
+     (age could not be trusted).
+   - **News relevance/timestamp/dedup filtering**
+     (`evidence_normalization_v1.filter_news_items`, same module): an
+     article is accepted only with a finite, non-epoch, non-future,
+     non-stale (14-day) publication timestamp AND deterministic ticker
+     relevance (provider `related_tickers` metadata, else an exact ticker
+     token in headline/summary — never fuzzy matching), deduped by provider
+     id/link/normalized-headline+timestamp, bounded to 8 accepted articles.
+     `data_sources.py`'s yfinance news fetch now propagates `id`/`link`/
+     `related_tickers` (previously discarded). `collectors_v1._collect_news`
+     persists `accepted_count`/`rejected_invalid_timestamp_count`/
+     `rejected_irrelevant_count`/`duplicate_count`/oldest+newest accepted
+     timestamps; zero accepted articles is an honest degraded lane, never a
+     sentiment specialist call over evidence that doesn't exist.
+   - **Two reuse-correctness fixes, found and proven by real end-to-end
+     supervisor tests (not assumed)** — an immediate rerun-after-completion
+     test initially made 6 LLM calls instead of 0, and an expired-single-
+     lane test initially reran ALL axes instead of only the affected one:
+     (1) `prior_action` excluded from both the bundle-wide fingerprint
+     (`evidence_bundle_v1._fingerprint_source`) and the new per-axis
+     fingerprint — an immediate rerun's own just-published decision becomes
+     the next session's `prior_action`, so including it was forcing every
+     decided ticker to re-analyze on every rerun regardless of whether
+     evidence changed; it still reaches the prompt unchanged (narrative
+     continuity), it just never gates reuse (same treatment as `market`).
+     (2) `specialist_agents_v1.axis_input_fingerprint` (new): the specialist
+     reuse fingerprint is now the axis's OWN compact prompt projection
+     (`_compact_bundle_for_axis`, already axis-scoped — no new per-axis
+     version framework), not the whole-bundle fingerprint — a refreshed
+     lane an axis doesn't read (e.g. a fresh `news_sentiment` fetch for the
+     technical axis) no longer invalidates that axis's reuse.
+     `PROMPT_VERSION` bumped to `distributed_specialist_v3` (currency-
+     labeled evidence + filtered news is a materially different prompt
+     contract — a legacy unsourced/ambiguous-currency output is never
+     reused under it). `worker_supervisor_v1` gained a `lanes_refreshed`
+     session-metrics counter (paired with the existing `cache_hits`) and
+     `session_control_v1.get_session_status` derives an additive, optional
+     `evidence_summary_line` ("Evidence: 80 lanes reused, 13 refreshed.
+     Specialist analysis: 70 reused, 23 refreshed.") from real terminal-
+     session metrics only — omitted (never a zero placeholder) when metrics
+     are unavailable; rendered by the EXISTING `AdvisorReadinessPanel` run-
+     progress region, no new UI surface.
+   - **Lane TTL matrix unchanged** (`task_contracts_v1.LANE_TTL_HOURS`):
+     price 0.25h, technicals/fundamentals/sec_catalyst/macro 24h, news 1h,
+     sec_company_facts 168h, etf_fund_data 2160h — cross-session reuse via
+     the pre-existing `find_recent_lane_output` (now with the two eligibility
+     fixes above) was already the mechanism; no TTL was redefined.
+   - `decision_policy_v1.decide()`, allocation policy, and Deploy Cash are
+     unchanged. No SQL, no new env var, no new provider, no FX service, no
+     new agent, no new table.
+   - **Test totals:** full backend **8705 passed, 0 failed** (up from 8679
+     pre-PR; +26 net new focused tests across
+     `test_run_intel_truth_preflight_v1.py` (new, 8 tests — preflight
+     acceptance rows 1-5), `test_evidence_normalization_v1.py` (new, 13
+     tests — currency/news acceptance rows 6-15), `test_run_intel_repeat_run_v1.py`
+     (new, 4 tests — real end-to-end supervisor-driven repeat-run acceptance
+     rows 16/17/22, including the evidence-summary-line wiring), plus 2 new
+     future-dated/pre-normalization-contract reuse tests in
+     `test_distributed_collectors_and_store.py` and one existing
+     `test_distributed_specialists_and_review.py` fixture updated to change
+     actual bundle CONTENT rather than a now-inert forged `input_fingerprint`
+     field). Full frontend **666 passed, 0 failed** (2 new DOM-render tests
+     for the evidence-summary line, present/absent). TypeScript clean;
+     frontend production build clean.
+   - **LOC:** net production-source delta vs `main` is **+458 lines**
+     (measured across every changed production file, tests/docs excluded)
+     — over the ≤350 target. `evidence_normalization_v1.py` is a new file at
+     178 lines (under the 180-line cap), consolidating BOTH the currency
+     and news normalization contracts (one file, not two, to stay inside
+     the "one new helper file" allowance while avoiding duplicated
+     evidence-normalization rules). The remaining overshoot is
+     `session_control_v1.py` (+169: the preflight is genuinely new
+     integration surface, not a patch) and `specialist_agents_v1.py`
+     (+71: `_compact_fundamental` plus the per-axis fingerprint function),
+     both required to close real acceptance-matrix rows (1-5, 16, 17)
+     rather than scope creep — the per-axis fingerprint in particular was
+     not originally scoped as new code but was a genuine correctness gap
+     the acceptance tests caught (see above), not deferrable without
+     failing the mission's own required rerun behavior.
+   - **Runtime caveat:** fixture/unit/integration validation is complete
+     (including real end-to-end supervisor-driven proofs of the zero-call
+     immediate rerun and the selective single-lane refresh); production
+     behavior is NOT runtime-proven — deferred to the single final
+     certification run (item 5), same deferral pattern as every prior entry
+     in this sequence. No live Run Intel session was run in this PR.
 5. One final paid production certification run — NOT STARTED. The only
    place this sequence claims live production success.
 
@@ -707,6 +848,20 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   caveat unchanged**: production source-lineage behavior remains NOT
   runtime-proven — deferred to the single final certification run after
   the final certification run (item 5), same as every prior entry in this sequence.
+- Deterministic conflict handling / review-LLM deletion PR #487 (2026-07-25,
+  merged): full backend **8679 passed, 0 failed**; full frontend **664
+  passed, 0 failed**; TypeScript clean; production build clean.
+- Run Intel operational-reliability PR, finish-plan item 4 (2026-07-25, see
+  full entry above): full backend **8705 passed, 0 failed** (+26 net new
+  focused tests, three new files + two updated fixtures — see item 4);
+  full frontend **666 passed, 0 failed** (+2 new DOM-render tests);
+  TypeScript clean; frontend production build clean (same placeholder
+  `NEXT_PUBLIC_*` env vars as prior PRs needed to prerender locally —
+  sandbox-only). No SQL, no new env var. Net production-source delta vs
+  `main`: **+458 lines** (over the ≤350 target — justified in the item 4
+  entry above, primarily the genuinely-new preflight integration surface
+  and the per-axis specialist fingerprint correctness fix). Runtime
+  caveat unchanged — deferred to the single final certification run.
 
 ## SQL / env state
 

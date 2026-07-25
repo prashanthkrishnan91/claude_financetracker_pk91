@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from ....agents.llm import NON_RETRYABLE_PROVIDER_CLASSES
 from . import conflict_policy_v1
+from . import evidence_bundle_v1
 from . import run_task_store_v1 as store
 from . import source_lineage_v1
 from .run_scheduler_v1 import parse_batch_tickers
@@ -44,6 +45,7 @@ from .task_contracts_v1 import (
     LANE_TECHNICALS,
     TASK_DEGRADED,
     TASK_SUCCEEDED,
+    stable_fingerprint,
 )
 from .run_task_store_v1 import TASK_FAILED_RETRYABLE
 
@@ -52,7 +54,7 @@ logger = logging.getLogger(__name__)
 # v2: the prompt contract now carries a compact, bounded source projection
 # (contract §3) — a reused output from the v1 (unsourced) prompt contract
 # must never be treated as equivalent and is never reused (contract §4/§13).
-PROMPT_VERSION = "distributed_specialist_v2"
+PROMPT_VERSION = "distributed_specialist_v3"  # v3: currency-labeled monetary evidence + filtered news
 # How long a specialist output stays reusable for an unchanged evidence
 # fingerprint (skips duplicate LLM calls across sessions).
 OUTPUT_VALID_HOURS = 24.0
@@ -150,6 +152,41 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_FUNDAMENTAL_RATIO_KEYS = (
+    "pe", "forward_pe", "peg", "ps_ttm", "ev_ebitda", "eps", "profit_margin",
+    "gross_margin", "revenue_growth", "earnings_growth", "debt_to_equity",
+    "return_on_equity", "beta", "dividend_yield", "sector", "industry",
+)
+_RISK_RATIO_KEYS = ("debt_to_equity", "beta")
+_RISK_MONETARY_KEYS = ("total_debt", "cash")
+
+
+def _compact_fundamental(
+    fundamental: Optional[dict[str, Any]], *,
+    ratio_keys: tuple = _FUNDAMENTAL_RATIO_KEYS,
+    monetary_keys: Optional[tuple] = None,
+) -> dict[str, Any]:
+    """Currency-safe fundamentals for the LLM prompt: ratios verbatim
+    (dimensionless), monetary fields ONLY as their verified-currency compact
+    projection ("USD 12.4 billion") — never the raw ambiguous number, and
+    never guessed when the reporting currency is unknown."""
+    fundamental = fundamental or {}
+    normalized = fundamental.get("normalized") or {}
+    compact = normalized.get("compact") or {}
+    gaps = normalized.get("normalization_gaps") or []
+    if monetary_keys is not None:
+        compact = {k: v for k, v in compact.items() if k in monetary_keys}
+        gaps = [g for g in gaps if g in monetary_keys]
+    out = {k: fundamental.get(k) for k in ratio_keys if fundamental.get(k) not in (None, "")}
+    if compact:
+        out["monetary"] = compact
+    if normalized.get("reporting_currency"):
+        out["reporting_currency"] = normalized["reporting_currency"]
+    if gaps:
+        out["normalization_gaps"] = gaps
+    return out
+
+
 def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any]:
     """Trim the bundle to what the axis needs (prompt-size control)."""
     base = {
@@ -171,7 +208,7 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
         "degraded_lanes": bundle.get("degraded_lanes"),
     }
     if axis == AXIS_FUNDAMENTAL:
-        base["fundamental"] = bundle.get("fundamental")
+        base["fundamental"] = _compact_fundamental(bundle.get("fundamental"))
         base["valuation"] = bundle.get("valuation")
         base["sec"] = _payload_only(bundle.get("sec"))
     elif axis == AXIS_TECHNICAL:
@@ -181,18 +218,36 @@ def _compact_bundle_for_axis(bundle: dict[str, Any], axis: str) -> dict[str, Any
         base["catalysts"] = _payload_only(bundle.get("catalysts"))
     elif axis == AXIS_RISK_FILING:
         base["sec"] = _payload_only(bundle.get("sec"))
-        base["fundamental"] = {
-            k: (bundle.get("fundamental") or {}).get(k)
-            for k in ("debt_to_equity", "total_debt", "cash", "beta")
-        }
+        base["fundamental"] = _compact_fundamental(
+            bundle.get("fundamental"),
+            ratio_keys=_RISK_RATIO_KEYS, monetary_keys=_RISK_MONETARY_KEYS,
+        )
     elif axis == AXIS_ETF_EXPOSURE:
         base["technical"] = bundle.get("technical")
         base["asset_specific"] = _payload_only(bundle.get("asset_specific"))
-        base["fundamental"] = bundle.get("fundamental")
+        base["fundamental"] = _compact_fundamental(bundle.get("fundamental"))
     elif axis == AXIS_CRYPTO_MARKET:
         base["asset_specific"] = bundle.get("asset_specific")
         base["technical"] = bundle.get("technical")
     return base
+
+
+def axis_input_fingerprint(bundle: dict[str, Any], axis: str) -> str:
+    """Per-axis analytical fingerprint: the axis's OWN compact prompt
+    projection (``_compact_bundle_for_axis``), minus the volatile intraday
+    ``market`` price (same exclusion rationale as the bundle-wide
+    fingerprint) and every other replay-locator/timestamp key. A refreshed
+    lane an axis doesn't read (e.g. news_sentiment for the technical axis)
+    never invalidates that axis's reuse — selective specialist refresh."""
+    compact = dict(_compact_bundle_for_axis(bundle, axis))
+    compact.pop("market", None)
+    # prior_action is an immediate rerun's OWN just-published decision (same
+    # treatment as the bundle-wide fingerprint) — it reaches the prompt
+    # unchanged, it just never gates reuse.
+    context = dict(compact.get("portfolio_context") or {})
+    context.pop("prior_action", None)
+    compact["portfolio_context"] = context
+    return stable_fingerprint(evidence_bundle_v1._strip_volatile(compact))
 
 
 def _nonempty(value: Any) -> bool:
@@ -452,7 +507,7 @@ async def execute_specialist_task(
         if not isinstance(bundle, dict) or not bundle:
             outcome.skipped_insufficient.append(ticker)
             continue
-        fingerprint = str(bundle.get("input_fingerprint") or "")
+        fingerprint = axis_input_fingerprint(bundle, axis)
         fingerprints[ticker] = fingerprint
 
         # Reuse an unchanged prior output instead of a new LLM call. Reuse

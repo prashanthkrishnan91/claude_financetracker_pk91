@@ -183,6 +183,57 @@ class TestCollectorIsolation:
         assert ("price_action", "AAPL") in recorder.calls
 
 
+@pytest.mark.asyncio
+async def test_future_dated_completed_at_never_reused(monkeypatch):
+    client = FakeSupabase()
+    session_id = await _make_session(client, ["AAPL"])
+    recorder = ProviderRecorder()
+    patch_providers(monkeypatch, recorder)
+    settings = make_settings()
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    client.store.setdefault("intel_run_tasks", []).append({
+        "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+        "task_type": TASK_COLLECT_EVIDENCE_LANE, "ticker": "AAPL",
+        "lane": LANE_FUNDAMENTALS, "state": TASK_SUCCEEDED,
+        "output": {"pe": 1.0, "source": "future", "normalized": {"schema_version": "financial_evidence_normalization_v1"}},
+        "completed_at": future, "batch_key": "future-marker",
+    })
+    task = next(
+        t for t in _lane_tasks(client, session_id, "AAPL")
+        if t["lane"] == LANE_FUNDAMENTALS and t.get("batch_key") != "future-marker"
+    )
+    result = await execute_collector_task(client, task=task, settings=settings)
+    assert result.cache_hit is False
+    assert ("fundamentals", "AAPL") in recorder.calls
+
+
+@pytest.mark.asyncio
+async def test_pre_normalization_contract_output_never_reused(monkeypatch):
+    client = FakeSupabase()
+    session_id = await _make_session(client, ["AAPL"])
+    recorder = ProviderRecorder()
+    patch_providers(monkeypatch, recorder)
+    settings = make_settings()
+
+    fresh = datetime.now(timezone.utc).isoformat()
+    client.store.setdefault("intel_run_tasks", []).append({
+        "id": str(uuid.uuid4()), "run_session_id": session_id, "user_id": USER,
+        "task_type": TASK_COLLECT_EVIDENCE_LANE, "ticker": "AAPL",
+        "lane": LANE_FUNDAMENTALS, "state": TASK_SUCCEEDED,
+        # Legacy pre-PR output: no "normalized" projection at all.
+        "output": {"pe": 1.0, "market_cap": 1_000_000_000.0, "source": "legacy"},
+        "completed_at": fresh, "batch_key": "legacy-marker",
+    })
+    task = next(
+        t for t in _lane_tasks(client, session_id, "AAPL")
+        if t["lane"] == LANE_FUNDAMENTALS and t.get("batch_key") != "legacy-marker"
+    )
+    result = await execute_collector_task(client, task=task, settings=settings)
+    assert result.cache_hit is False
+    assert ("fundamentals", "AAPL") in recorder.calls
+
+
 async def _make_session_second(client: FakeSupabase) -> str:
     # Terminal-ize any active session first (one active session per user).
     for row in client.rows("intel_run_sessions"):

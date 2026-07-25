@@ -53,9 +53,9 @@ _DRIP_YIELD_MAP: dict[str, float] = {
 class PortfolioService:
     """All portfolio-level business logic."""
 
-    def __init__(self, user_id: UUID, price_service=None):
+    def __init__(self, user_id: UUID, price_service=None, client: Any = None):
         self.user_id = user_id
-        self.client = get_supabase_client()
+        self.client = client if client is not None else get_supabase_client()
         self._price_service = price_service
 
     def _get_price_service(self):

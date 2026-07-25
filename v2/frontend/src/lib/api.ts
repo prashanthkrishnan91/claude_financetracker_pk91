@@ -865,6 +865,16 @@ export interface IntelV3SessionStatus {
   reason?: "no_active_holdings" | "run_session_create_failed" | string;
   /** POST /run only: true when a click adopted an already-active session. */
   adopted_active_session?: boolean;
+  /** POST /run only, blocked-preflight responses: the strict financial-truth
+   *  preflight's own status/code/message/repair action — never persisted for
+   *  later polling, since a blocked preflight never creates a session row. */
+  status?: "blocked" | string;
+  code?: string;
+  message?: string;
+  /** Bounded (<=300 chars), human-readable next step — never a raw code. */
+  repair_action?: string;
+  provider_calls?: number;
+  llm_calls?: number;
 }
 
 /** Kept as an alias so existing imports keep compiling. */

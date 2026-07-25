@@ -196,10 +196,15 @@ export function AdvisorReadinessPanel({
       </div>
 
       {/* Run progress — polite live region so screen readers hear updates.
-          Only the backend's plain-English sentence plus a simple holdings
-          count — never task tables, queue metrics, or internal codes. */}
+          Only the backend's plain-English sentence, its bounded repair
+          action (blocked preflight only, rendered once), and a simple
+          holdings count — never task tables, queue metrics, or internal
+          codes. */}
       <div aria-live="polite" className="space-y-1.5 border-t border-border/50 pt-3">
         <p className="text-xs text-text-secondary">{run.nextActionSentence}</p>
+        {run.repairAction && (
+          <p className="text-[11px] text-text-muted">{run.repairAction}</p>
+        )}
         {showTickerProgress && (
           <p className="text-[11px] text-text-muted font-mono tabular-nums">
             {progress.decidedTickers} of {progress.totalTickers} holdings analyzed

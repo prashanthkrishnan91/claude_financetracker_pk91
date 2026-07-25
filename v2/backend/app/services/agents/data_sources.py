@@ -514,23 +514,17 @@ async def fetch_finnhub_news(
 
 
 def fetch_yfinance_news_sync(ticker: str, limit: int = 6) -> list[dict[str, Any]]:
-    """Synchronous yfinance news fetch — run in an executor."""
+    """Synchronous yfinance news fetch — run in an executor.
+
+    Returns raw provider items verbatim (both the legacy top-level shape and
+    the current nested ``{id, content: {...}}`` shape are possible) — shape
+    normalization is owned entirely by
+    ``evidence_normalization_v1._normalize_news_item`` (one authority, not
+    duplicated here).
+    """
     try:
         import yfinance as yf
-        t = yf.Ticker(ticker)
-        items = t.news or []
-        out: list[dict[str, Any]] = []
-        for it in items[:limit]:
-            title = it.get("title") or it.get("content", {}).get("title", "")
-            if not title:
-                continue
-            out.append({
-                "headline": title,
-                "summary": (it.get("summary") or "")[:300],
-                "datetime": it.get("providerPublishTime", 0),
-                "source": it.get("publisher") or "yfinance",
-            })
-        return out
+        return list((yf.Ticker(ticker).news or [])[:limit])
     except Exception as exc:
         logger.debug("yfinance news failed for %s: %s", ticker, exc)
         return []
@@ -714,6 +708,11 @@ def fetch_yfinance_fundamentals_sync(ticker: str) -> dict[str, Any]:
             "dividend_yield": _safe_float(info.get("dividendYield")),
             "recommendation_mean": _safe_float(info.get("recommendationMean")),
             "target_mean_price": _safe_float(info.get("targetMeanPrice")),
+            # Reporting currency for financial-statement fields (e.g. "TWD"
+            # for an ADR) vs. the market-price quote currency — never the
+            # same field; see evidence_normalization_v1.
+            "financial_currency": info.get("financialCurrency"),
+            "quote_currency": info.get("currency"),
         }
     except Exception as exc:
         logger.debug("yfinance fundamentals failed for %s: %s", ticker, exc)

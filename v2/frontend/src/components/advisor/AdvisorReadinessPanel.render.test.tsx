@@ -247,6 +247,28 @@ describe("AdvisorReadinessPanel — completed-with-gaps snapshot", () => {
   });
 });
 
+describe("AdvisorReadinessPanel — no evidence-count claim", () => {
+  it("never renders an evidence/specialist reuse-count sentence, even when the backend sends one", () => {
+    const completedRun = {
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeSessionStatus({
+        session_status: "completed",
+        plain_status: "Completed — your recommendations are up to date.",
+        terminal: true,
+        retryable: false,
+        completed_snapshot_id: "snap_2",
+        // A legacy/unexpected backend field must never resurrect the line.
+        ...({ evidence_summary_line: "Evidence: 80 lanes reused, 13 refreshed." } as Record<string, unknown>),
+      }),
+    };
+    renderPanel(completedRun, completedRun.lastRunResult, () => {});
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("lanes reused");
+    expect(text).not.toContain("Specialist analysis:");
+  });
+});
+
 // ── Fail-closed "unknown" trust overlay — truthful render, release-blocker ───
 
 function makeUnknownOverlaySnapshot(): IntelV3Snapshot {
@@ -313,5 +335,143 @@ describe("AdvisorReadinessPanel — fail-closed unknown trust overlay renders tr
     // old hardcoded "no specialist outputs were recorded" guess.
     expect(text).toContain("Session row could not be found");
     expect(text).not.toContain("no specialist outputs were recorded");
+  });
+});
+
+// ── Blocked financial-truth preflight — specific message + repair action ────
+
+function makeBlockedPreflightRun(overrides: Partial<IntelV3SessionStatus> = {}) {
+  return {
+    isRunPending: false,
+    isRunError: false,
+    lastRunResult: makeSessionStatus({
+      session_status: "not_created",
+      terminal: true,
+      retryable: false,
+      ...overrides,
+    }),
+  };
+}
+
+describe("AdvisorReadinessPanel — blocked preflight renders the specific reason and repair action", () => {
+  it("portfolio_scope_empty keeps the existing 'Add positions' idle behavior — no repair action shown", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "no_active_holdings",
+      code: "portfolio_scope_empty",
+      status: "blocked",
+      plain_status: "Add positions before running Intel.",
+      repair_action: "Add or import at least one open position.",
+      retryable: true,
+    });
+    const calls = { count: 0 };
+    const model = renderPanel(run, run.lastRunResult, () => { calls.count += 1; });
+    expect(model.run.state).toBe("idle");
+    expect(model.run.repairAction).toBeNull();
+    const text = container.textContent ?? "";
+    expect(text).toContain("Add positions before running Intel");
+    // Never renders the repair_action for this pre-existing case — the
+    // add-positions sentence already tells the user what to do.
+    expect(text).not.toContain("Add or import at least one open position");
+    const controls = clickableRunControls(calls);
+    expect(controls).toHaveLength(1);
+    expect(controls[0].textContent).toContain("Run Intel");
+  });
+
+  it("portfolio_truth_unavailable renders the truthful message and its repair action once, one control", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "portfolio_truth_unavailable",
+      code: "portfolio_truth_unavailable",
+      status: "blocked",
+      plain_status: "Portfolio data could not be read right now — Intel needs a reliable read of your positions and prices.",
+      repair_action: "Try again in a moment. If this persists, contact support.",
+    });
+    const calls = { count: 0 };
+    const model = renderPanel(run, run.lastRunResult, () => { calls.count += 1; });
+    expect(model.run.state).toBe("failed");
+    expect(model.run.repairAction).toBe("Try again in a moment. If this persists, contact support.");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Portfolio data could not be read right now");
+    expect(text).toContain("Try again in a moment. If this persists, contact support.");
+    // No raw internal code ever renders.
+    expect(text).not.toContain("portfolio_truth_unavailable");
+    const controls = clickableRunControls(calls);
+    expect(controls).toHaveLength(1);
+    expect(controls[0].textContent).toContain("Retry Intel run");
+  });
+
+  it("portfolio_snapshot_stale renders its own message and repair action, one control", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "portfolio_snapshot_stale",
+      code: "portfolio_snapshot_stale",
+      status: "blocked",
+      plain_status: "The portfolio snapshot is stale and could not be refreshed automatically.",
+      repair_action: "Refresh your portfolio snapshot, then retry the Intel run.",
+    });
+    const model = renderPanel(run, run.lastRunResult, () => {});
+    expect(model.run.repairAction).toBe("Refresh your portfolio snapshot, then retry the Intel run.");
+    const text = container.textContent ?? "";
+    expect(text).toContain("stale and could not be refreshed automatically");
+    expect(text).toContain("Refresh your portfolio snapshot, then retry the Intel run.");
+    expect(text).not.toContain("portfolio_snapshot_stale");
+  });
+
+  it("portfolio_reconciliation_failed renders its own message and repair action, one control", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "portfolio_reconciliation_failed",
+      code: "portfolio_reconciliation_failed",
+      status: "blocked",
+      plain_status: "Portfolio books do not reconcile with current positions — duplicate AAPL rows detected.",
+      repair_action: "Resolve the duplicate position rows, then retry the Intel run.",
+    });
+    const model = renderPanel(run, run.lastRunResult, () => {});
+    expect(model.run.repairAction).toBe("Resolve the duplicate position rows, then retry the Intel run.");
+    const text = container.textContent ?? "";
+    expect(text).toContain("do not reconcile with current positions");
+    expect(text).toContain("Resolve the duplicate position rows, then retry the Intel run.");
+    expect(text).not.toContain("portfolio_reconciliation_failed");
+  });
+
+  it("portfolio_refresh_failed renders its own message and repair action, one control", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "portfolio_refresh_failed",
+      code: "portfolio_refresh_failed",
+      status: "blocked",
+      plain_status: "The portfolio snapshot refresh failed.",
+      repair_action: "Retry the Intel run; if this keeps failing, check your linked accounts.",
+      retryable: true,
+    });
+    const model = renderPanel(run, run.lastRunResult, () => {});
+    expect(model.run.repairAction).toBe(
+      "Retry the Intel run; if this keeps failing, check your linked accounts.",
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("The portfolio snapshot refresh failed");
+    expect(text).toContain("check your linked accounts");
+  });
+
+  it("renders nothing extra when repair_action is absent — never a placeholder", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "run_session_create_failed",
+      plain_status: "Could not start the run.",
+    });
+    const model = renderPanel(run, run.lastRunResult, () => {});
+    expect(model.run.repairAction).toBeNull();
+    const text = container.textContent ?? "";
+    expect(text).toContain("Could not start the run.");
+  });
+
+  it("never renders a second card, drawer, or control for the blocked state", () => {
+    const run = makeBlockedPreflightRun({
+      reason: "portfolio_truth_unavailable",
+      code: "portfolio_truth_unavailable",
+      status: "blocked",
+      plain_status: "Portfolio data could not be read right now.",
+      repair_action: "Try again in a moment.",
+    });
+    const calls = { count: 0 };
+    renderPanel(run, run.lastRunResult, () => { calls.count += 1; });
+    // Exactly one top-level readiness section — no extra card/drawer.
+    expect(container.querySelectorAll("section")).toHaveLength(1);
+    expect(clickableRunControls(calls)).toHaveLength(1);
   });
 });

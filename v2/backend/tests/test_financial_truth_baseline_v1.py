@@ -17,6 +17,7 @@ from app.services.financial_truth_baseline_v1 import (
     RECONCILIATION_CERTIFIED_PCT,
     RECONCILIATION_DEGRADED_PCT,
     SNAPSHOT_STALE_HOURS,
+    FinancialTruthReadError,
     _business_days_since,
     _intel_truth,
     _is_price_stale,
@@ -27,6 +28,7 @@ from app.services.financial_truth_baseline_v1 import (
     _transaction_truth,
     _verdict,
     run_financial_truth_baseline,
+    run_financial_truth_baseline_strict,
 )
 
 
@@ -48,6 +50,7 @@ def _snap(
     total_equity: float | None = 100_000.0,
     total_cost: float | None = 80_000.0,
     hours_old: float = 1.0,
+    cash_balance: float | None = 0.0,
 ) -> dict:
     return {
         "id": str(uuid4()),
@@ -56,6 +59,7 @@ def _snap(
         "total_cost": total_cost,
         "total_pnl": None,
         "total_pnl_pct": None,
+        "cash_balance": cash_balance,
         "created_at": _hours_ago_iso(hours_old),
     }
 
@@ -151,6 +155,7 @@ class _MockDB:
         agent_rows: list | None = None,
         intel_snap_rows: list | None = None,
         intel_snap_raise: bool = True,
+        raise_tables: frozenset[str] = frozenset(),
     ):
         self._snap = snap_rows or []
         self._pos = pos_rows or []
@@ -160,6 +165,7 @@ class _MockDB:
         self._agent = agent_rows or []
         self._intel_snap = intel_snap_rows
         self._intel_snap_raise = intel_snap_raise
+        self._raise_tables = raise_tables
 
     def table(self, name: str) -> _MockQuery:
         mapping = {
@@ -174,7 +180,7 @@ class _MockDB:
             if self._intel_snap_raise:
                 return _MockQuery([], raise_on_execute=True)
             return _MockQuery(self._intel_snap or [])
-        return _MockQuery(mapping.get(name, []))
+        return _MockQuery(mapping.get(name, []), raise_on_execute=name in self._raise_tables)
 
 
 USER_ID = str(uuid4())
@@ -208,6 +214,42 @@ class TestSnapshotTruth:
     def test_null_total_cost_warns(self):
         result = _snapshot_truth([_snap(total_cost=None)])
         assert any("cost_basis_null" in w for w in result["warnings"])
+
+    def test_positive_cash_derives_invested_value(self):
+        result = _snapshot_truth([_snap(total_equity=102_737.50, cash_balance=2_737.50)])
+        assert result["latest_cash_balance"] == 2_737.50
+        assert result["snapshot_invested_value"] == 100_000.0
+
+    def test_zero_cash_derives_invested_value_equal_to_total_equity(self):
+        result = _snapshot_truth([_snap(total_equity=100_000.0, cash_balance=0.0)])
+        assert result["latest_cash_balance"] == 0.0
+        assert result["snapshot_invested_value"] == 100_000.0
+
+    def test_negative_finite_cash_is_preserved_not_coerced_to_zero(self):
+        result = _snapshot_truth([_snap(total_equity=99_500.0, cash_balance=-500.0)])
+        assert result["latest_cash_balance"] == -500.0
+        assert result["snapshot_invested_value"] == 100_000.0
+
+    def test_missing_cash_balance_leaves_invested_value_none(self):
+        result = _snapshot_truth([_snap(cash_balance=None)])
+        assert result["latest_cash_balance"] is None
+        assert result["snapshot_invested_value"] is None
+        assert any("cash_balance_null" in w for w in result["warnings"])
+
+    def test_nan_cash_balance_rejected(self):
+        result = _snapshot_truth([_snap(cash_balance=float("nan"))])
+        assert result["latest_cash_balance"] is None
+        assert result["snapshot_invested_value"] is None
+
+    def test_infinite_cash_balance_rejected(self):
+        result = _snapshot_truth([_snap(cash_balance=float("inf"))])
+        assert result["latest_cash_balance"] is None
+        assert result["snapshot_invested_value"] is None
+
+    def test_nan_total_equity_rejected(self):
+        result = _snapshot_truth([_snap(total_equity=float("nan"))])
+        assert result["latest_portfolio_value"] is None
+        assert result["snapshot_invested_value"] is None
 
 
 # ── Unit tests: _position_truth ───────────────────────────────────────────────
@@ -323,34 +365,65 @@ class TestPriceTruth:
 
 class TestReconciliation:
     def test_pass_when_within_tolerance(self):
-        result = _reconciliation(100_000.0, 100_200.0)
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 100_200.0)
         assert result["reconciliation_status"] == "pass"
         assert result["absolute_difference"] == pytest.approx(200.0)
 
     def test_degraded_when_exceeds_certified_but_within_degraded(self):
         # 3% difference: between RECONCILIATION_CERTIFIED_PCT and RECONCILIATION_DEGRADED_PCT
-        result = _reconciliation(100_000.0, 103_000.0)
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 103_000.0)
         assert result["reconciliation_status"] == "degraded"
 
     def test_blocked_when_exceeds_degraded_pct(self):
         # 10% difference: above RECONCILIATION_DEGRADED_PCT
-        result = _reconciliation(100_000.0, 110_000.0)
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 110_000.0)
         assert result["reconciliation_status"] == "blocked"
 
-    def test_unavailable_when_snapshot_missing(self):
-        result = _reconciliation(None, 100_000.0)
+    def test_unavailable_when_snapshot_invested_value_missing(self):
+        result = _reconciliation(None, None, None, 100_000.0)
         assert result["reconciliation_status"] == "unavailable"
-        assert "snapshot_value_unavailable" in result["blockers"]
+        assert any("snapshot_invested_value_unavailable" in b for b in result["blockers"])
 
     def test_unavailable_when_position_mv_missing(self):
-        result = _reconciliation(100_000.0, None)
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, None)
         assert result["reconciliation_status"] == "unavailable"
         assert any("position_market_value_unavailable" in b for b in result["blockers"])
 
     def test_unavailable_when_both_missing(self):
-        result = _reconciliation(None, None)
+        result = _reconciliation(None, None, None, None)
         assert result["reconciliation_status"] == "unavailable"
         assert len(result["blockers"]) == 2
+
+    def test_positive_cash_reconciles_against_invested_value_not_total_equity(self):
+        # total_equity=102_737.50 (100_000 invested + 2_737.50 cash) must
+        # reconcile against 100_000 of positions, never against total_equity.
+        result = _reconciliation(102_737.50, 2_737.50, 100_000.0, 100_000.0)
+        assert result["reconciliation_status"] == "pass"
+        assert result["snapshot_invested_value"] == 100_000.0
+        assert result["absolute_difference"] == 0.0
+
+    def test_zero_cash_passes_normally(self):
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 100_000.0)
+        assert result["reconciliation_status"] == "pass"
+
+    def test_negative_finite_cash_is_arithmetic_not_coerced_to_zero(self):
+        # total_equity=99_500 (100_000 invested minus a legitimate -500
+        # overdrawn cash balance) — must still reconcile, and the negative
+        # cash must be reported verbatim, never clamped to 0.
+        result = _reconciliation(99_500.0, -500.0, 100_000.0, 100_000.0)
+        assert result["reconciliation_status"] == "pass"
+        assert result["snapshot_cash_balance"] == -500.0
+        assert result["snapshot_invested_value"] == 100_000.0
+
+    def test_boundary_exactly_at_certified_threshold_passes(self):
+        # Exactly RECONCILIATION_CERTIFIED_PCT (1%) still passes (<=, not <).
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 101_000.0)
+        assert result["reconciliation_status"] == "pass"
+
+    def test_boundary_exactly_at_degraded_threshold_is_degraded_not_blocked(self):
+        # Exactly RECONCILIATION_DEGRADED_PCT (5%) is still degraded (<=, not <).
+        result = _reconciliation(100_000.0, 0.0, 100_000.0, 105_000.0)
+        assert result["reconciliation_status"] == "degraded"
 
 
 # ── Integration tests: run_financial_truth_baseline ───────────────────────────
@@ -375,6 +448,40 @@ class TestFinancialTruthBaseline:
         assert result["reconciliation"]["reconciliation_status"] == "pass"
         assert result["verdict"]["canonical_portfolio_value_source"] == "portfolio_snapshots"
         assert result["verdict"]["recommendations_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_certified_with_cash_reconciles_against_invested_value(self):
+        """A snapshot with real cash on top of positions must reconcile the
+        INVESTED value against positions, never total_equity (which
+        includes cash) directly."""
+        snap = [_snap(total_equity=102_737.50, total_cost=80_000.0, cash_balance=2_737.50, hours_old=1.0)]
+        pos = [_pos("AAPL", 500.0, 150.0)]
+        prices = [_price("AAPL", 200.0, days_old=0)]  # 500 × 200 = 100_000
+
+        db = _MockDB(snap_rows=snap, pos_rows=pos, price_rows=prices, tx_rows=[_tx()], rec_rows=[_rec()], agent_rows=[_agent()])
+        result = await run_financial_truth_baseline(db, USER_ID)
+
+        assert result["reconciliation"]["reconciliation_status"] == "pass"
+        assert result["reconciliation"]["snapshot_invested_value"] == 100_000.0
+        assert result["reconciliation"]["snapshot_cash_balance"] == 2_737.50
+        assert result["verdict"]["truth_status"] == "certified"
+
+    @pytest.mark.asyncio
+    async def test_missing_cash_balance_blocks_reconciliation_not_treated_as_zero(self):
+        """A snapshot whose cash_balance is missing must never be silently
+        treated as zero cash — reconciliation must report unavailable."""
+        snap = [_snap(total_equity=100_000.0, cash_balance=None, hours_old=1.0)]
+        pos = [_pos("AAPL", 500.0, 150.0)]
+        prices = [_price("AAPL", 200.0, days_old=0)]
+
+        db = _MockDB(snap_rows=snap, pos_rows=pos, price_rows=prices, tx_rows=[_tx()], rec_rows=[_rec()], agent_rows=[_agent()])
+        result = await run_financial_truth_baseline(db, USER_ID)
+
+        assert result["reconciliation"]["reconciliation_status"] == "unavailable"
+        assert any(
+            "snapshot_invested_value_unavailable" in b
+            for b in result["reconciliation"]["blockers"]
+        )
 
     @pytest.mark.asyncio
     async def test_degraded_when_values_differ_beyond_tolerance(self):
@@ -654,3 +761,69 @@ class TestPriceTruncationGuard:
         result = _price_truth(prices, tickers, price_rows_loaded_count=500)
         assert result["price_query_truncated"] is False
         assert not any("truncated" in w for w in result["warnings"])
+
+
+# ── Strict mode (Run Intel preflight): core-read failures never silently
+#    become empty results; exact raw open-position/price rows are exposed ──
+
+class TestFinancialTruthBaselineStrict:
+    @pytest.mark.asyncio
+    async def test_positions_query_failure_raises_not_empty_portfolio(self):
+        db = _MockDB(
+            snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"positions"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "positions" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_price_history_query_failure_raises_not_empty_portfolio(self):
+        db = _MockDB(
+            snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"price_history"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "price_history" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_snapshot_query_failure_raises(self):
+        db = _MockDB(
+            pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")],
+            raise_tables=frozenset({"portfolio_snapshots"}),
+        )
+        with pytest.raises(FinancialTruthReadError) as excinfo:
+            await run_financial_truth_baseline_strict(db, USER_ID)
+        assert "portfolio_snapshots" in excinfo.value.failed_tables
+
+    @pytest.mark.asyncio
+    async def test_legitimate_empty_portfolio_does_not_raise(self):
+        db = _MockDB(snap_rows=[], pos_rows=[], price_rows=[])
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["_core_read_failed"] is False
+        assert result["position_derived_truth"]["open_position_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_strict_result_exposes_exact_open_positions_and_price_rows(self):
+        pos = [_pos("AAPL", 500.0, 150.0)]
+        prices = [_price("AAPL", 200.0, days_old=0)]
+        db = _MockDB(snap_rows=[_snap(100_000.0, 80_000.0)], pos_rows=pos, price_rows=prices)
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["_open_positions"] == pos
+        assert result["_price_rows"] == prices
+
+    @pytest.mark.asyncio
+    async def test_public_diagnostic_never_exposes_underscore_fields(self):
+        db = _MockDB(snap_rows=[_snap()], pos_rows=[_pos("AAPL")], price_rows=[_price("AAPL")])
+        result = await run_financial_truth_baseline(db, USER_ID)
+        assert not any(k.startswith("_") for k in result)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_active_tickers_reported_not_deduplicated(self):
+        pos = [_pos("AAPL", 10.0, 150.0), _pos("AAPL", 5.0, 140.0)]
+        db = _MockDB(snap_rows=[_snap()], pos_rows=pos, price_rows=[_price("AAPL")])
+        result = await run_financial_truth_baseline_strict(db, USER_ID)
+        assert result["position_derived_truth"]["duplicate_active_tickers"] == ["AAPL"]
+        # Both raw rows are preserved — never silently deduplicated to one.
+        assert len(result["_open_positions"]) == 2

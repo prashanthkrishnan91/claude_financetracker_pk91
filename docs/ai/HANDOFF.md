@@ -1,7 +1,50 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-25 (Deterministic conflict handling / review-LLM
-deletion, PR #487 — IN PROGRESS. Deletes the conditional Sonnet/Haiku review
+Last updated: 2026-07-25 (Run Intel operational-reliability PR #488 — item 4
+of the Run Intel trust-recovery sequence, OPEN, not yet merged, patched a
+THIRD round to close four remaining release blockers: (1) portfolio
+reconciliation is now cash-aware — the snapshot's `total_equity` includes
+cash on top of invested positions, so `snapshot_invested_value =
+total_equity - cash_balance` is derived and compared against position-
+derived market value instead of the raw (cash-inflated) total; `cash_balance`
+is validated finite (NaN/±infinity/missing fails closed as
+`portfolio_truth_unavailable` after the one existing refresh attempt;
+negative finite cash stays arithmetic, never coerced to zero); (2)
+`repair_session_graph` never re-derives the frozen scope from the CURRENT
+portfolio — durable `intel_run_tickers` rows are the sole scope authority:
+present rows get missing seed tasks only (ticker rows and `holdings_scope`
+are immutable), zero rows fails closed as
+`scope_freeze_incomplete_restart_required` (user must click Run Intel again
+for a fresh preflight), and any contradictory frozen state (duplicate ticker
+rows, `holdings_scope`/ticker-row mismatch, malformed asset type) fails
+rather than repairs — zero truth/provider/LLM calls in repair; (3)
+`axis_evidence_context` now returns the exact `prompt_payload` object the
+model receives (volatile fields physically stripped out of the payload
+itself, not just its hash) and `input_fingerprint = stable_fingerprint(
+prompt_payload)` computed directly on that same object — one call per
+ticker, reused for the prompt, reuse lookup, and persisted fingerprint/
+evidence_refs; the `[:60000]`-char JSON truncation is deleted in favor of
+deterministic greedy batching of COMPLETE per-ticker payloads
+(`_batch_payloads_by_size`) — a payload is never split, an oversized single
+payload degrades with `prompt_payload_oversized` and costs zero LLM calls;
+(4) the optional user-facing "Evidence: N lanes reused, M refreshed.
+Specialist analysis: ..." sentence is deleted entirely (backend
+`evidence_summary_line`/`_evidence_summary_line`, frontend
+`evidence_summary_line`/`evidenceSummaryLine` field and derivation, and the
+`AdvisorReadinessPanel` render line) — no replacement status line/card/
+tooltip; the blocked-preflight reason and repair-action UI are unchanged.
+Internal `provider_calls`/`llm_calls`/`llm_reused`/`cache_hits`/
+`lanes_refreshed` metrics remain as internal collector-success observability
+only. Net production LOC vs. the round-2 PR head: +52 (cash-aware fields,
+fail-closed repair checks, and deterministic batching add code; the evidence-
+summary deletion removes it) — within the +75 guideline. Full backend
+(8792) and frontend (676) suites pass, TypeScript/build clean. Production
+behavior remains unproven — no live Run Intel call was made, and final paid
+certification has not started. See the finish-plan item 4 entry below for
+the round-2 detail this round built on.)
+
+Previously (2026-07-25, Deterministic conflict handling / review-LLM
+deletion, PR #487 — COMPLETED. Deletes the conditional Sonnet/Haiku review
 LLM (`REVIEW_SYSTEM_PROMPT`, `execute_review_task`, `WorkerSupervisor.review_llm`,
 `intel_v3_distributed_review_model`/`_fallback_model`) and replaces it with a
 small deterministic policy (`conflict_policy_v1.py`, ≤180 lines): the SAME
@@ -365,9 +408,8 @@ separate PRs:
    `test_run_trust_contract_v1.py`. Production source-lineage behavior
    remains NOT runtime-proven — unchanged, still deferred to the single
    final certification run (item 5 in the reduced finish plan).
-3. Deterministic conflict handling / review-LLM deletion — **OPEN —
-   PR #487, patched round 2** (this entry, see the reduced finish plan
-   above). Deletes the conditional Sonnet/Haiku review LLM rather than
+3. Deterministic conflict handling / review-LLM deletion — **COMPLETED —
+   PR #487, merged.** Deletes the conditional Sonnet/Haiku review LLM rather than
    repairing it: `conflict_policy_v1.py` (≤180 lines, currently exactly 180)
    is the ONE strict deterministic authority — trigger thresholds, conflict
    assessment, the HOLD/≤0.49-confidence guardrail, disagreement-vs-
@@ -446,11 +488,116 @@ separate PRs:
    integration validation is complete; production behavior is NOT
    runtime-proven — deferred to the single final certification run (item 5
    above), same deferral pattern as PR #485/#486.
-4. One final operational-reliability PR — NOT STARTED. Reserves:
-   currency/unit normalization; ADR/reporting-currency handling; ticker
-   relevance filtering for news/sentiment; valid publication timestamps and
-   freshness; financial-truth preflight; hour/day/week repeat-run reuse and
-   stale-lane refresh; performance. None of this is implemented by PR 3.
+4. One final operational-reliability PR — **OPEN — PR #488, not yet merged,
+   patched a second round.** Makes Run Intel dependable whether clicked
+   while active, immediately after completion, or an hour/day/week later.
+   - **1. Frozen financial-truth preflight** (`financial_truth_baseline_v1`
+     split into a shared `_gather_truth_sections` core plus a public
+     backward-compatible diagnostic and a new strict
+     `run_financial_truth_baseline_strict` that raises `FinancialTruthReadError`
+     on a core DB read failure instead of silently reporting an empty
+     portfolio). `session_control_v1._run_truth_preflight` calls the strict
+     API, and its ONE passing result supplies BOTH the pass/block verdict AND
+     the exact `open_positions`/`price_rows` that `create_distributed_session`
+     freezes into scope — no second positions/price_history query, no TOCTOU
+     gap. Duplicate active tickers now BLOCK (`portfolio_reconciliation_failed`)
+     instead of silently deduping to the first row.
+   - **2. Corrected currency domain model**
+     (`evidence_normalization_v1.normalize_fundamentals`): statement fields
+     (`revenue`/`free_cash_flow`/`operating_cash_flow`/`net_income`/
+     `total_debt`/`cash`/`ebitda`) use the reporting/financial-statement
+     currency; quote/security fields (`market_cap`/`target_mean_price`/`eps`)
+     use the quote currency — a TSM-shaped reporter (USD market cap/target/
+     EPS, TWD revenue/cash/FCF) is labeled correctly on both sides
+     simultaneously, never conflated. `eps` carries `unit: "per_share"` (a
+     currency amount, not a dimensionless ratio). Every accepted number
+     passes `math.isfinite` (NaN/±infinity rejected); non-ISO/mixed-case
+     currency units (`GBp`/`GBX`/lowercase) are rejected, never silently
+     coerced to `GBP`.
+   - **3. Current yfinance news contract**
+     (`evidence_normalization_v1._normalize_news_item`, single authority —
+     `data_sources.fetch_yfinance_news_sync` now returns raw provider items
+     verbatim): parses BOTH the legacy top-level shape and the current
+     nested `{id, content: {title, summary, pubDate, provider, canonicalUrl}}`
+     shape. Relevance precedence is now strict: provider `related_tickers`
+     metadata, when present and nonempty, is authoritative — a mismatch
+     REJECTS even when the headline text matches; exact-token text matching
+     is a fallback only when metadata is absent, and is disabled for
+     ambiguous 1-2 character tickers.
+   - **4. Fail-closed, asset-scoped collector cache** (`collectors_v1`): a new
+     `CacheReadError` distinguishes a legitimate cache miss (returns `None`,
+     safe to fetch) from a cache READ failure (raises, forcing
+     `TASK_FAILED_RETRYABLE` with zero provider calls — an outage is never
+     reinterpreted as expired evidence). Cache identity now includes
+     `asset_type` (never cross-asset-type reuse). A new
+     `find_recent_macro_output` implements the documented 24h macro reuse
+     contract on the EXISTING task table (user+task_type scoped, no
+     fabricated ticker, no second table) — portfolio-context collection
+     remains a plain current-session DB read, never a lane cache hit.
+   - **5. One prompt/fingerprint helper** (`specialist_agents_v1`):
+     `axis_evidence_context` is now the ONLY source of the compact prompt
+     bundle, supplied lanes, lineage manifest, AND `input_fingerprint` — the
+     separately-maintained `axis_input_fingerprint` function is gone.
+     `market`/`prior_action` are excluded from BOTH the prompt and the
+     fingerprint together (previously `market` reached the prompt while
+     being excluded only from the fingerprint) — no axis's compact bundle
+     ever includes `market` anymore, so `AXIS_CANDIDATE_LANES`
+     (`source_lineage_v1`) no longer lists `LANE_PRICE` for any axis. The
+     fingerprint now includes the exact `evidence_sources` projection the
+     LLM sees, so a genuine source-identity change invalidates reuse.
+   - **6. Literal cost/reuse metrics** (`worker_supervisor_v1`): `cache_hits`/
+     `lanes_refreshed` count ONLY a successful evidence-lane adoption/
+     collection — the session-level portfolio-context DB read and any
+     degraded/no-data/failed-retryable collector attempt count in neither
+     total anymore (previously every non-cache-hit completion, including
+     the portfolio-context read, silently inflated `lanes_refreshed`).
+     `session_control_v1._evidence_summary_line` now renders a counter pair
+     once EITHER sibling exists (an immediate rerun that reuses every lane
+     never sets `lanes_refreshed` at all — the absent key is a genuine zero,
+     not a reason to suppress the whole line).
+   - **7. Blocked-preflight UI** (`AdvisorReadinessPanel`/`advisor-readiness.ts`):
+     `IntelV3SessionStatus`/`AdvisorRunModel` carry the backend's existing
+     `status`/`code`/`message`/`repair_action`/`provider_calls`/`llm_calls`
+     fields; the run-status region renders the bounded repair action once
+     when present — no new card/drawer/button, no raw internal code ever
+     rendered. `portfolio_scope_empty` keeps its pre-existing "Add positions"
+     behavior unchanged (no repair action shown there).
+   - **8. Hour/day/week controlled-clock matrix**
+     (`test_run_intel_ttl_matrix_v1.py`, new): real
+     scheduler/collector/specialist/supervisor dispatch, two sessions per
+     interval, durable-row timestamps shifted backward (never the TTL
+     constants) to simulate immediate/+1h/+1d/+1w. Covers equities, an ETF,
+     and crypto, including the SEC/ETF long-TTL artifact-lane paths, via
+     deterministic provider-boundary fixtures — no paid/unavailable provider
+     ever enabled.
+   - `decision_policy_v1.decide()`, allocation policy, and Deploy Cash are
+     unchanged. No SQL, no new env var, no new provider, no FX service, no
+     new agent, no new table.
+   - **Test totals:** full backend **8767 passed, 0 failed**. Full frontend
+     **677 passed, 0 failed**. TypeScript clean. Frontend production build
+     compiles/type-checks cleanly (static prerender needs Supabase env vars
+     this sandbox doesn't have — unrelated to this diff, already deploying
+     green on Vercel per the PR's own preview checks).
+   - **LOC:** net production-source delta vs `main` is now **+580 lines**
+     (up from the originally reported +458 — measured across every changed
+     production file, tests/docs excluded). The specific redundant paths
+     item 10 asked to delete were all removed as part of the fixes
+     themselves (the independent post-preflight scope reload, the
+     separately-maintained `axis_input_fingerprint`, the old currency
+     classification, the permissive cache-miss fallback) — none survive as
+     parallel/dead code. The remaining growth is genuine new logic for 8
+     independently-real correctness gaps (strict-failure preflight
+     semantics, a second currency domain, nested news parsing, a fail-closed
+     cache exception path, a unified fingerprint helper, literal metric
+     gating, UI wiring, and controlled-clock test infrastructure) — per
+     item 10's own "do not code-golf correctness" instruction, no comment or
+     logic was stripped merely to chase the number.
+   - **Runtime caveat:** fixture/unit/integration validation is complete
+     (including real end-to-end supervisor-driven proofs across the
+     immediate/1h/1d/1w matrix); production behavior is NOT runtime-proven —
+     deferred to the single final certification run (item 5), same
+     deferral pattern as every prior entry in this sequence. No live Run
+     Intel session was run in this PR or this patch.
 5. One final paid production certification run — NOT STARTED. The only
    place this sequence claims live production success.
 
@@ -707,6 +854,22 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   caveat unchanged**: production source-lineage behavior remains NOT
   runtime-proven — deferred to the single final certification run after
   the final certification run (item 5), same as every prior entry in this sequence.
+- Deterministic conflict handling / review-LLM deletion PR #487 (2026-07-25,
+  merged): full backend **8679 passed, 0 failed**; full frontend **664
+  passed, 0 failed**; TypeScript clean; production build clean.
+- Run Intel operational-reliability PR, finish-plan item 4 (2026-07-25, see
+  full entry above), patched a second round to close eight connected
+  correctness gaps: full backend **8767 passed, 0 failed**; full frontend
+  **677 passed, 0 failed**; TypeScript clean; frontend production build
+  compiles/type-checks cleanly (static prerender needs Supabase env vars
+  this sandbox doesn't have — sandbox-only, unrelated to the diff). No SQL,
+  no new env var, no new provider, no new agent. Net production-source
+  delta vs `main`: **+580 lines** (up from the originally reported +458 —
+  justified in the item 4 entry above: the specific redundant paths asked
+  to be deleted were removed, the remaining growth is genuine new logic for
+  8 independently-real correctness gaps, never code-golfed). Runtime
+  caveat unchanged — production behavior remains unproven, deferred to the
+  single final certification run, which has NOT started.
 
 ## SQL / env state
 

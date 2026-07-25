@@ -156,18 +156,18 @@ def test_dedupe_references_is_deterministic_and_partitioned():
 
 
 def test_axis_lineage_manifest_partial_when_one_supplied_lane_unreferenced():
-    price_ref = lineage.make_provider_observation_ref(
-        lane=LANE_PRICE, ticker="AAA", task_id="t1",
-        output={"price": 1, "source": "yfinance", "as_of": "x"},
+    tech_ref = lineage.make_provider_observation_ref(
+        lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+        output={"sma_50": 1, "source": "yfinance", "as_of": "x"},
     )
     manifest = lineage.build_axis_lineage_manifest(
-        axis=AXIS_TECHNICAL,
-        source_refs_by_lane={LANE_PRICE: [price_ref]},
-        supplied_lanes=[LANE_PRICE, LANE_TECHNICALS],
+        axis=AXIS_ETF_EXPOSURE,
+        source_refs_by_lane={LANE_TECHNICALS: [tech_ref]},
+        supplied_lanes=[LANE_TECHNICALS, LANE_FUNDAMENTALS],
     )
     assert manifest["status"] == lineage.LINEAGE_PARTIAL
-    assert manifest["linked_lanes"] == [LANE_PRICE]
-    assert manifest["missing_ref_lanes"] == [LANE_TECHNICALS]
+    assert manifest["linked_lanes"] == [LANE_TECHNICALS]
+    assert manifest["missing_ref_lanes"] == [LANE_FUNDAMENTALS]
 
 
 def test_axis_lineage_manifest_full_when_every_supplied_lane_referenced():
@@ -240,12 +240,12 @@ class TestStrictManifestValidationNeverFull:
 
     def test_full_status_with_wrong_ticker_reference_is_missing(self):
         ref = lineage.make_provider_observation_ref(
-            lane=LANE_PRICE, ticker="ZZZ", task_id="t1",
+            lane=LANE_TECHNICALS, ticker="ZZZ", task_id="t1",
             output={"price": 1, "source": "yfinance", "as_of": "x"},
         )
         manifest = {
             "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
-            "expected_lanes": [LANE_PRICE], "linked_lanes": [LANE_PRICE],
+            "expected_lanes": [LANE_TECHNICALS], "linked_lanes": [LANE_TECHNICALS],
             "missing_ref_lanes": [], "status": lineage.LINEAGE_FULL, "refs": [ref],
         }
         assert lineage.parse_axis_manifest(manifest, expected_ticker="AAA") is None
@@ -413,7 +413,7 @@ class TestTruncatedRefCountValidation:
     def _manifest(self, truncated_ref_count):
         return {
             "schema_version": lineage.SCHEMA_VERSION, "axis": AXIS_TECHNICAL,
-            "expected_lanes": [LANE_PRICE], "linked_lanes": [], "missing_ref_lanes": [LANE_PRICE],
+            "expected_lanes": [LANE_TECHNICALS], "linked_lanes": [], "missing_ref_lanes": [LANE_TECHNICALS],
             "status": lineage.LINEAGE_MISSING, "refs": [],
             "truncated_ref_count": truncated_ref_count,
         }
@@ -447,11 +447,11 @@ class TestForgedReviewManifestFailsClosed:
     def _full_axis_output(self, axis, ticker):
         manifest = lineage.build_axis_lineage_manifest(
             axis=axis,
-            source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
-                lane=LANE_PRICE, ticker=ticker, task_id=f"{ticker}-{axis}",
-                output={"price": 1, "source": "yfinance", "as_of": "x"},
+            source_refs_by_lane={LANE_TECHNICALS: [lineage.make_provider_observation_ref(
+                lane=LANE_TECHNICALS, ticker=ticker, task_id=f"{ticker}-{axis}",
+                output={"sma_50": 1, "source": "yfinance", "as_of": "x"},
             )]},
-            supplied_lanes=[LANE_PRICE],
+            supplied_lanes=[LANE_TECHNICALS],
         )
         return {"axis": axis, "evidence_refs": manifest, "score": 0.5, "confidence": 0.8}
 
@@ -480,7 +480,7 @@ class TestForgedReviewManifestFailsClosed:
         # Downgrade the CURRENT technical output to missing (no reference) —
         # simulating the axis output changing after the review was written.
         stale_manifest = lineage.build_axis_lineage_manifest(
-            axis=AXIS_TECHNICAL, source_refs_by_lane={}, supplied_lanes=[LANE_PRICE],
+            axis=AXIS_TECHNICAL, source_refs_by_lane={}, supplied_lanes=[LANE_TECHNICALS],
         )
         current_technical_output = {
             "axis": AXIS_TECHNICAL, "evidence_refs": stale_manifest,
@@ -531,11 +531,11 @@ class TestForgedReviewManifestFailsClosed:
 def test_review_lineage_manifest_full_only_when_every_input_full():
     full_manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_TECHNICAL,
-        source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
-            lane=LANE_PRICE, ticker="AAA", task_id="t1",
-            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        source_refs_by_lane={LANE_TECHNICALS: [lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+            output={"sma_50": 1, "source": "yfinance", "as_of": "x"},
         )]},
-        supplied_lanes=[LANE_PRICE],
+        supplied_lanes=[LANE_TECHNICALS],
     )
     # A genuinely PARTIAL manifest (self-consistent — one supplied lane
     # referenced, one not) — flipping only the "status" label of an
@@ -543,11 +543,11 @@ def test_review_lineage_manifest_full_only_when_every_input_full():
     # status is independently re-derived, never trusted).
     partial_manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_FUNDAMENTAL,
-        source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
-            lane=LANE_PRICE, ticker="AAA", task_id="t2",
-            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        source_refs_by_lane={LANE_SEC_CATALYST: [lineage.make_research_artifact_source_ref(
+            lane=LANE_SEC_CATALYST, ticker="AAA", artifact_id="art-1",
+            source_row={"id": "src-1", "provider_name": "sec_edgar"},
         )]},
-        supplied_lanes=[LANE_PRICE, LANE_FUNDAMENTALS],
+        supplied_lanes=[LANE_SEC_CATALYST, LANE_FUNDAMENTALS],
     )
     assert partial_manifest["status"] == lineage.LINEAGE_PARTIAL
 
@@ -573,11 +573,11 @@ def test_review_lineage_manifest_full_only_when_every_input_full():
 def test_review_never_writes_evidence_refs_empty_when_sourced_inputs_exist():
     full_manifest = lineage.build_axis_lineage_manifest(
         axis=AXIS_TECHNICAL,
-        source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
-            lane=LANE_PRICE, ticker="AAA", task_id="t1",
-            output={"price": 1, "source": "yfinance", "as_of": "x"},
+        source_refs_by_lane={LANE_TECHNICALS: [lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+            output={"sma_50": 1, "source": "yfinance", "as_of": "x"},
         )]},
-        supplied_lanes=[LANE_PRICE],
+        supplied_lanes=[LANE_TECHNICALS],
     )
     review = lineage.build_review_lineage_manifest(
         [{"axis": AXIS_TECHNICAL, "evidence_refs": full_manifest}], ticker="AAA",
@@ -1269,12 +1269,12 @@ class TestAxisSuppliedLanesContract:
         }
 
     @pytest.mark.parametrize("axis,expected_subset", [
-        (AXIS_FUNDAMENTAL, {LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST}),
-        (AXIS_TECHNICAL, {LANE_PRICE, LANE_TECHNICALS}),
-        (AXIS_SENTIMENT, {LANE_PRICE, LANE_NEWS_SENTIMENT, LANE_SEC_CATALYST}),
-        (AXIS_RISK_FILING, {LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST}),
-        (AXIS_ETF_EXPOSURE, {LANE_PRICE, LANE_TECHNICALS, LANE_ETF_FUND_DATA, LANE_FUNDAMENTALS}),
-        (AXIS_CRYPTO_MARKET, {LANE_PRICE, LANE_CRYPTO_MARKET, LANE_TECHNICALS}),
+        (AXIS_FUNDAMENTAL, {LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST}),
+        (AXIS_TECHNICAL, {LANE_TECHNICALS}),
+        (AXIS_SENTIMENT, {LANE_NEWS_SENTIMENT, LANE_SEC_CATALYST}),
+        (AXIS_RISK_FILING, {LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST}),
+        (AXIS_ETF_EXPOSURE, {LANE_TECHNICALS, LANE_ETF_FUND_DATA, LANE_FUNDAMENTALS}),
+        (AXIS_CRYPTO_MARKET, {LANE_CRYPTO_MARKET, LANE_TECHNICALS}),
     ])
     def test_fully_populated_bundle_supplies_exactly_its_axis_candidate_lanes(
         self, axis, expected_subset,
@@ -1305,6 +1305,102 @@ class TestAxisSuppliedLanesContract:
         }
         context = axis_evidence_context(empty_bundle, axis)
         assert context["supplied_lanes"] == []
+
+
+class TestAxisFingerprintContract:
+    """Final Run Intel operational-reliability patch, item 5: ONE pure
+    helper (``axis_evidence_context``) is the sole source of the prompt
+    payload, supplied lanes, lineage manifest, AND ``input_fingerprint`` —
+    there is no independently maintained ``axis_input_fingerprint``. The
+    fingerprint hashes exactly what is serialized into the prompt (including
+    ``evidence_sources``), nothing more and nothing less."""
+
+    def _bundle(
+        self, *, sma=1.0, provider="yfinance", task_id="t1",
+        prior_action="buy", market_price=100.0,
+        generated_at=None, artifact_id=None,
+    ):
+        ref = lineage.make_provider_observation_ref(
+            lane=LANE_TECHNICALS, ticker="AAPL", task_id=task_id,
+            output={"sma_50": sma, "source": provider, "as_of": "2026-07-01T00:00:00+00:00"},
+        )
+        technical = {"sma_50": sma}
+        if generated_at is not None:
+            technical["generated_at"] = generated_at
+        if artifact_id is not None:
+            technical["artifact_id"] = artifact_id
+        return {
+            "ticker": "AAPL", "asset_type": "equity",
+            "portfolio_context": {
+                "portfolio_weight_pct": 5.0, "unrealized_gain_pct": 10.0,
+                "prior_action": prior_action,
+            },
+            "missing_lanes": [], "degraded_lanes": [],
+            "market": {"price": market_price},
+            "technical": technical,
+            "source_refs_by_lane": {LANE_TECHNICALS: [ref]},
+        }
+
+    def _context(self, **kwargs):
+        from app.services.intelligence.v3.distributed.specialist_agents_v1 import (
+            axis_evidence_context,
+        )
+        return axis_evidence_context(self._bundle(**kwargs), AXIS_TECHNICAL)
+
+    def test_identical_prompt_payload_yields_identical_fingerprint(self):
+        a, b = self._context(), self._context()
+        assert a["prompt_payload"] == b["prompt_payload"]
+        assert a["input_fingerprint"] == b["input_fingerprint"]
+
+    def test_visible_prompt_change_changes_fingerprint(self):
+        a, b = self._context(sma=1.0), self._context(sma=2.0)
+        assert a["prompt_payload"] != b["prompt_payload"]
+        assert a["input_fingerprint"] != b["input_fingerprint"]
+
+    def test_invisible_replay_locator_never_changes_fingerprint(self):
+        a, b = self._context(task_id="task-a"), self._context(task_id="task-b")
+        assert a["input_fingerprint"] == b["input_fingerprint"]
+
+    def test_changed_source_identity_changes_fingerprint(self):
+        a, b = self._context(provider="yfinance"), self._context(provider="polygon")
+        assert a["prompt_payload"]["evidence_sources"] != b["prompt_payload"]["evidence_sources"]
+        assert a["input_fingerprint"] != b["input_fingerprint"]
+
+    def test_market_tick_never_reaches_prompt_or_fingerprint(self):
+        a, b = self._context(market_price=100.0), self._context(market_price=999.0)
+        assert "market" not in a["prompt_payload"]
+        assert a["input_fingerprint"] == b["input_fingerprint"]
+
+    def test_prior_action_never_reaches_prompt_or_fingerprint(self):
+        a, b = self._context(prior_action="buy"), self._context(prior_action="sell")
+        assert "prior_action" not in a["prompt_payload"]["portfolio_context"]
+        assert a["input_fingerprint"] == b["input_fingerprint"]
+
+    def test_lineage_lists_exactly_the_lanes_in_the_actual_prompt(self):
+        context = self._context()
+        assert context["supplied_lanes"] == [LANE_TECHNICALS]
+        assert context["manifest"]["expected_lanes"] == [LANE_TECHNICALS]
+
+    def test_input_fingerprint_equals_stable_fingerprint_of_prompt_payload(self):
+        """The fingerprint is not a separately-maintained projection — it is
+        ``stable_fingerprint`` applied directly to the exact object returned
+        as ``prompt_payload``, recomputed here independently."""
+        from app.services.intelligence.v3.distributed.task_contracts_v1 import (
+            stable_fingerprint,
+        )
+
+        context = self._context()
+        assert context["input_fingerprint"] == stable_fingerprint(
+            context["prompt_payload"]
+        )
+
+    def test_generated_at_and_artifact_id_absent_from_payload_and_invisible_to_fingerprint(self):
+        a = self._context(generated_at="2026-07-01T00:00:00+00:00", artifact_id="artifact-a")
+        b = self._context(generated_at="2026-08-15T12:00:00+00:00", artifact_id="artifact-b")
+        assert "generated_at" not in a["prompt_payload"]["technical"]
+        assert "artifact_id" not in a["prompt_payload"]["technical"]
+        assert a["prompt_payload"] == b["prompt_payload"]
+        assert a["input_fingerprint"] == b["input_fingerprint"]
 
 
 # ── Axis-scoped specialist lineage + reuse + review ─────────────────────────
@@ -1388,16 +1484,17 @@ class TestSpecialistAxisLineage:
         row = next(r for r in client.rows("intel_run_tickers") if r["ticker"] == "AAPL")
         bundle = row["evidence_bundle"]
         context = axis_evidence_context(bundle, AXIS_TECHNICAL)
-        assert LANE_PRICE in context["supplied_lanes"]
+        # ``market``/price is never sent to any axis prompt (contract §5), so
+        # LANE_PRICE is never supplied even though the raw bundle carries it.
+        assert LANE_PRICE not in context["supplied_lanes"]
         assert LANE_TECHNICALS in context["supplied_lanes"]
-        compact = context["compact_bundle"]
+        compact = context["prompt_payload"]
         assert "evidence_sources" in compact
         assert compact["evidence_sources"]
         for source in compact["evidence_sources"]:
             # Bounded, identity-only projection — never a raw payload/citation.
             # ``identity_token`` is present only when derivable (e.g. from a
-            # non-price provider's output_digest) — price stays identified
-            # by lane/provider alone so intraday ticks don't defeat reuse.
+            # non-price provider's output_digest).
             assert {"lane", "ref_type", "provider"} <= set(source)
             assert set(source) <= {"lane", "ref_type", "provider", "identity_token"}
 
@@ -1597,11 +1694,11 @@ class TestReviewLineage:
         client = FakeSupabase()
         full_manifest = lineage.build_axis_lineage_manifest(
             axis=AXIS_TECHNICAL,
-            source_refs_by_lane={LANE_PRICE: [lineage.make_provider_observation_ref(
-                lane=LANE_PRICE, ticker="AAA", task_id="t1",
-                output={"price": 1, "source": "yfinance", "as_of": "x"},
+            source_refs_by_lane={LANE_TECHNICALS: [lineage.make_provider_observation_ref(
+                lane=LANE_TECHNICALS, ticker="AAA", task_id="t1",
+                output={"sma_50": 1, "source": "yfinance", "as_of": "x"},
             )]},
-            supplied_lanes=[LANE_PRICE],
+            supplied_lanes=[LANE_TECHNICALS],
         )
         session_id = str(uuid.uuid4())
         client.table("intel_run_sessions").insert({
@@ -1874,10 +1971,10 @@ class TestBoundedReferenceStorage:
 
     def test_axis_manifest_bounded_to_24_and_round_trips(self):
         source_refs_by_lane: dict[str, list] = {}
-        lanes = [LANE_PRICE, LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST]
+        lanes = [LANE_FUNDAMENTALS, LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST]
         for lane_idx, lane in enumerate(lanes):
             refs = []
-            for i in range(8):
+            for i in range(9):
                 if lane in (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST):
                     refs.append(lineage.make_research_artifact_source_ref(
                         lane=lane, ticker="AAA", artifact_id=f"art-{lane_idx}",
@@ -1888,7 +1985,7 @@ class TestBoundedReferenceStorage:
                         lane=lane, ticker="AAA", task_id=f"t-{lane_idx}-{i}",
                         output={"value": i, "source": "yfinance", "as_of": "x"},
                     ))
-            source_refs_by_lane[lane] = refs  # 8 per lane x 4 lanes = 32 raw refs
+            source_refs_by_lane[lane] = refs  # 9 per lane x 3 lanes = 27 raw refs
         manifest = lineage.build_axis_lineage_manifest(
             axis=AXIS_FUNDAMENTAL, source_refs_by_lane=source_refs_by_lane,
             supplied_lanes=lanes,

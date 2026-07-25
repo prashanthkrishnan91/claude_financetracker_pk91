@@ -137,6 +137,56 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Frozen once at import time (not per-call/per-instance) so every fixture
+# news item shares the exact same, fingerprint-stable timestamp within a
+# test run, while staying inside the real freshness window whenever the
+# suite actually executes.
+_NEWS_FIXTURE_BASE_TS = now_utc().timestamp()
+
+
+def seed_reconciled_snapshot(client: FakeSupabase, user_id: str) -> None:
+    """(Re)seed a fresh ``portfolio_snapshots`` row that reconciles exactly
+    against the user's current ``positions``/``price_history`` state, so the
+    Run Intel financial-truth preflight (``financial_truth_baseline_v1``)
+    passes ``certified`` by default for existing fixtures. Called by
+    ``seed_position`` after every insert — the latest (highest ``snapshot_at``)
+    row always reflects the fully-seeded portfolio."""
+    positions = [
+        p for p in client.rows("positions")
+        if str(p.get("user_id")) == str(user_id)
+        and (p.get("category") or "").upper() != "SELL"
+        and float(p.get("shares") or 0) > 0
+    ]
+    latest_price: dict[str, float] = {}
+    for row in client.rows("price_history"):
+        t = row.get("ticker")
+        if t and t not in latest_price:
+            latest_price[t] = float(row.get("close_price") or 0)
+    total_equity = sum(
+        float(p["shares"]) * latest_price.get(str(p.get("ticker")).upper(), 0.0)
+        for p in positions
+    )
+    total_cost = sum(float(p["shares"]) * float(p.get("avg_cost") or 0) for p in positions)
+    # Upsert (never append a second row) — avoids same-microsecond snapshot_at
+    # ties racing the fake's stable sort across rapid successive seed calls.
+    rows = client.store.setdefault("portfolio_snapshots", [])
+    existing = next((r for r in rows if str(r.get("user_id")) == str(user_id)), None)
+    payload = {
+        "user_id": user_id,
+        "snapshot_at": now_utc().isoformat(),
+        "total_equity": total_equity,
+        "total_cost": total_cost,
+        "total_pnl": total_equity - total_cost,
+        "total_pnl_pct": 0.0,
+        "cash_balance": 0.0,
+        "created_at": now_utc().isoformat(),
+    }
+    if existing is not None:
+        existing.update(payload)
+    else:
+        rows.append({"id": str(uuid.uuid4()), **payload})
+
+
 def seed_position(
     client: FakeSupabase,
     user_id: str,
@@ -146,9 +196,16 @@ def seed_position(
     shares: float = 10.0,
     avg_cost: float = 100.0,
     close_price: Optional[float] = 120.0,
+    allow_duplicate: bool = False,
 ) -> None:
-    client.store.setdefault("positions", []).append({
-        "id": str(uuid.uuid4()),
+    """Upsert-by-(user, ticker) — re-seeding the same ticker (e.g. to
+    represent a later session's unchanged holding) updates the existing row
+    rather than creating a second active row for it, since duplicate active
+    tickers are now a financial-truth defect the preflight blocks on. Pass
+    ``allow_duplicate=True`` to deliberately create a genuine duplicate row
+    for tests that exercise that block."""
+    rows = client.store.setdefault("positions", [])
+    payload = {
         "user_id": user_id,
         "ticker": ticker,
         "category": category,
@@ -158,7 +215,15 @@ def seed_position(
         "drip_cost": 0,
         "lt_eligible": False,
         "lt_date": None,
-    })
+    }
+    existing = None if allow_duplicate else next(
+        (r for r in rows if str(r.get("user_id")) == str(user_id) and r.get("ticker") == ticker),
+        None,
+    )
+    if existing is not None:
+        existing.update(payload)
+    else:
+        rows.append({"id": str(uuid.uuid4()), **payload})
     if close_price is not None:
         client.store.setdefault("price_history", []).append({
             "id": str(uuid.uuid4()),
@@ -166,6 +231,7 @@ def seed_position(
             "price_date": now_utc().date().isoformat(),
             "close_price": close_price,
         })
+    seed_reconciled_snapshot(client, user_id)
 
 
 # The deterministic 34-holding golden fixture: 28 equities + 4 ETFs + 2 crypto.
@@ -247,7 +313,9 @@ class ProviderRecorder:
         self.calls.append(("news", ticker.upper()))
         return [
             {"headline": f"{ticker.upper()} update {i}", "source": "test",
-             "datetime": 1700000000 + i}
+             "datetime": _NEWS_FIXTURE_BASE_TS - i * 60,
+             "id": f"{ticker.upper()}-news-{i}",
+             "related_tickers": [ticker.upper()]}
             for i in range(3)
         ]
 

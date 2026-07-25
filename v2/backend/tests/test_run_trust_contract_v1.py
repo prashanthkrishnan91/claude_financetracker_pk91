@@ -160,10 +160,13 @@ def _specialist_output(
     status.
     """
     has_ref = bool(evidence_refs)
+    # The axis's own first candidate lane — a manifest citing a lane outside
+    # AXIS_CANDIDATE_LANES[axis] is structurally invalid and never validates.
+    own_lane = (lineage.AXIS_CANDIDATE_LANES.get(axis) or ("price",))[0]
     ref = {
         "schema_version": lineage.SCHEMA_VERSION,
         "ref_type": lineage.REF_TYPE_PROVIDER_OBSERVATION,
-        "lane": "price", "provider": "yfinance", "ticker": ticker,
+        "lane": own_lane, "provider": "yfinance", "ticker": ticker,
         "task_id": f"{ticker}-{axis}-task", "output_digest": "sha256:test",
     }
     if axis == AXIS_REVIEW:
@@ -175,9 +178,9 @@ def _specialist_output(
         manifest = {
             "schema_version": lineage.SCHEMA_VERSION,
             "axis": axis,
-            "expected_lanes": ["price"],
-            "linked_lanes": ["price"] if has_ref else [],
-            "missing_ref_lanes": [] if has_ref else ["price"],
+            "expected_lanes": [own_lane],
+            "linked_lanes": [own_lane] if has_ref else [],
+            "missing_ref_lanes": [] if has_ref else [own_lane],
             "status": lineage.LINEAGE_FULL if has_ref else lineage.LINEAGE_MISSING,
             "refs": [ref] if has_ref else [],
         }
@@ -1118,7 +1121,7 @@ class TestSourceHealthSemantics:
         session = _one_ticker_session()
         rows = [_one_ticker_row(evidence_quality="STRONG")]
         outputs = [
-            _partial_specialist_output("AAA", AXIS_TECHNICAL),
+            _partial_specialist_output("AAA", AXIS_SENTIMENT),
             _partial_specialist_output("AAA", AXIS_FUNDAMENTAL),
         ]
         contract = trust.build_run_trust_contract(

@@ -146,8 +146,20 @@ and re-raises every other database error; session creation verifies the exact
 expected seed graph (portfolio context + macro + every collector lane for
 every frozen ticker) before `created → running`; incomplete shapes stay in
 the explicit retryable `created` state and `repair_session_graph` (run by the
-supervisor — no browser traffic required) converges every partial-create
-shape to exactly one complete graph.
+supervisor — no browser traffic required) converges a partial-create shape
+to a complete graph WITHOUT ever re-deriving scope from the current
+portfolio: durable `intel_run_tickers` rows are the sole scope authority.
+If frozen ticker rows exist, repair creates only the missing seed tasks and
+never adds/removes/modifies a ticker row or `holdings_scope` (repair fails
+honestly if `holdings_scope` doesn't match the frozen ticker-row set exactly,
+or if the frozen rows are internally contradictory — duplicates, malformed
+asset type, or a `holdings_scope` entry with no matching row). If ZERO
+frozen ticker rows exist, the crash happened before scope freeze ever
+persisted — repair terminalizes the session as `failed` with
+`scope_freeze_incomplete_restart_required` rather than reconstructing scope
+from (possibly since-changed) current holdings; the user must click Run
+Intel again for a fresh preflight and a new session. Repair makes zero
+financial-truth, provider, or LLM calls in either path.
 
 ### intel_run_specialist_outputs (new)
 
@@ -731,3 +743,163 @@ Superseded data: unfinished v1 sessions → `superseded` by migration 027.
 - NO CALL is recorded at session/ticker/status/snapshot-metadata level; the
   visible card contract is unchanged in this slice (deterministic policy's
   existing suppression semantics still govern card actions).
+
+## 17. Operational reliability (final PR: preflight, normalization, selective reuse, patched round 2)
+
+**1. Frozen financial-truth preflight.** `financial_truth_baseline_v1` splits
+into a shared `_gather_truth_sections` core, a backward-compatible public
+`run_financial_truth_baseline` (strips underscore-prefixed internal keys),
+and a strict `run_financial_truth_baseline_strict` that raises
+`FinancialTruthReadError` on a core positions/price_history/snapshot query
+failure instead of returning an empty-looking result. `_run_truth_preflight`
+calls ONLY the strict API; its single passing result supplies BOTH the
+verdict and the exact `open_positions`/`price_rows` `create_distributed_session`
+freezes into scope — no second query, no time-of-check/time-of-use gap.
+Duplicate active tickers for the same user now BLOCK
+(`portfolio_reconciliation_failed`) rather than silently keeping the first
+row — a duplicate is a financial-truth defect, not a valid scope. Each
+failure mode returns its own code (`portfolio_truth_unavailable` /
+`portfolio_snapshot_stale` / `portfolio_reconciliation_failed` /
+`portfolio_refresh_failed` / `portfolio_scope_empty`) via the existing
+`not_created` response shape, now carrying `status`/`code`/`message`/
+`repair_action`/`provider_calls`/`llm_calls` (see §7 below). A bounded
+`run_intel_preflight_v1` summary persists on the new session's `metrics`.
+
+**2. Corrected currency domain model** (`evidence_normalization_v1.normalize_fundamentals`).
+Statement fields (`revenue`/`free_cash_flow`/`operating_cash_flow`/
+`net_income`/`total_debt`/`cash`/`ebitda`) are labeled with the reporting/
+financial-statement currency (`financial_currency`); quote/security fields
+(`market_cap`/`target_mean_price`/`eps`) are labeled with the quote currency
+(`quote_currency`) — a TSM-shaped reporter (USD quote, TWD statements) is
+labeled correctly on BOTH sides at once, never conflated, never FX-converted.
+`eps` carries `unit: "per_share"` (a currency amount, never a dimensionless
+ratio). Every accepted number passes `math.isfinite` (NaN/±infinity
+rejected); non-ISO/mixed-case codes (`GBp`/`GBX`/lowercase) are rejected,
+never coerced to `GBP`. An unknown currency in either domain excludes only
+that domain's fields (`normalization_gaps`), never blocks the other domain.
+
+**3. Current yfinance news contract** (`evidence_normalization_v1._normalize_news_item`,
+the single shape-parsing authority — `data_sources.fetch_yfinance_news_sync`
+now returns raw provider items verbatim). Parses BOTH the legacy top-level
+shape and the current nested `{id, content: {title, summary, pubDate,
+provider, canonicalUrl}}` shape, extracting only fields actually present.
+Timestamp accepted as a finite positive Unix value OR a valid ISO/RFC3339
+string, normalized to UTC — invalid input is rejected, never replaced with
+fetch time. STRICT relevance precedence: provider `related_tickers`
+metadata, when present and nonempty, is authoritative (a mismatch REJECTS
+even when the headline text matches — never overridden); exact-token text
+matching is a fallback only when metadata is absent, and disabled for
+ambiguous 1-2 character tickers. Deduped by id/link/normalized-headline+time,
+bounded to 8 accepted articles.
+
+**4. Fail-closed, asset-scoped collector cache** (`collectors_v1`). A new
+`CacheReadError` distinguishes a legitimate miss (`None`, safe to fetch) from
+a cache READ failure (raises → `TASK_FAILED_RETRYABLE`, zero provider calls
+— an outage is never reinterpreted as expired evidence). Cache identity now
+requires a matching `asset_type` (no cross-asset-type reuse), a valid
+completed_at inside TTL, and output/state/contract-version validity.
+`find_recent_macro_output` implements the 24h macro reuse contract on the
+EXISTING task table (user + `task_type` scoped, no fabricated ticker, no
+second table/cache). Portfolio-context collection remains a plain
+current-session DB read — never a lane cache hit or provider refresh.
+
+**5. One prompt/fingerprint helper** (`specialist_agents_v1.axis_evidence_context`).
+The separately-maintained `axis_input_fingerprint` is gone —
+`axis_evidence_context` is the ONE helper returning `prompt_payload`
+(the EXACT bounded object the model receives), supplied lanes, lineage
+manifest, and `input_fingerprint`, used identically by prompt construction,
+the reuse lookup, the persisted `input_fingerprint`, and `evidence_refs`
+rebinding on reuse. `prompt_payload` is built by stripping volatile fields
+(`as_of`/`cache_hit`/`generated_at`/`fetched_at`/`task_id`/`observed_at`/
+`artifact_id`) OUT of the payload itself — not merely out of its hash — so
+`input_fingerprint = stable_fingerprint(prompt_payload)` hashes exactly what
+was sent, nothing more, nothing less. `axis_evidence_context` is computed
+ONCE per ticker per task and that same object is reused for the reuse
+lookup, the persisted fingerprint/evidence_refs, and the actual prompt —
+`_build_user_prompt` accepts prebuilt payloads and never recomputes axis
+context. `market`/`prior_action` are excluded from BOTH the prompt and the
+fingerprint together (a field must never be visible to the LLM while
+invisible to reuse). No axis's compact bundle ever includes `market`
+anymore, so `source_lineage_v1.AXIS_CANDIDATE_LANES` no longer lists
+`LANE_PRICE` for any axis — an axis never claims price lineage it was never
+given. Deterministic safe batching (`_batch_payloads_by_size`) groups
+COMPLETE per-ticker payloads into LLM calls bounded by 60,000 serialized
+JSON chars — a payload is never split or truncated (the old
+`json.dumps(...)[:60000]` slice is deleted); an ordinary batch still costs
+one call; a single ticker whose own bounded payload exceeds the limit
+degrades with `prompt_payload_oversized` and never reaches an LLM call;
+`llm_calls`/reuse metrics reflect the actual resulting per-batch calls.
+
+**6. Literal cost/reuse metrics** (`worker_supervisor_v1`). `cache_hits`/
+`lanes_refreshed` count ONLY a successful evidence-lane adoption/collection
+— the session-level portfolio-context DB read and any degraded/no-data/
+failed-retryable collector attempt count in neither total (previously every
+non-cache-hit task completion, including the portfolio-context read,
+silently inflated `lanes_refreshed`). `provider_calls` stays unconditional
+(reflects real attempts regardless of outcome). `llm_calls`/`llm_reused`
+were already literal (actual `ask_json` calls vs. individually adopted
+outputs) and are unchanged. All of these stay internal collector-success
+observability only — `get_session_status` no longer derives or exposes any
+user-facing sentence from them (the prior `_evidence_summary_line`/
+`evidence_summary_line` surface is deleted entirely, not replaced; see §11).
+
+**7. Blocked-preflight UI.** `IntelV3SessionStatus` (frontend) and
+`AdvisorRunModel` carry the backend's existing `status`/`code`/`message`/
+`repair_action`/`provider_calls`/`llm_calls` fields. `AdvisorReadinessPanel`'s
+run-status region renders the bounded repair action once when present — no
+new card/drawer/button, no duplicate generic sentence, no raw internal
+code ever rendered. `portfolio_scope_empty` retains its pre-existing "Add
+positions" idle behavior unchanged (no repair action shown for that case).
+
+**8. Hour/day/week controlled-clock matrix** (`test_run_intel_ttl_matrix_v1.py`).
+Real `WorkerSupervisor`/scheduler/collector/specialist dispatch drives two
+sessions per interval; session 2's durable-row timestamps are shifted
+backward by the interval (never the `LANE_TTL_HOURS`/`OUTPUT_VALID_HOURS`
+constants) to simulate immediate/+1h/+1d/+1w elapsed real time. Covers
+equities (AAPL), an ETF (VTI), and crypto (BTC) — including the SEC/ETF
+long-TTL artifact-lane paths via a deterministic fixed-artifact-id fixture
+— without ever enabling a real research-worker/paid provider. Confirms the
+exact TTL matrix at each interval (which lanes reuse/refresh, which
+specialist axes reuse/rerun) and that each rerun publishes its OWN
+session-native snapshot, never a copy of a prior session's.
+
+**Lane TTL matrix (unchanged from §6, verified not redefined by item 8's
+tests):** price 0.25h, technicals/fundamentals/sec_catalyst/macro 24h,
+news_sentiment 1h, sec_company_facts 168h, etf_fund_data 2160h.
+
+**9. Cash-aware reconciliation** (`financial_truth_baseline_v1`). The
+portfolio snapshot's `total_equity` includes `cash_balance` on top of
+invested positions — it is never compared directly against the
+position-derived market value. `_snapshot_truth` now selects
+`cash_balance`, validates both it and `total_equity` as finite
+(`math.isfinite`), and derives `snapshot_invested_value = total_equity -
+cash_balance` only when both are present and finite. `_reconciliation`
+compares `snapshot_invested_value` (not the raw `total_equity`) against
+position-derived market value, and returns `snapshot_portfolio_value`/
+`snapshot_cash_balance`/`snapshot_invested_value`/
+`position_derived_market_value` alongside the existing
+`absolute_difference`/`percentage_difference`/`reconciliation_status`.
+Missing/non-finite cash on a fresh snapshot (after the one existing refresh
+attempt) fails closed as `portfolio_truth_unavailable` — never silently
+treated as zero cash. Negative finite cash remains arithmetic data.
+
+**10. Immutable frozen scope on repair** (`session_control_v1.
+repair_session_graph`). See the updated "Graph creation is fail-closed and
+self-repairing" paragraph above — repair never re-derives scope from the
+current portfolio; durable `intel_run_tickers` rows are the sole authority,
+and a crash before scope freeze persisted fails the session rather than
+reconstructing it.
+
+**11. No evidence-count UI claim.** The optional "Evidence: N lanes reused,
+M refreshed. Specialist analysis: ..." sentence is deleted entirely —
+backend `_evidence_summary_line`/`evidence_summary_line` and frontend
+`evidence_summary_line`/`evidenceSummaryLine` (`IntelV3SessionStatus`,
+`AdvisorRunModel`, `deriveRunModel`, `AdvisorReadinessPanel`'s render line)
+are all removed, with no replacement status line/card/tooltip/control.
+Reason: collector success (a lane adopted/collected) happens before the
+evidence bundle decides whether an artifact is actually usable, so a raw
+collector-success count was never a trustworthy "usable evidence" claim.
+`provider_calls`/`llm_calls`/`llm_reused`/`cache_hits`/`lanes_refreshed`
+remain as internal collector-success observability only (§6) — never
+described as final usable evidence. The blocked-preflight reason and
+repair-action UI (§7) are unchanged.

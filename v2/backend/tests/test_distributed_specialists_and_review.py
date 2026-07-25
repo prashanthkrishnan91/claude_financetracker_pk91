@@ -15,6 +15,7 @@ Proves:
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -24,6 +25,9 @@ from app.services.intelligence.v3.distributed import conflict_policy_v1
 from app.services.intelligence.v3.distributed import run_scheduler_v1 as scheduler
 from app.services.intelligence.v3.distributed import session_control_v1 as control
 from app.services.intelligence.v3.distributed.specialist_agents_v1 import (
+    _MAX_PROMPT_JSON_CHARS,
+    _batch_payloads_by_size,
+    _build_user_prompt,
     execute_conflict_resolution_task,
     execute_specialist_task,
 )
@@ -277,8 +281,11 @@ class TestSpecialistExecution:
         second = await execute_specialist_task(client, task=task2, llm=llm)
         assert second.reused == ["AAPL"]
         assert second.llm_calls == 0, "unchanged fingerprint still called LLM"
-        # Changed fingerprint invalidates reuse.
-        changed = dict(bundle, input_fingerprint="sha256:changed")
+        # Changed evidence (not just the stale whole-bundle field) invalidates
+        # reuse — the axis fingerprint is derived from the axis's own compact
+        # projection, so a genuine fundamental value change must alter it.
+        changed_fundamental = dict(bundle.get("fundamental") or {}, pe=999.0)
+        changed = dict(bundle, input_fingerprint="sha256:changed", fundamental=changed_fundamental)
         client.table("intel_run_tickers").update({
             "evidence_bundle": changed,
         }).eq("run_session_id", session2).eq("ticker", "AAPL").execute()
@@ -288,6 +295,113 @@ class TestSpecialistExecution:
         task2 = claim_task_row(client, task2)
         third = await execute_specialist_task(client, task=task2, llm=llm)
         assert third.llm_calls == 1
+
+
+class TestPromptPayloadBatching:
+    """Deterministic safe batching (contract §3): complete ticker payloads
+    are grouped into calls bounded by ``_MAX_PROMPT_JSON_CHARS`` — a payload
+    is never split/truncated, ticker order is preserved, and a single
+    oversized payload degrades without ever being sent to the model."""
+
+    def _payload(self, ticker: str, *, filler_chars: int = 0) -> dict:
+        payload = {"ticker": ticker, "fundamental": {"pe": 21.0}}
+        if filler_chars:
+            payload["fundamental"]["monetary"] = {"note": "x" * filler_chars}
+        return payload
+
+    def test_normal_batch_stays_in_one_group(self):
+        payloads = [self._payload(t) for t in ("AAPL", "MSFT", "GOOGL")]
+        batches, oversized = _batch_payloads_by_size(payloads)
+        assert oversized == []
+        assert len(batches) == 1
+        assert [p["ticker"] for p in batches[0]] == ["AAPL", "MSFT", "GOOGL"]
+
+    def test_over_limit_batch_splits_into_valid_complete_json_groups(self):
+        # Each payload alone is well under the limit, but three together
+        # exceed it — forcing a split without ever cutting a payload.
+        payloads = [
+            self._payload(t, filler_chars=25_000)
+            for t in ("AAPL", "MSFT", "GOOGL")
+        ]
+        batches, oversized = _batch_payloads_by_size(payloads)
+        assert oversized == []
+        assert len(batches) > 1
+        for batch in batches:
+            serialized = json.dumps(batch, default=str)
+            assert len(serialized) <= _MAX_PROMPT_JSON_CHARS
+            assert json.loads(serialized) == batch  # complete, parseable JSON
+
+        # No ticker omitted, none duplicated, original order preserved.
+        seen = [p["ticker"] for batch in batches for p in batch]
+        assert seen == ["AAPL", "MSFT", "GOOGL"]
+
+    def test_single_oversized_payload_never_enters_any_batch(self):
+        huge = self._payload("AAPL", filler_chars=_MAX_PROMPT_JSON_CHARS + 1)
+        normal = self._payload("MSFT")
+        batches, oversized = _batch_payloads_by_size([huge, normal])
+        assert oversized == ["AAPL"]
+        flattened = [p["ticker"] for batch in batches for p in batch]
+        assert "AAPL" not in flattened
+        assert flattened == ["MSFT"]
+
+    def test_build_user_prompt_never_truncates(self):
+        payloads = [
+            self._payload(t, filler_chars=25_000)
+            for t in ("AAPL", "MSFT", "GOOGL")
+        ]
+        prompt = _build_user_prompt(AXIS_FUNDAMENTAL, payloads)
+        serialized = prompt.split("Evidence bundles (JSON):\n", 1)[1]
+        parsed = json.loads(serialized)  # would raise if truncated
+        assert [p["ticker"] for p in parsed] == ["AAPL", "MSFT", "GOOGL"]
+
+    @pytest.mark.asyncio
+    async def test_oversized_ticker_degrades_with_zero_llm_calls_sibling_still_analyzed(
+        self, monkeypatch
+    ):
+        client = FakeSupabase()
+        session_id = await _session_with_ready_bundles(
+            client, monkeypatch, ["AAPL", "MSFT"],
+        )
+        # Inflate AAPL's fundamental payload past the size limit so its
+        # bounded ``prompt_payload`` alone exceeds _MAX_PROMPT_JSON_CHARS.
+        aapl_row = next(
+            r for r in client.rows("intel_run_tickers")
+            if r["run_session_id"] == session_id and r["ticker"] == "AAPL"
+        )
+        bundle = dict(aapl_row["evidence_bundle"])
+        fundamental = dict(bundle.get("fundamental") or {})
+        normalized = dict(fundamental.get("normalized") or {})
+        normalized["compact"] = {"note": "x" * (_MAX_PROMPT_JSON_CHARS + 1)}
+        fundamental["normalized"] = normalized
+        bundle["fundamental"] = fundamental
+        client.table("intel_run_tickers").update({
+            "evidence_bundle": bundle,
+        }).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        session = next(
+            r for r in client.rows("intel_run_sessions") if r["id"] == session_id
+        )
+        scheduler.run_scheduler_pass(client, session=session)
+        task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_SPECIALIST_ANALYSIS
+            and t["lane"] == AXIS_FUNDAMENTAL
+        )
+        task = claim_task_row(client, task)
+        llm = FakeLLM()
+        outcome = await execute_specialist_task(client, task=task, llm=llm)
+
+        assert "AAPL" not in {
+            t for call in llm.calls for t in call["tickers"]
+        }, "oversized ticker must never reach an actual LLM call"
+        assert outcome.skipped_insufficient == ["AAPL"]
+        assert outcome.persisted == ["MSFT"]
+        assert outcome.llm_calls == 1  # MSFT's own call only
+        assert outcome.final_state == TASK_DEGRADED
+        tickers_with_output = {
+            o["ticker"] for o in client.rows("intel_run_specialist_outputs")
+        }
+        assert tickers_with_output == {"MSFT"}
 
 
 class TestConditionalReview:

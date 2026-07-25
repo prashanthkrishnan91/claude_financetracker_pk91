@@ -301,8 +301,21 @@ class WorkerSupervisor:
                 buffer["provider_calls"] = (
                     buffer.get("provider_calls", 0) + result.provider_calls
                 )
-                if result.cache_hit:
-                    buffer["cache_hits"] = buffer.get("cache_hits", 0) + 1
+                # Literal semantics (contract §6): cache_hits/lanes_refreshed
+                # count only a SUCCESSFUL evidence lane — never the
+                # session-level portfolio-context DB read (never a lane
+                # cache hit or provider refresh), and never a degraded/
+                # no-data/failed-retryable attempt that produced no usable
+                # evidence. provider_calls above stays unconditional — it
+                # reflects actual attempts, not their outcome.
+                if (
+                    task_type != TASK_COLLECT_PORTFOLIO_CONTEXT
+                    and result.final_state == TASK_SUCCEEDED
+                ):
+                    if result.cache_hit:
+                        buffer["cache_hits"] = buffer.get("cache_hits", 0) + 1
+                    else:
+                        buffer["lanes_refreshed"] = buffer.get("lanes_refreshed", 0) + 1
                 await asyncio.to_thread(
                     lambda: store.complete_task(
                         self.client,

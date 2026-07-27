@@ -1,16 +1,18 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-27 (Deploy Cash core-ETF exclusive waterfall, branch
-`claude/deploy-cash-etf-waterfall-a0wzam`, OPEN, not yet merged — from
-main after PR #488. Fixes `allocation_policy_v1._compute_gaps`: the
-broad_index_etf group target was previously split equally across every
-held broad ETF, so the VTI>VOO>SPY>QQQ preference order only reordered an
-otherwise-cosmetic per-ticker allocation — VTI filled its 1/N artificial
-share and the allocator then moved on to fund SPY/VOO/QQQ too. Now, when
-the broad_index_etf group is underweight, the FULL group-level dollar gap
-goes to the single highest-preference held ticker with a current,
-non-stale price (`selected_core_etf_ticker` in `_compute_gaps`); every
-other held broad ETF gets a zero gap in the same plan (new
+Last updated: 2026-07-27 (Deploy Cash core-ETF exclusive waterfall +
+cash-aware reconciliation patch, branch
+`claude/deploy-cash-etf-waterfall-a0wzam`, **PR #489 — OPEN, not yet
+merged** — from main after **PR #488, which is MERGED**. Round 1 fixed
+`allocation_policy_v1._compute_gaps`: the broad_index_etf group target was
+previously split equally across every held broad ETF, so the
+VTI>VOO>SPY>QQQ preference order only reordered an otherwise-cosmetic
+per-ticker allocation — VTI filled its 1/N artificial share and the
+allocator then moved on to fund SPY/VOO/QQQ too. Now, when the
+broad_index_etf group is underweight, the FULL group-level dollar gap goes
+to the single highest-preference held ticker with a current, non-stale
+price (`selected_core_etf_ticker` in `_compute_gaps`); every other held
+broad ETF gets a zero gap in the same plan (new
 `policy_ineligibility_reason="broad_index_core_etf_not_selected_this_plan"`
 plus a dynamic `core_etf_not_selected_reason` string naming the actual
 selected ticker). A lower-preference ticker is only reachable when every
@@ -26,16 +28,37 @@ that surfaces the dynamic per-ticker reason. `policy-authority-reviewer`
 also caught a dead frontend reason-code copy map
 (`paycheck-plan-helpers.ts`, unused by any rendered component today) still
 holding the old code strings — synced to the renamed codes in a follow-up
-commit so it can't silently show wrong copy if wired in later. No new
-page/control/model/provider; no SQL/env changes. Net production diff is
-small (three existing files: `allocation_policy_v1.py`,
-`paycheck_plan_preview.py`, `paycheck-plan-helpers.ts`). Full backend
-suite (8793 tests) and full frontend suite (676 tests) pass; TypeScript
-and production build (`next build`, real env vars) both clean. See PR body
-for the full regression-letter (A–J) to test mapping.)
+commit so it can't silently show wrong copy if wired in later. Round 2
+(this patch) made Deploy Cash's own reconciliation cash-aware —
+previously it compared `portfolio_snapshots.total_equity` (which includes
+cash) directly against the positions-only market value. Now the snapshot
+row also reads `cash_balance`, both fields are validated finite (NaN/
+±infinity/missing fails closed to an unavailable reconciliation, never a
+silent pass), `snapshot_invested_value = total_equity - cash_balance` is
+derived (negative finite cash stays arithmetic, never coerced to zero;
+cash is never inferred from `cash_to_deploy` or transactions), and THAT
+invested value — not raw `total_equity` — is reconciled against
+position-derived market value. `truth_dependency` gained
+`snapshot_cash_balance`/`snapshot_invested_value` fields alongside the
+unchanged `snapshot_portfolio_value` (still `total_equity`). The
+VTI>VOO>SPY>QQQ exclusive waterfall itself, its reason codes, and every
+other allocation gate (ETF floor, stock sleeve + evidence gate,
+concentration/speculative/crypto/alternatives caps, stale/missing-price
+exclusion, min-trade/max-positions) are unchanged by this round. No new
+page/control/model/provider; no SQL/env changes (the `cash_balance`
+column already exists on `portfolio_snapshots`, used elsewhere by PR
+#488's Run Intel financial-truth baseline). Net production diff across
+both rounds is small (four existing files: `allocation_policy_v1.py`,
+`paycheck_plan_preview.py`, `paycheck-plan-helpers.ts`, plus this round's
+`allocation_policy_v1.py` reconciliation changes layered on round 1's).
+Full backend suite (8802 tests) and full frontend suite (676 tests) pass;
+TypeScript and production build (`next build`, real env vars) both clean.
+Production behavior remains unproven until one post-merge Deploy Cash
+request. See PR #489's body for the full regression-letter mapping (both
+rounds).)
 
 Previously (2026-07-25, Run Intel operational-reliability PR #488 — item 4
-of the Run Intel trust-recovery sequence, OPEN, not yet merged, patched a
+of the Run Intel trust-recovery sequence, **MERGED**, patched a
 THIRD round to close four remaining release blockers: (1) portfolio
 reconciliation is now cash-aware — the snapshot's `total_equity` includes
 cash on top of invested positions, so `snapshot_invested_value =
@@ -522,8 +545,8 @@ separate PRs:
    integration validation is complete; production behavior is NOT
    runtime-proven — deferred to the single final certification run (item 5
    above), same deferral pattern as PR #485/#486.
-4. One final operational-reliability PR — **OPEN — PR #488, not yet merged,
-   patched a second round.** Makes Run Intel dependable whether clicked
+4. One final operational-reliability PR — **MERGED — PR #488, patched
+   three rounds before merge.** Makes Run Intel dependable whether clicked
    while active, immediately after completion, or an hour/day/week later.
    - **1. Frozen financial-truth preflight** (`financial_truth_baseline_v1`
      split into a shared `_gather_truth_sections` core plus a public

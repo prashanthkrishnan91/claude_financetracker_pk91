@@ -61,9 +61,16 @@ def _make_db(
     positions: list[dict] | None = None,
     prices_by_ticker: dict[str, list[dict]] | None = None,
     snapshot_value: float | None = 10000.0,
+    cash_balance: float | None = 0.0,
     intel_rows: list[dict] | None = None,
 ) -> MagicMock:
-    """Build a mock db_client that returns canned data."""
+    """Build a mock db_client that returns canned data.
+
+    ``cash_balance`` defaults to 0.0 so existing callers that only specify
+    ``snapshot_value`` keep the pre-cash-aware-reconciliation behavior
+    (snapshot_invested_value == snapshot_value). Pass ``cash_balance=None``
+    to simulate a snapshot row missing the column entirely.
+    """
     db = MagicMock()
 
     def _chain(data):
@@ -79,7 +86,10 @@ def _make_db(
         return m
 
     pos_data = positions if positions is not None else []
-    snap_data = [{"total_equity": snapshot_value, "snapshot_at": "2026-06-20T10:00:00Z"}] if snapshot_value else []
+    snap_data = (
+        [{"total_equity": snapshot_value, "cash_balance": cash_balance, "snapshot_at": "2026-06-20T10:00:00Z"}]
+        if snapshot_value else []
+    )
     intel_data = intel_rows if intel_rows is not None else []
 
     def table_side_effect(name):
@@ -1614,34 +1624,34 @@ class TestStage12CRegressionFixture:
 
     Portfolio design:
       - Individual stocks dominate (~85% of portfolio) → all above 20% cap → ineligible
-      - broad_index_etf group < 25% target → group is underweight → ETF tickers eligible
+      - broad_index_etf group < 25% target → group is underweight
       - ETF total weight < 40% → ETF floor not met → ETF candidates get group-priority boost
-      - Both VTI and SPY are held; SPY has a slightly larger per-ticker gap than VTI
-      - Stage 12B (without preference) would have selected SPY first
-      - Stage 12C must select VTI first (preference policy)
+      - VTI, SPY, VOO, and QQQ are all held
+      - The exclusive core-ETF waterfall (VTI > VOO > SPY > QQQ) assigns the
+        ENTIRE broad_index_etf group-level dollar gap to VTI alone — SPY,
+        VOO, and QQQ get a zero gap in this plan, never a smaller share of it
 
     Holdings:
       AAPL: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
       NVDA: 15 shares @ $800 = $12,000   (stock, ~28% → above 20% cap)
       MSFT: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
-      VTI : 10 shares @ $220 = $2,200    (broad ETF, ~5.2%)
-      SPY :  3 shares @ $540 = $1,620    (broad ETF, ~3.8% → larger gap than VTI)
-      VOO :  2 shares @ $440 = $880      (broad ETF, ~2.1%)
-      QQQ :  2 shares @ $480 = $960      (broad ETF, ~2.3%)
+      VTI : 10 shares @ $220 = $2,200    (broad ETF, ~5.2% — top preference, selected)
+      SPY :  3 shares @ $540 = $1,620    (broad ETF, ~3.8% — held, gets $0 this plan)
+      VOO :  2 shares @ $440 = $880      (broad ETF, ~2.1% — held, gets $0 this plan)
+      QQQ :  2 shares @ $480 = $960      (broad ETF, ~2.3% — held, gets $0 this plan)
       VYM :  5 shares @ $130 = $650      (dividend ETF, ~1.5%)
     Total ≈ $42,310
 
     Group weights:
       individual_stock: ~85%  → way above policy target (~30%) → all ineligible
-      broad_index_etf:  ~13.4% < 25% target → group "under" → all 4 ETFs eligible
+      broad_index_etf:  ~13.4% < 25% target → group "under" → group gap ≈ 11.6%
       ETF total:        ~14.9% < 40% floor  → floor not met
-    Per-ticker target for 4 broad ETFs = 25/4 = 6.25%:
-      VTI: 5.20%, gap = 1.05%
-      SPY: 3.83%, gap = 2.42%  ← LARGER gap than VTI
-      VOO: 2.08%, gap = 4.17%
-      QQQ: 2.27%, gap = 3.98%
-    Without preference: VOO or SPY might rank first.
-    With 12C preference: VTI (rank 4) ranks first despite smallest gap.
+    Under the exclusive waterfall, VTI (rank 4, the highest-preference held
+    and priced ticker) is `selected_core_etf_ticker`: its target absorbs the
+    FULL ~11.6% group gap (target ≈ 16.8%), not an equal 25%/4 = 6.25% share.
+    SPY, VOO, and QQQ each get `target_weight_pct == current_weight_pct` (a
+    zero gap) and the `broad_index_core_etf_not_selected_this_plan` policy
+    reason — they are never candidates in the same plan as VTI.
     """
 
     _POSITIONS = [
@@ -1659,13 +1669,14 @@ class TestStage12CRegressionFixture:
         + 10 * 220 + 3 * 540 + 2 * 440 + 2 * 480 + 5 * 130
     )  # $42,310
 
-    def _make_db(self) -> MagicMock:
+    def _make_db(self, cash_balance: float = 0.0, extra_cash: float = 0.0) -> MagicMock:
         positions = [_pos(t, shares=s) for t, s, _ in self._POSITIONS]
         prices_by_ticker = {t: [_price(t, close=p)] for t, s, p in self._POSITIONS}
         return _make_db(
             positions=positions,
             prices_by_ticker=prices_by_ticker,
-            snapshot_value=self._TOTAL_MV,
+            snapshot_value=self._TOTAL_MV + extra_cash,
+            cash_balance=cash_balance,
         )
 
     @pytest.mark.asyncio
@@ -2735,3 +2746,203 @@ class TestStockSleevePolicyGuardrail:
         cp = result["cash_plan"]
         assert cp["allocated_cash"] <= cp["cash_to_deploy"]
         assert cp["unallocated_cash"] >= 0
+
+
+# ── Cash-aware reconciliation (PR #489 patch) ──────────────────────────────────
+#
+# portfolio_snapshots.total_equity includes cash on top of invested positions
+# and must never be compared directly against a positions-only market value.
+# snapshot_invested_value = total_equity - cash_balance is derived and
+# reconciled against position-derived market value instead.
+
+class TestCashAwareReconciliation:
+    """Required regressions A-H for cash-aware Deploy Cash reconciliation."""
+
+    @pytest.mark.asyncio
+    async def test_a_cash_aware_reconciliation_passes_and_plan_stays_trusted(self):
+        """total_equity=102737.50, cash_balance=2737.50, positions=$100,000:
+        invested_value (100,000.00) matches position-derived value exactly,
+        so reconciliation passes and Deploy Cash can remain ready/trusted."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=102737.50, cash_balance=2737.50,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["reconciliation_status"] == "pass"
+        assert truth["snapshot_portfolio_value"] == 102737.50
+        assert truth["snapshot_cash_balance"] == 2737.50
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert result["verdict"]["policy_status"] == "ready"
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_b_zero_cash_balance_unchanged_behavior(self):
+        """cash_balance=0.0 (explicit): invested_value == total_equity, same
+        as the pre-cash-aware comparison — existing behavior is unchanged."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=0.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["reconciliation_status"] == "pass"
+        assert truth["snapshot_invested_value"] == 100000.0
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_c_negative_finite_cash_stays_arithmetic(self):
+        """A negative finite cash_balance is real arithmetic data, never
+        coerced to zero: invested_value = total_equity - (negative cash) =
+        total_equity + |cash|, computed and reconciled normally."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=99500.0, cash_balance=-500.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] == -500.0
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert truth["reconciliation_status"] == "pass"
+
+    @pytest.mark.asyncio
+    async def test_d_missing_cash_balance_fails_closed_to_unavailable(self):
+        """cash_balance missing entirely (None): snapshot_invested_value
+        cannot be derived, so reconciliation is unavailable and the numeric
+        plan is not trusted — total_equity alone is never substituted in."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=None,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] is None
+        assert truth["snapshot_cash_balance"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert "snapshot_cash_balance_missing_or_non_finite" in result["generated_policy"]["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_e_non_finite_total_equity_fails_closed(self):
+        """NaN total_equity fails closed to an unavailable reconciliation
+        rather than propagating NaN arithmetic downstream."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=float("nan"), cash_balance=0.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_portfolio_value"] is None
+        assert truth["snapshot_invested_value"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_e_infinite_cash_balance_fails_closed(self):
+        """+infinity cash_balance fails closed to an unavailable
+        reconciliation rather than producing an infinite/NaN invested value."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=float("inf"),
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] is None
+        assert truth["snapshot_invested_value"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_f_large_cash_pile_alone_does_not_create_false_blocker(self):
+        """cash_balance is 900% of invested value, but invested_value still
+        matches position-derived market value exactly — a large cash pile on
+        its own must never trip the reconciliation blocker (the old bug:
+        comparing raw total_equity, which includes that cash, directly
+        against a positions-only sum)."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=1_000_000.0, cash_balance=900_000.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert truth["reconciliation_status"] == "pass"
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_g_genuine_invested_value_divergence_still_blocks(self):
+        """After removing cash, the remaining invested value still genuinely
+        diverges from position-derived market value beyond the existing
+        (unweakened) 5% degraded tolerance — reconciliation still blocks."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}  # positions = $100,000
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=250000.0, cash_balance=100000.0,  # invested = $150,000
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] == pytest.approx(150000.0)
+        assert truth["reconciliation_status"] == "blocked"
+        assert result["verdict"]["policy_status"] == "blocked"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_h_production_fixture_unaffected_by_cash_aware_reconciliation(self):
+        """Required regression H: the existing $2,737.50 production-shaped
+        ETF-waterfall fixture (VTI and SPY both held) still never allocates
+        to both VTI and SPY, and cash conservation stays exact, even with a
+        real non-zero cash balance now correctly excluded from the invested
+        value used for reconciliation."""
+        fixture = TestStage12CRegressionFixture()
+        db = fixture._make_db(cash_balance=1500.0, extra_cash=1500.0)
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] == 1500.0
+        assert truth["snapshot_invested_value"] == pytest.approx(fixture._TOTAL_MV)
+        assert truth["reconciliation_status"] == "pass"
+
+        candidates = result["next_buy_candidates"]
+        broad_tickers = [c["ticker"] for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad_tickers == ["VTI"], (
+            f"Expected VTI as the only broad_index_etf candidate; got {broad_tickers}"
+        )
+        assert "SPY" not in [c["ticker"] for c in candidates]
+
+        cash_plan = result["cash_plan"]
+        assert cash_plan["allocated_cash"] <= 2737.50
+        assert cash_plan["unallocated_cash"] >= 0.0
+        assert cash_plan["allocated_cash"] + cash_plan["unallocated_cash"] == pytest.approx(2737.50, abs=0.02)

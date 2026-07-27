@@ -51,8 +51,11 @@ def _make_db(
     positions: list[dict] | None = None,
     prices_by_ticker: dict[str, list[dict]] | None = None,
     snapshot_value: float | None = 10000.0,
+    cash_balance: float | None = 0.0,
     intel_rows: list[dict] | None = None,
 ) -> MagicMock:
+    """``cash_balance`` defaults to 0.0 so existing callers that only specify
+    ``snapshot_value`` keep the pre-cash-aware-reconciliation behavior."""
     db = MagicMock()
 
     def _chain(data):
@@ -68,7 +71,7 @@ def _make_db(
 
     pos_data = positions if positions is not None else []
     snap_data = (
-        [{"total_equity": snapshot_value, "snapshot_at": "2026-07-18T10:00:00Z"}]
+        [{"total_equity": snapshot_value, "cash_balance": cash_balance, "snapshot_at": "2026-07-18T10:00:00Z"}]
         if snapshot_value else []
     )
     intel_data = intel_rows if intel_rows is not None else []

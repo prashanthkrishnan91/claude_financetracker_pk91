@@ -28,11 +28,23 @@ fresh, carries a constructive (BUY) signal with sufficient evidence
 confidence, and has no blocking evidence gaps — on top of the existing
 concentration/cap checks. Missing or ambiguous evidence blocks the ticker
 rather than defaulting to a fake pass; the ETF plan still runs on its own.
+
+Reconciliation is cash-aware: the latest portfolio snapshot's ``total_equity``
+includes cash on top of invested positions, so it is never compared directly
+against the positions-only market value. ``snapshot_invested_value =
+total_equity - cash_balance`` is derived from the same snapshot row and
+reconciled against position-derived market value instead. ``cash_balance`` is
+arithmetic data — 0.0 and negative finite values are legitimate and never
+coerced away — and is read only from the snapshot row, never inferred from
+``cash_to_deploy`` or transactions. Missing, NaN, or ±infinity in either
+``total_equity`` or ``cash_balance`` fails closed to an unavailable
+reconciliation rather than a silent pass.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -145,6 +157,13 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _finite_float(v: Any) -> float | None:
+    """Same as ``_safe_float`` but also rejects NaN/±infinity — a value that
+    parses but isn't finite is arithmetic garbage, never usable truth."""
+    f = _safe_float(v)
+    return f if f is not None and math.isfinite(f) else None
 
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -1003,14 +1022,22 @@ def _allocate_cash(
 # ── Step 10: Reconciliation gate ─────────────────────────────────────────────
 
 def _check_reconciliation(
-    snapshot_value: float | None,
+    snapshot_invested_value: float | None,
     position_mv: float,
 ) -> tuple[str, list[str]]:
-    """Return (reconciliation_status, blockers)."""
-    if snapshot_value is None or position_mv is None or position_mv < _NEAR_ZERO:
+    """Return (reconciliation_status, blockers).
+
+    Compares the snapshot's INVESTED value (``total_equity - cash_balance``)
+    against position-derived market value — the snapshot's raw
+    ``total_equity`` includes cash and must never be compared directly
+    against a positions-only sum. ``snapshot_invested_value`` is already
+    None (fails closed) when total_equity or cash_balance is missing,
+    non-finite, or no snapshot row exists at all.
+    """
+    if snapshot_invested_value is None or position_mv is None or position_mv < _NEAR_ZERO:
         return "unavailable", ["no_usable_portfolio_value_for_reconciliation"]
 
-    pct = _pct_diff(snapshot_value, position_mv)
+    pct = _pct_diff(snapshot_invested_value, position_mv)
     if pct is None:
         return "unavailable", ["division_by_zero_in_reconciliation"]
 
@@ -1020,7 +1047,7 @@ def _check_reconciliation(
         return "degraded", []
     else:
         return "blocked", [
-            f"reconciliation_blocked: snapshot={snapshot_value:.2f} vs "
+            f"reconciliation_blocked: invested_value={snapshot_invested_value:.2f} vs "
             f"position_mv={position_mv:.2f} ({pct:.2f}%)"
         ]
 
@@ -1046,12 +1073,23 @@ async def run_next_buy_policy_diagnostic(
     warnings: list[str] = []
 
     # ── 1. Load latest portfolio snapshot ────────────────────────────────────
+    # total_equity includes cash and is never compared directly against a
+    # positions-only sum. cash_balance is read alongside it so the invested
+    # value (total_equity - cash_balance) can be derived and reconciled
+    # instead. cash_balance is arithmetic data — 0.0 and negative finite
+    # values are legitimate and never coerced away — and it is read only
+    # from this snapshot row, never inferred from cash_to_deploy or
+    # transactions. Missing or non-finite total_equity/cash_balance fails
+    # closed: snapshot_invested_value stays None and reconciliation reports
+    # "unavailable" rather than silently passing.
     snapshot_value: float | None = None
+    snapshot_cash_balance: float | None = None
+    snapshot_invested_value: float | None = None
     snapshot_at_str: str | None = None
     try:
         snap_res = (
             db_client.table("portfolio_snapshots")
-            .select("total_equity,snapshot_at")
+            .select("total_equity,cash_balance,snapshot_at")
             .eq("user_id", user_id)
             .order("snapshot_at", desc=True)
             .limit(1)
@@ -1059,8 +1097,15 @@ async def run_next_buy_policy_diagnostic(
         )
         snap_rows = snap_res.data or []
         if snap_rows:
-            snapshot_value = _safe_float(snap_rows[0].get("total_equity"))
+            snapshot_value = _finite_float(snap_rows[0].get("total_equity"))
+            snapshot_cash_balance = _finite_float(snap_rows[0].get("cash_balance"))
             snapshot_at_str = str(snap_rows[0].get("snapshot_at") or "")
+            if snapshot_value is None:
+                warnings.append("snapshot_total_equity_missing_or_non_finite")
+            if snapshot_cash_balance is None:
+                warnings.append("snapshot_cash_balance_missing_or_non_finite")
+            if snapshot_value is not None and snapshot_cash_balance is not None:
+                snapshot_invested_value = round(snapshot_value - snapshot_cash_balance, 2)
     except Exception as exc:
         warnings.append(f"snapshot_query_failed: {type(exc).__name__}")
         logger.warning("allocation_policy_v1 snapshot query failed: %s", exc)
@@ -1121,7 +1166,7 @@ async def run_next_buy_policy_diagnostic(
         )
 
     # ── 5. Reconciliation check ───────────────────────────────────────────────
-    recon_status, recon_blockers = _check_reconciliation(snapshot_value, total_mv)
+    recon_status, recon_blockers = _check_reconciliation(snapshot_invested_value, total_mv)
     if recon_blockers:
         warnings.extend(recon_blockers)
 
@@ -1295,6 +1340,8 @@ async def run_next_buy_policy_diagnostic(
             "truth_status": "certified" if policy_status == "ready" else ("degraded" if policy_status == "degraded" else "blocked"),
             "reconciliation_status": recon_status,
             "snapshot_portfolio_value": round(snapshot_value, 2) if snapshot_value is not None else None,
+            "snapshot_cash_balance": round(snapshot_cash_balance, 2) if snapshot_cash_balance is not None else None,
+            "snapshot_invested_value": snapshot_invested_value,
             "snapshot_at": snapshot_at_str or None,
             "position_derived_market_value": round(total_mv, 2),
             "price_coverage_status": price_coverage_status,
@@ -1373,7 +1420,7 @@ def _next_fix(
 ) -> str:
     if policy_status == "blocked":
         if any("reconciliation" in b for b in blockers):
-            return "Reconcile portfolio values — snapshot vs position-derived diverges beyond tolerance"
+            return "Reconcile portfolio values — snapshot invested value vs position-derived value diverges beyond tolerance"
         return "Resolve blockers: " + "; ".join(blockers)
     if has_missing_prices:
         return "Run Stage 11B current-price-truth-repair to fill missing price_history rows"

@@ -271,3 +271,20 @@ One-off or repeated: Repeated pattern.
 Promotion target: reviewer agents and TEST_ROUTING.
 Action taken: OS v2 added focused skills and read-only reviewer agents; OS v3 adds retrospective/learning loop.
 Follow-up needed: After next few PRs, check whether reviewer agents reduce follow-up prompts.
+
+---
+
+### 2026-07-27 — Backend-only downstream grep missed a stray frontend reason-code copy map
+
+Repo: claude_financetracker_pk91
+Area: backend/allocation-policy, frontend/paycheck-plan
+Severity: Level 1 — caught before merge by reviewer agent, not by the builder's own audit
+Miss: While renaming `allocation_policy_v1`'s reason-code strings (`core_etf_preference` → `preferred_core_etf`, etc.), the initial "downstream consumers reviewed" grep was scoped to the backend router (`paycheck_plan_preview.py`) believed to be the sole consumer. It missed `v2/frontend/src/lib/paycheck-plan-helpers.ts`, a reason-code-to-copy map still holding the old strings.
+Impact: Low this time (the map is currently unused by any rendered component), but the same miss on a wired-in map would silently show stale/wrong plain-English copy in the UI with no test failure to catch it.
+What caught it: A `policy-authority-reviewer` pass, run for an unrelated decision-authority check, happened to scan the whole frontend tree and flagged it.
+Root cause: "Downstream consumers reviewed" was interpreted as "the one file I know calls this," not "every string reference to the renamed constant repo-wide."
+What should catch it next time: When renaming/removing a backend reason-code or enum string constant, grep the full frontend `src` tree (not just the presumed consumer file) for the old string(s) before claiming downstream consumers were reviewed in a PR body.
+One-off or repeated: One-off so far.
+Promotion target: None yet — logging only.
+Action taken: Synced `paycheck-plan-helpers.ts`'s copy map to the renamed codes in a follow-up commit this PR.
+Follow-up needed: No.

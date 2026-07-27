@@ -11,7 +11,15 @@ without it using neutral defaults.
 
 Stage 12C adds a deterministic core ETF preference policy for broad_index_etf
 candidates: VTI > VOO > SPY > QQQ. Preference order governs over raw gap size
-so SPY's larger gap cannot displace an eligible underweight VTI.
+so SPY's larger gap cannot displace an eligible underweight VTI. The
+preference order is an *exclusive* new-cash waterfall, not an equal split of
+the group target across every held broad ETF: when the broad_index_etf group
+is underweight, the entire group-level dollar gap is assigned to the single
+highest-preference held ticker with a current, non-stale price. Every other
+held broad ETF gets a zero gap in the same plan — the preference order would
+otherwise be cosmetic (VTI filling only its artificial per-ticker share
+before the allocator moved on to SPY). This never sells, consolidates, or
+advises against existing lower-preference ETFs; it only governs new cash.
 
 Stage 13A extends this same policy (no new model, no new endpoint) with
 evidence-aware gating for individual-stock candidates. A stock only becomes
@@ -20,11 +28,23 @@ fresh, carries a constructive (BUY) signal with sufficient evidence
 confidence, and has no blocking evidence gaps — on top of the existing
 concentration/cap checks. Missing or ambiguous evidence blocks the ticker
 rather than defaulting to a fake pass; the ETF plan still runs on its own.
+
+Reconciliation is cash-aware: the latest portfolio snapshot's ``total_equity``
+includes cash on top of invested positions, so it is never compared directly
+against the positions-only market value. ``snapshot_invested_value =
+total_equity - cash_balance`` is derived from the same snapshot row and
+reconciled against position-derived market value instead. ``cash_balance`` is
+arithmetic data — 0.0 and negative finite values are legitimate and never
+coerced away — and is read only from the snapshot row, never inferred from
+``cash_to_deploy`` or transactions. Missing, NaN, or ±infinity in either
+``total_equity`` or ``cash_balance`` fails closed to an unavailable
+reconciliation rather than a silent pass.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -137,6 +157,13 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _finite_float(v: Any) -> float | None:
+    """Same as ``_safe_float`` but also rejects NaN/±infinity — a value that
+    parses but isn't finite is arithmetic garbage, never usable truth."""
+    f = _safe_float(v)
+    return f if f is not None and math.isfinite(f) else None
 
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -425,6 +452,30 @@ def _compute_gaps(
             "status": status,
         }
 
+    # ── Exclusive core-ETF new-cash waterfall for GROUP_BROAD_ETF ────────────
+    # The broad-index group target is no longer split equally among every
+    # held broad ETF — that made the VTI>VOO>SPY>QQQ preference cosmetic:
+    # VTI filled only its artificial per-ticker share and the allocator then
+    # moved on to SPY. When the group is underweight, the entire group-level
+    # dollar gap goes to the single highest-preference held ticker with a
+    # current, non-stale price. Lower-preference broad ETFs get a zero gap
+    # in this plan — they are never sold, consolidated, or advised against.
+    broad_group_gap = group_gaps.get(GROUP_BROAD_ETF, {})
+    broad_group_gap_pct = broad_group_gap.get("gap_pct", 0.0)
+    broad_group_underweight = broad_group_gap.get("status") == "under"
+    selected_core_etf_ticker: str | None = None
+    if broad_group_underweight:
+        for pref_ticker in BROAD_INDEX_CORE_PREFERENCE_ORDER:
+            candidate_holding = holdings.get(pref_ticker)
+            if candidate_holding is None:
+                continue  # not held in this portfolio
+            if candidate_holding["market_value"] is None:
+                continue  # missing price
+            if pref_ticker in stale_ticker_set:
+                continue  # stale price
+            selected_core_etf_ticker = pref_ticker
+            break
+
     ticker_gaps: dict[str, dict] = {}
     for ticker, h in holdings.items():
         group = h["group"]
@@ -448,6 +499,7 @@ def _compute_gaps(
         # stocks, a policy blocker here must never short-circuit evaluation
         # of the evidence gate (Stage 13C fix — see evidence_gate_passed).
         policy_ineligibility_reason: str | None = None
+        core_etf_not_selected_reason: str | None = None
         if h["market_value"] is None:
             policy_ineligibility_reason = "no_price_available"
         elif ticker in stale_ticker_set:
@@ -463,6 +515,19 @@ def _compute_gaps(
             group_gap_status = group_gaps.get(group, {}).get("status", "within")
             if group_gap_status == "over":
                 policy_ineligibility_reason = f"etf_group_{group}_already_above_target"
+            elif (
+                group == GROUP_BROAD_ETF
+                and selected_core_etf_ticker is not None
+                and ticker != selected_core_etf_ticker
+            ):
+                # Exclusive core-ETF waterfall: a lower-preference broad ETF
+                # gets zero new cash in this plan while a higher-preference
+                # held ticker is eligible to receive the group's gap.
+                policy_ineligibility_reason = "broad_index_core_etf_not_selected_this_plan"
+                core_etf_not_selected_reason = (
+                    f"Not selected for new cash because {selected_core_etf_ticker} is "
+                    "the preferred eligible core ETF."
+                )
 
         # For crypto: check group total
         elif group == GROUP_CRYPTO:
@@ -522,11 +587,22 @@ def _compute_gaps(
             ineligibility_reason = policy_ineligibility_reason
             eligible = ineligibility_reason is None
 
-        # Target weight for this ticker (group target / tickers in group)
-        tickers_in_group = [t for t, hh in holdings.items() if hh["group"] == group]
-        n_in_group = len(tickers_in_group) or 1
-        group_target = group_targets.get(group, 0.0)
-        ticker_target_pct = min(per_ticker_cap, group_target / n_in_group)
+        # Target weight for this ticker. GROUP_BROAD_ETF is an exclusive
+        # new-cash waterfall (see selected_core_etf_ticker above), not an
+        # equal split across every held broad ETF: the selected ticker's
+        # target absorbs the whole group-level gap, everyone else in the
+        # group gets a zero gap this plan. Other ETF/asset groups keep the
+        # existing equal-split-per-ticker target.
+        if group == GROUP_BROAD_ETF:
+            if ticker == selected_core_etf_ticker:
+                ticker_target_pct = min(per_ticker_cap, current_pct + broad_group_gap_pct)
+            else:
+                ticker_target_pct = current_pct
+        else:
+            tickers_in_group = [t for t, hh in holdings.items() if hh["group"] == group]
+            n_in_group = len(tickers_in_group) or 1
+            group_target = group_targets.get(group, 0.0)
+            ticker_target_pct = min(per_ticker_cap, group_target / n_in_group)
 
         ticker_gaps[ticker] = {
             "ticker": ticker,
@@ -541,6 +617,7 @@ def _compute_gaps(
             "evidence_gate_passed": evidence_gate_passed,
             "is_unknown_ticker": h["is_unknown"],
             "evidence_gate_codes": evidence_gate_codes,
+            "core_etf_not_selected_reason": core_etf_not_selected_reason,
         }
 
     return group_gaps, ticker_gaps
@@ -749,19 +826,13 @@ def _rank_buy_candidates(
     """Build ranked list of buy candidates.
 
     Primary: ETF/diversification priority when ETF floor is not met.
-    Secondary (broad_index_etf): core ETF preference order (VTI>VOO>SPY>QQQ).
+    Secondary (broad_index_etf): core ETF preference order (VTI>VOO>SPY>QQQ)
+    is an exclusive new-cash waterfall — `_compute_gaps` already zeroes the
+    gap for every held broad ETF except the single highest-preference
+    eligible one, so at most one broad_index_etf candidate can appear here.
     Tertiary: Intel v3 conviction if available.
     Quaternary: positive gap size.
-
-    For broad_index_etf, preference order governs within the group — a larger
-    SPY gap does not displace an eligible underweight VTI.
     """
-    # Pre-compute eligible broad_index_etf candidate tickers for reason code context.
-    eligible_broad_tickers: set[str] = {
-        t for t, tg in ticker_gaps.items()
-        if tg["eligible_for_buy"] and tg["gap_pct"] > 0 and tg["group"] == GROUP_BROAD_ETF
-    }
-
     candidates = []
     for ticker, tg in ticker_gaps.items():
         if not tg["eligible_for_buy"]:
@@ -796,22 +867,29 @@ def _rank_buy_candidates(
             preference_rank = pref_rank if pref_rank > 0 else None
 
             if pref_rank > 0:
-                preference_reason = "preferred_core_broad_market_etf"
-                extra_reason_codes.append("core_etf_preference")
+                preference_reason = "preferred_core_etf"
+                extra_reason_codes.append("preferred_core_etf")
 
-                # Tickers with higher preference that are held but NOT eligible candidates
-                for higher_ticker, higher_rank in _CORE_ETF_PREFERENCE_RANK.items():
-                    if higher_rank <= pref_rank:
-                        continue
-                    if higher_ticker not in ticker_gaps:
-                        continue  # not held in this portfolio
-                    htg = ticker_gaps[higher_ticker]
-                    if not htg["eligible_for_buy"] or htg["gap_pct"] <= 0:
-                        skipped_higher_preference_tickers.append(higher_ticker)
-
-                # Specific code when VTI is selected and SPY is also an eligible candidate
-                if ticker == "VTI" and "SPY" in eligible_broad_tickers:
-                    extra_reason_codes.append("preferred_vti_over_spy")
+                # Every other broad ETF ticker held in this portfolio has a
+                # zero gap this plan (see _compute_gaps) — either because it
+                # ranks higher but is missing/stale/absent (this candidate
+                # was only reachable because every higher-preference held
+                # ticker was ineligible), or because it ranks lower and was
+                # displaced by this exclusive waterfall selection.
+                held_other_broad_tickers = [
+                    t for t in BROAD_INDEX_CORE_PREFERENCE_ORDER
+                    if t != ticker and t in ticker_gaps
+                ]
+                skipped_higher_preference_tickers = [
+                    t for t in held_other_broad_tickers
+                    if _CORE_ETF_PREFERENCE_RANK.get(t, 0) > pref_rank
+                ]
+                lower_preference_held = [
+                    t for t in held_other_broad_tickers
+                    if _CORE_ETF_PREFERENCE_RANK.get(t, 0) < pref_rank
+                ]
+                if lower_preference_held:
+                    extra_reason_codes.append("selected_over_lower_preference_core_etfs")
         # ─────────────────────────────────────────────────────────────────────
 
         # ── Stage 13A: evidence-aware transparency fields for individual stocks ──
@@ -873,7 +951,11 @@ def _build_reason_codes(
         codes.append("etf_floor_not_met")
     gg = group_gaps.get(group, {})
     if gg.get("status") == "under":
-        codes.append(f"{group}_group_underweight")
+        # broad_index_etf reports the bounded "broad_index_group_underweight"
+        # code (not "broad_index_etf_group_underweight") — see the exclusive
+        # core-ETF waterfall transparency contract.
+        group_label = "broad_index" if group == GROUP_BROAD_ETF else group
+        codes.append(f"{group_label}_group_underweight")
     return codes or ["positive_gap"]
 
 
@@ -940,14 +1022,22 @@ def _allocate_cash(
 # ── Step 10: Reconciliation gate ─────────────────────────────────────────────
 
 def _check_reconciliation(
-    snapshot_value: float | None,
+    snapshot_invested_value: float | None,
     position_mv: float,
 ) -> tuple[str, list[str]]:
-    """Return (reconciliation_status, blockers)."""
-    if snapshot_value is None or position_mv is None or position_mv < _NEAR_ZERO:
+    """Return (reconciliation_status, blockers).
+
+    Compares the snapshot's INVESTED value (``total_equity - cash_balance``)
+    against position-derived market value — the snapshot's raw
+    ``total_equity`` includes cash and must never be compared directly
+    against a positions-only sum. ``snapshot_invested_value`` is already
+    None (fails closed) when total_equity or cash_balance is missing,
+    non-finite, or no snapshot row exists at all.
+    """
+    if snapshot_invested_value is None or position_mv is None or position_mv < _NEAR_ZERO:
         return "unavailable", ["no_usable_portfolio_value_for_reconciliation"]
 
-    pct = _pct_diff(snapshot_value, position_mv)
+    pct = _pct_diff(snapshot_invested_value, position_mv)
     if pct is None:
         return "unavailable", ["division_by_zero_in_reconciliation"]
 
@@ -957,7 +1047,7 @@ def _check_reconciliation(
         return "degraded", []
     else:
         return "blocked", [
-            f"reconciliation_blocked: snapshot={snapshot_value:.2f} vs "
+            f"reconciliation_blocked: invested_value={snapshot_invested_value:.2f} vs "
             f"position_mv={position_mv:.2f} ({pct:.2f}%)"
         ]
 
@@ -983,12 +1073,23 @@ async def run_next_buy_policy_diagnostic(
     warnings: list[str] = []
 
     # ── 1. Load latest portfolio snapshot ────────────────────────────────────
+    # total_equity includes cash and is never compared directly against a
+    # positions-only sum. cash_balance is read alongside it so the invested
+    # value (total_equity - cash_balance) can be derived and reconciled
+    # instead. cash_balance is arithmetic data — 0.0 and negative finite
+    # values are legitimate and never coerced away — and it is read only
+    # from this snapshot row, never inferred from cash_to_deploy or
+    # transactions. Missing or non-finite total_equity/cash_balance fails
+    # closed: snapshot_invested_value stays None and reconciliation reports
+    # "unavailable" rather than silently passing.
     snapshot_value: float | None = None
+    snapshot_cash_balance: float | None = None
+    snapshot_invested_value: float | None = None
     snapshot_at_str: str | None = None
     try:
         snap_res = (
             db_client.table("portfolio_snapshots")
-            .select("total_equity,snapshot_at")
+            .select("total_equity,cash_balance,snapshot_at")
             .eq("user_id", user_id)
             .order("snapshot_at", desc=True)
             .limit(1)
@@ -996,8 +1097,15 @@ async def run_next_buy_policy_diagnostic(
         )
         snap_rows = snap_res.data or []
         if snap_rows:
-            snapshot_value = _safe_float(snap_rows[0].get("total_equity"))
+            snapshot_value = _finite_float(snap_rows[0].get("total_equity"))
+            snapshot_cash_balance = _finite_float(snap_rows[0].get("cash_balance"))
             snapshot_at_str = str(snap_rows[0].get("snapshot_at") or "")
+            if snapshot_value is None:
+                warnings.append("snapshot_total_equity_missing_or_non_finite")
+            if snapshot_cash_balance is None:
+                warnings.append("snapshot_cash_balance_missing_or_non_finite")
+            if snapshot_value is not None and snapshot_cash_balance is not None:
+                snapshot_invested_value = round(snapshot_value - snapshot_cash_balance, 2)
     except Exception as exc:
         warnings.append(f"snapshot_query_failed: {type(exc).__name__}")
         logger.warning("allocation_policy_v1 snapshot query failed: %s", exc)
@@ -1058,7 +1166,7 @@ async def run_next_buy_policy_diagnostic(
         )
 
     # ── 5. Reconciliation check ───────────────────────────────────────────────
-    recon_status, recon_blockers = _check_reconciliation(snapshot_value, total_mv)
+    recon_status, recon_blockers = _check_reconciliation(snapshot_invested_value, total_mv)
     if recon_blockers:
         warnings.extend(recon_blockers)
 
@@ -1232,6 +1340,8 @@ async def run_next_buy_policy_diagnostic(
             "truth_status": "certified" if policy_status == "ready" else ("degraded" if policy_status == "degraded" else "blocked"),
             "reconciliation_status": recon_status,
             "snapshot_portfolio_value": round(snapshot_value, 2) if snapshot_value is not None else None,
+            "snapshot_cash_balance": round(snapshot_cash_balance, 2) if snapshot_cash_balance is not None else None,
+            "snapshot_invested_value": snapshot_invested_value,
             "snapshot_at": snapshot_at_str or None,
             "position_derived_market_value": round(total_mv, 2),
             "price_coverage_status": price_coverage_status,
@@ -1310,7 +1420,7 @@ def _next_fix(
 ) -> str:
     if policy_status == "blocked":
         if any("reconciliation" in b for b in blockers):
-            return "Reconcile portfolio values — snapshot vs position-derived diverges beyond tolerance"
+            return "Reconcile portfolio values — snapshot invested value vs position-derived value diverges beyond tolerance"
         return "Resolve blockers: " + "; ".join(blockers)
     if has_missing_prices:
         return "Run Stage 11B current-price-truth-repair to fill missing price_history rows"

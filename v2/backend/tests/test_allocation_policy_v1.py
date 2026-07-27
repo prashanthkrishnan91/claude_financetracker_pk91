@@ -61,9 +61,16 @@ def _make_db(
     positions: list[dict] | None = None,
     prices_by_ticker: dict[str, list[dict]] | None = None,
     snapshot_value: float | None = 10000.0,
+    cash_balance: float | None = 0.0,
     intel_rows: list[dict] | None = None,
 ) -> MagicMock:
-    """Build a mock db_client that returns canned data."""
+    """Build a mock db_client that returns canned data.
+
+    ``cash_balance`` defaults to 0.0 so existing callers that only specify
+    ``snapshot_value`` keep the pre-cash-aware-reconciliation behavior
+    (snapshot_invested_value == snapshot_value). Pass ``cash_balance=None``
+    to simulate a snapshot row missing the column entirely.
+    """
     db = MagicMock()
 
     def _chain(data):
@@ -79,7 +86,10 @@ def _make_db(
         return m
 
     pos_data = positions if positions is not None else []
-    snap_data = [{"total_equity": snapshot_value, "snapshot_at": "2026-06-20T10:00:00Z"}] if snapshot_value else []
+    snap_data = (
+        [{"total_equity": snapshot_value, "cash_balance": cash_balance, "snapshot_at": "2026-06-20T10:00:00Z"}]
+        if snapshot_value else []
+    )
     intel_data = intel_rows if intel_rows is not None else []
 
     def table_side_effect(name):
@@ -1086,62 +1096,62 @@ class TestCoreETFPreference:
         )
 
     def test_vti_beats_spy_when_spy_has_larger_gap(self):
-        """SPY has largest gap by % but VTI is eligible → VTI wins due to preference."""
-        # VTI has a larger position (higher weight, smaller gap).
-        # SPY has a smaller position (lower weight, LARGER gap).
-        # Without preference, SPY would rank first. With preference, VTI wins.
+        """VTI wins the exclusive waterfall even though SPY is more underweight.
+
+        VTI has a larger position (higher weight, smaller gap-to-target).
+        SPY has a smaller position (lower weight, larger gap-to-target). Under
+        the exclusive core-ETF waterfall SPY never becomes a candidate at
+        all while VTI (the top-preference held, eligible ticker) is — SPY's
+        larger raw underweight does not entitle it to any of this plan's
+        broad-index cash.
+        """
         candidates = _build_stock_dominant_candidates([
-            ("VTI", 50, 220.0),  # $11,000 → weight ~9.7% (gap ~2.8%)
-            ("SPY", 5, 540.0),   # $2,700  → weight ~2.4% (gap ~10.1%)  ← larger gap
+            ("VTI", 50, 220.0),  # $11,000 → weight ~9.7% (still underweight vs 25% target)
+            ("SPY", 5, 540.0),   # $2,700  → weight ~2.4% (more underweight than VTI)
         ])
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         assert broad
-        # Verify SPY has larger gap (test is only meaningful if this holds)
-        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
         vti = next((c for c in broad if c["ticker"] == "VTI"), None)
-        assert vti is not None and spy is not None
-        assert spy["gap_pct"] > vti["gap_pct"], (
-            f"Test setup error: expected SPY gap({spy['gap_pct']}) > VTI gap({vti['gap_pct']})"
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
+        assert vti is not None, "VTI must be the sole broad_index_etf candidate"
+        assert spy is None, (
+            "SPY must receive zero new cash this plan even though it is more "
+            "underweight than VTI — the exclusive waterfall is not a raw-gap contest"
         )
-        # VTI must still rank first (preference over gap)
-        assert broad[0]["ticker"] == "VTI", (
-            f"VTI should beat SPY by preference even with smaller gap; got {broad[0]['ticker']}"
-        )
+        assert broad == [vti], f"Expected VTI as the only broad ETF candidate; got {broad}"
 
-    def test_voo_selected_when_vti_has_no_gap(self):
-        """When VTI is at/above its per-ticker target (gap ≤ 0), VOO becomes first."""
-        # With 3 broad ETFs, per-ticker target = 25/3 ≈ 8.33%.
-        # VTI at 120 shares × $100 = $12,000. With AAPL=$100K+others:
-        # total ≈ $113K → VTI = 10.6% > 8.33% → gap ≤ 0, not a candidate.
-        candidates = _build_stock_dominant_candidates([
-            ("VTI", 120, 100.0),  # above per-ticker target → no gap
-            ("VOO", 5, 100.0),    # underweight → candidate, rank 3
-            ("SPY", 5, 100.0),    # underweight → candidate, rank 2
-        ])
+    def test_group_already_at_target_selects_no_core_etf(self):
+        """Required regression E: when broad_index_etf group is already
+        at/above its 25% target, no ticker is selected for new cash —
+        regardless of how the group's weight is distributed across
+        individual held broad ETFs."""
+        # AAPL small, VTI/VOO/SPY combined comfortably exceed the 25% target.
+        candidates = _build_stock_dominant_candidates(
+            [
+                ("VTI", 120, 100.0),
+                ("VOO", 5, 100.0),
+                ("SPY", 5, 100.0),
+            ],
+            stock_shares=10.0,  # small dominant stock so broad ETFs are NOT underweight
+        )
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
-        assert broad, "Expected VOO/SPY as broad ETF candidates"
-        tickers = [c["ticker"] for c in broad]
-        assert "VTI" not in tickers, "VTI should have no positive gap at this weight"
-        assert tickers[0] == "VOO", (
-            f"Expected VOO first when VTI has no gap, got {tickers[0]}"
+        assert broad == [], (
+            f"Expected no broad ETF candidates once the group is at/above target; got {broad}"
         )
 
-    def test_spy_selected_when_vti_and_voo_have_no_gap(self):
-        """When VTI and VOO are at/above per-ticker target, SPY can be selected."""
-        # 3 broad ETFs, target = 8.33% each.
-        # VTI and VOO each at 120 shares × $100 = $12,000 → 9.6% > 8.33% → no gap.
-        # SPY at 5 shares × $100 = $500 → 0.4% → large gap → candidate.
+    def test_spy_selected_when_vti_and_voo_not_held(self):
+        """Required regression C: when VTI and VOO are absent from the
+        portfolio, SPY (next in preference order) can be selected for the
+        group's new-cash gap."""
         candidates = _build_stock_dominant_candidates([
-            ("VTI", 120, 100.0),
-            ("VOO", 120, 100.0),
             ("SPY", 5, 100.0),
         ])
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         tickers = [c["ticker"] for c in broad]
         assert "VTI" not in tickers
         assert "VOO" not in tickers
-        assert tickers and tickers[0] == "SPY", (
-            f"Expected SPY when VTI/VOO have no gap, got {tickers}"
+        assert tickers == ["SPY"], (
+            f"Expected SPY selected when VTI/VOO are not held, got {tickers}"
         )
 
     def test_qqq_does_not_outrank_spy(self):
@@ -1179,36 +1189,39 @@ class TestCoreETFPreference:
             assert c["selection_policy"] == "core_etf_preference_v1"
 
     def test_candidate_has_preference_rank(self):
-        """Each broad_index_etf candidate must carry correct preference_rank."""
-        candidates = _build_stock_dominant_candidates([
-            ("VTI", 1, 200.0),
-            ("VOO", 1, 400.0),
-            ("SPY", 1, 500.0),
-            ("QQQ", 1, 480.0),
-        ])
-        ranks = {c["ticker"]: c["preference_rank"] for c in candidates if c["group"] == GROUP_BROAD_ETF}
-        assert ranks.get("VTI") == 4, f"VTI should have rank 4, got {ranks}"
-        assert ranks.get("VOO") == 3
-        assert ranks.get("SPY") == 2
-        assert ranks.get("QQQ") == 1
+        """The selected broad_index_etf candidate must carry the correct
+        preference_rank — checked one ticker at a time since the exclusive
+        waterfall means only the top-preference held+eligible ticker is ever
+        a candidate in a single plan."""
+        expected_ranks = {"VTI": 4, "VOO": 3, "SPY": 2, "QQQ": 1}
+        for ticker, expected_rank in expected_ranks.items():
+            candidates = _build_stock_dominant_candidates([(ticker, 1, 200.0)])
+            broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+            assert broad and broad[0]["ticker"] == ticker
+            assert broad[0]["preference_rank"] == expected_rank, (
+                f"{ticker} should have rank {expected_rank}, got {broad[0]['preference_rank']}"
+            )
 
-    def test_reason_codes_include_core_etf_preference(self):
-        """Broad ETF candidates must include core_etf_preference in reason_codes."""
+    def test_reason_codes_include_preferred_core_etf(self):
+        """Broad ETF candidates must include preferred_core_etf in reason_codes."""
         candidates = _build_stock_dominant_candidates([("VTI", 2, 200.0)])
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         assert broad
-        assert "core_etf_preference" in broad[0]["reason_codes"]
+        assert "preferred_core_etf" in broad[0]["reason_codes"]
 
-    def test_reason_codes_include_preferred_vti_over_spy(self):
-        """When VTI wins over an eligible SPY, reason_codes includes preferred_vti_over_spy."""
+    def test_reason_codes_include_selected_over_lower_preference(self):
+        """When VTI wins over a held-but-displaced SPY, reason_codes includes
+        selected_over_lower_preference_core_etfs and SPY receives zero cash."""
         candidates = _build_stock_dominant_candidates([
             ("VTI", 2, 200.0),
             ("SPY", 2, 500.0),
         ])
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
         assert vti is not None
-        assert "preferred_vti_over_spy" in vti["reason_codes"], (
+        assert spy is None, "SPY must not be a candidate when VTI wins the waterfall"
+        assert "selected_over_lower_preference_core_etfs" in vti["reason_codes"], (
             f"reason_codes={vti['reason_codes']}"
         )
 
@@ -1227,26 +1240,41 @@ class TestCoreETFPreference:
             assert c["preference_rank"] is None
 
     def test_preference_reason_set_for_broad_etf(self):
-        """VTI candidate must have preference_reason='preferred_core_broad_market_etf'."""
+        """VTI candidate must have preference_reason='preferred_core_etf'."""
         candidates = _build_stock_dominant_candidates([("VTI", 2, 200.0)])
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         assert broad
-        assert broad[0]["preference_reason"] == "preferred_core_broad_market_etf"
+        assert broad[0]["preference_reason"] == "preferred_core_etf"
 
     def test_skipped_higher_preference_tickers_populated(self):
-        """VOO lists VTI in skipped_higher_preference_tickers when VTI has no positive gap."""
-        # With 2 broad ETFs, per-ticker target = 25/2 = 12.5%.
-        # VTI = 200 shares × $100 = $20,000. With AAPL=$100K + VOO=$500:
-        # total ≈ $120,500 → VTI = 16.6% > 12.5% → gap ≤ 0 → not a candidate.
-        # VOO = 5 shares × $100 = $500 → 0.41% → large gap → candidate.
-        # VOO should list VTI in skipped_higher_preference_tickers.
-        candidates = _build_stock_dominant_candidates([
-            ("VTI", 200, 100.0),  # well above per-ticker target → no positive gap
-            ("VOO", 5, 100.0),    # underweight → candidate
-        ])
+        """Required regression B: VTI stale, VOO current -> only VOO receives
+        broad-index dollars, and VOO lists VTI in
+        skipped_higher_preference_tickers (the only way a higher-preference
+        held ticker is passed over under the exclusive waterfall)."""
+        holdings, total_mv, *_ = _compute_portfolio(
+            [_pos("VTI", shares=5), _pos("VOO", shares=5), _pos("AAPL", shares=1000)],
+            {
+                "VTI": _price("VTI", close=220.0),
+                "VOO": _price("VOO", close=440.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(
+            holdings, gw, policy, total_mv, stale_price_tickers={"VTI"},
+        )
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={}, intel_overlay_used=False,
+            etf_floor_met=policy["etf_floor_met"],
+        )
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         voo = next((c for c in broad if c["ticker"] == "VOO"), None)
-        assert voo is not None, "VOO should be a candidate"
+        assert voo is not None, "VOO should be selected when VTI is stale"
+        assert [c["ticker"] for c in broad] == ["VOO"], (
+            f"Only VOO may receive broad-index dollars when VTI is stale; got {broad}"
+        )
         assert "VTI" in voo["skipped_higher_preference_tickers"], (
             f"skipped={voo['skipped_higher_preference_tickers']}"
         )
@@ -1278,8 +1306,8 @@ class TestCoreETFPreference:
         assert broad, "Expected broad ETF candidates"
         vti = next((c for c in broad if c["ticker"] == "VTI"), None)
         spy = next((c for c in broad if c["ticker"] == "SPY"), None)
-        assert vti is not None and spy is not None
-        assert spy["conviction"] == "HIGH"
+        assert vti is not None, "VTI must be selected"
+        assert spy is None, "SPY's HIGH conviction must not rescue it from the exclusive waterfall"
         assert vti["conviction"] == "neutral"
         assert broad[0]["ticker"] == "VTI", (
             f"VTI (pref=4, neutral) must beat SPY (pref=2, HIGH); got {broad[0]['ticker']}"
@@ -1312,8 +1340,8 @@ class TestCoreETFPreference:
         assert broad, "Expected broad ETF candidates"
         voo = next((c for c in broad if c["ticker"] == "VOO"), None)
         spy = next((c for c in broad if c["ticker"] == "SPY"), None)
-        assert voo is not None and spy is not None
-        assert spy["conviction"] == "HIGH"
+        assert voo is not None, "VOO must be selected"
+        assert spy is None, "SPY's HIGH conviction must not rescue it from the exclusive waterfall"
         assert broad[0]["ticker"] == "VOO", (
             f"VOO (pref=3, neutral) must beat SPY (pref=2, HIGH); got {broad[0]['ticker']}"
         )
@@ -1348,8 +1376,8 @@ class TestCoreETFPreference:
         assert broad, "Expected broad ETF candidates"
         vti = next((c for c in broad if c["ticker"] == "VTI"), None)
         qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
-        assert vti is not None and qqq is not None
-        assert qqq["conviction"] == "HIGH"
+        assert vti is not None, "VTI must be selected"
+        assert qqq is None, "QQQ's HIGH conviction must not rescue it from the exclusive waterfall"
         assert broad[0]["ticker"] == "VTI", (
             f"VTI (pref=4) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
         )
@@ -1385,8 +1413,8 @@ class TestCoreETFPreference:
         assert broad, "Expected broad ETF candidates"
         voo = next((c for c in broad if c["ticker"] == "VOO"), None)
         qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
-        assert voo is not None and qqq is not None
-        assert qqq["conviction"] == "HIGH"
+        assert voo is not None, "VOO must be selected"
+        assert qqq is None, "QQQ's HIGH conviction must not rescue it from the exclusive waterfall"
         assert broad[0]["ticker"] == "VOO", (
             f"VOO (pref=3) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
         )
@@ -1422,19 +1450,18 @@ class TestCoreETFPreference:
         assert broad, "Expected broad ETF candidates"
         spy = next((c for c in broad if c["ticker"] == "SPY"), None)
         qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
-        assert spy is not None and qqq is not None
-        assert qqq["conviction"] == "HIGH"
+        assert spy is not None, "SPY must be selected"
+        assert qqq is None, "QQQ's HIGH conviction must not rescue it from the exclusive waterfall"
         assert broad[0]["ticker"] == "SPY", (
             f"SPY (pref=2) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
         )
 
     def test_full_preference_order_vti_voo_spy_qqq(self):
-        """All four broad ETFs rank VTI > VOO > SPY > QQQ when QQQ and SPY have HIGH conviction.
-
-        Uses conviction=HIGH on SPY and QQQ to prove that core_preference_rank
-        sits before conviction_rank in the sort key. With the wrong tuple order
-        (conviction_rank first), QQQ/SPY HIGH conviction would push them above
-        VTI/VOO — this test catches that regression.
+        """Required regression A: with VTI, VOO, SPY, and QQQ all held and
+        eligible and the broad_index_etf group underweight, only VTI (top
+        preference) may receive broad-index dollars — VOO, SPY, and QQQ get
+        zero, and VTI absorbs the FULL group-level gap rather than a
+        quarter of it. Conviction=HIGH on SPY/QQQ must not change this.
         """
         holdings, total_mv, *_ = _compute_portfolio(
             [
@@ -1463,8 +1490,20 @@ class TestCoreETFPreference:
         )
         broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
         tickers = [c["ticker"] for c in broad]
-        assert tickers == ["VTI", "VOO", "SPY", "QQQ"], (
-            f"Expected VTI>VOO>SPY>QQQ order (preference over conviction); got {tickers}"
+        assert tickers == ["VTI"], (
+            f"Expected VTI as the sole broad ETF candidate (preference over conviction); got {tickers}"
+        )
+        for other in ("VOO", "SPY", "QQQ"):
+            assert ticker_gaps[other]["gap_pct"] <= 0, (
+                f"{other} must have a zero gap while VTI holds the broad-index waterfall"
+            )
+
+        # VTI must absorb the FULL group-level gap, not group_target / 4.
+        full_group_gap_pct = group_gaps[GROUP_BROAD_ETF]["gap_pct"]
+        quarter_share_pct = policy["group_targets"][GROUP_BROAD_ETF] / 4
+        assert ticker_gaps["VTI"]["gap_pct"] == pytest.approx(full_group_gap_pct)
+        assert ticker_gaps["VTI"]["gap_pct"] > quarter_share_pct + 0.01, (
+            "VTI's gap must exceed the old artificial one-quarter-of-target share"
         )
 
     def test_conviction_breaks_tie_within_same_preference_rank(self):
@@ -1521,20 +1560,61 @@ class TestCoreETFPreference:
         assert alloc_cash <= 2737.50
         assert unalloc >= 0.0
 
-    def test_preferred_etf_gap_filled_then_next_candidate(self):
-        """When preferred ETF gap < cash_to_deploy, remainder goes to next candidate."""
-        # With a large AAPL stock holding, VTI and VOO are both underweight.
-        # VTI ranks first; if its gap is smaller than cash_to_deploy,
-        # the remainder flows to VOO.
-        candidates = _build_stock_dominant_candidates([
-            ("VTI", 5, 220.0),   # $1,100 → small gap
-            ("VOO", 2, 440.0),   # $880 → similar gap, ranks second (pref rank 3)
-        ])
-        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
-        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
-        voo = next((c for c in broad if c["ticker"] == "VOO"), None)
-        if vti and voo:
-            assert broad.index(vti) < broad.index(voo), "VTI must rank ahead of VOO"
+    @pytest.mark.asyncio
+    async def test_remainder_after_preferred_etf_flows_to_next_group_not_voo(self):
+        """Required regression D: once VTI absorbs the full broad-index group
+        gap, remaining cash must flow to a different eligible underweight
+        group (dividend_etf here) rather than to VOO — a held, lower-
+        preference broad ETF that must never receive new cash in this plan.
+        """
+        positions = [
+            _pos("AAPL", shares=90.0),   # individual_stock: 90% >> 40% target -> blocked
+            _pos("VTI", shares=25.0),    # broad_index_etf: 5% -> underweight
+            _pos("VOO", shares=6.0),     # broad_index_etf: 3% -> must receive $0
+            _pos("SCHD", shares=20.0),   # dividend_etf: 2% -> underweight
+        ]
+        prices = {
+            "AAPL": [_price("AAPL", close=1000.0)],
+            "VTI": [_price("VTI", close=200.0)],
+            "VOO": [_price("VOO", close=500.0)],
+            "SCHD": [_price("SCHD", close=100.0)],
+        }
+        total_mv = 90 * 1000.0 + 25 * 200.0 + 6 * 500.0 + 20 * 100.0  # $100,000
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=total_mv)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=30000.0, max_positions=5, min_trade_amount=25.0,
+        )
+        candidates = result["next_buy_candidates"]
+        tickers = [c["ticker"] for c in candidates]
+
+        assert "VOO" not in tickers, (
+            f"VOO must never receive new cash while VTI holds the broad-index waterfall; got {tickers}"
+        )
+        vti = next((c for c in candidates if c["ticker"] == "VTI"), None)
+        assert vti is not None, "VTI must be selected for the broad-index group's cash"
+
+        # VTI's dollar amount must reflect the FULL group gap, not an equal
+        # split across VTI+VOO (roughly $22.1K here, not ~$11K/ticker).
+        assert vti["dollar_amount"] > 15000.0, (
+            f"VTI should absorb the full broad-index group gap; got {vti['dollar_amount']}"
+        )
+
+        # Any cash remaining after VTI must go to a different, genuinely
+        # eligible underweight group — never back into the broad ETF group.
+        remainder_candidates = [c for c in candidates if c["ticker"] != "VTI"]
+        for c in remainder_candidates:
+            assert c["group"] != GROUP_BROAD_ETF, (
+                f"Remaining cash must not flow to another broad ETF; got {c}"
+            )
+        assert any(c["group"] == GROUP_DIVIDEND_ETF for c in remainder_candidates), (
+            "Remaining cash should flow to the next eligible underweight group (dividend_etf)"
+        )
+
+        cash_plan = result["cash_plan"]
+        assert cash_plan["allocated_cash"] <= 30000.0
+        assert cash_plan["unallocated_cash"] >= 0.0
 
 
 # ── Stage 12C: Runtime regression fixture ─────────────────────────────────────
@@ -1544,34 +1624,34 @@ class TestStage12CRegressionFixture:
 
     Portfolio design:
       - Individual stocks dominate (~85% of portfolio) → all above 20% cap → ineligible
-      - broad_index_etf group < 25% target → group is underweight → ETF tickers eligible
+      - broad_index_etf group < 25% target → group is underweight
       - ETF total weight < 40% → ETF floor not met → ETF candidates get group-priority boost
-      - Both VTI and SPY are held; SPY has a slightly larger per-ticker gap than VTI
-      - Stage 12B (without preference) would have selected SPY first
-      - Stage 12C must select VTI first (preference policy)
+      - VTI, SPY, VOO, and QQQ are all held
+      - The exclusive core-ETF waterfall (VTI > VOO > SPY > QQQ) assigns the
+        ENTIRE broad_index_etf group-level dollar gap to VTI alone — SPY,
+        VOO, and QQQ get a zero gap in this plan, never a smaller share of it
 
     Holdings:
       AAPL: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
       NVDA: 15 shares @ $800 = $12,000   (stock, ~28% → above 20% cap)
       MSFT: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
-      VTI : 10 shares @ $220 = $2,200    (broad ETF, ~5.2%)
-      SPY :  3 shares @ $540 = $1,620    (broad ETF, ~3.8% → larger gap than VTI)
-      VOO :  2 shares @ $440 = $880      (broad ETF, ~2.1%)
-      QQQ :  2 shares @ $480 = $960      (broad ETF, ~2.3%)
+      VTI : 10 shares @ $220 = $2,200    (broad ETF, ~5.2% — top preference, selected)
+      SPY :  3 shares @ $540 = $1,620    (broad ETF, ~3.8% — held, gets $0 this plan)
+      VOO :  2 shares @ $440 = $880      (broad ETF, ~2.1% — held, gets $0 this plan)
+      QQQ :  2 shares @ $480 = $960      (broad ETF, ~2.3% — held, gets $0 this plan)
       VYM :  5 shares @ $130 = $650      (dividend ETF, ~1.5%)
     Total ≈ $42,310
 
     Group weights:
       individual_stock: ~85%  → way above policy target (~30%) → all ineligible
-      broad_index_etf:  ~13.4% < 25% target → group "under" → all 4 ETFs eligible
+      broad_index_etf:  ~13.4% < 25% target → group "under" → group gap ≈ 11.6%
       ETF total:        ~14.9% < 40% floor  → floor not met
-    Per-ticker target for 4 broad ETFs = 25/4 = 6.25%:
-      VTI: 5.20%, gap = 1.05%
-      SPY: 3.83%, gap = 2.42%  ← LARGER gap than VTI
-      VOO: 2.08%, gap = 4.17%
-      QQQ: 2.27%, gap = 3.98%
-    Without preference: VOO or SPY might rank first.
-    With 12C preference: VTI (rank 4) ranks first despite smallest gap.
+    Under the exclusive waterfall, VTI (rank 4, the highest-preference held
+    and priced ticker) is `selected_core_etf_ticker`: its target absorbs the
+    FULL ~11.6% group gap (target ≈ 16.8%), not an equal 25%/4 = 6.25% share.
+    SPY, VOO, and QQQ each get `target_weight_pct == current_weight_pct` (a
+    zero gap) and the `broad_index_core_etf_not_selected_this_plan` policy
+    reason — they are never candidates in the same plan as VTI.
     """
 
     _POSITIONS = [
@@ -1589,13 +1669,14 @@ class TestStage12CRegressionFixture:
         + 10 * 220 + 3 * 540 + 2 * 440 + 2 * 480 + 5 * 130
     )  # $42,310
 
-    def _make_db(self) -> MagicMock:
+    def _make_db(self, cash_balance: float = 0.0, extra_cash: float = 0.0) -> MagicMock:
         positions = [_pos(t, shares=s) for t, s, _ in self._POSITIONS]
         prices_by_ticker = {t: [_price(t, close=p)] for t, s, p in self._POSITIONS}
         return _make_db(
             positions=positions,
             prices_by_ticker=prices_by_ticker,
-            snapshot_value=self._TOTAL_MV,
+            snapshot_value=self._TOTAL_MV + extra_cash,
+            cash_balance=cash_balance,
         )
 
     @pytest.mark.asyncio
@@ -1628,9 +1709,38 @@ class TestStage12CRegressionFixture:
         assert vti is not None, "VTI should be in next_buy_candidates"
         assert vti["selection_policy"] == "core_etf_preference_v1"
         assert vti["preference_rank"] == 4
-        assert vti["preference_reason"] == "preferred_core_broad_market_etf"
-        assert "core_etf_preference" in vti["reason_codes"]
-        assert "preferred_vti_over_spy" in vti["reason_codes"]
+        assert vti["preference_reason"] == "preferred_core_etf"
+        assert "preferred_core_etf" in vti["reason_codes"]
+        assert "selected_over_lower_preference_core_etfs" in vti["reason_codes"]
+        assert "broad_index_group_underweight" in vti["reason_codes"]
+
+    @pytest.mark.asyncio
+    async def test_production_fixture_never_allocates_to_both_vti_and_spy(self):
+        """Required regression J: with the production-shaped $2,737.50
+        fixture (VTI and SPY both held), the plan must never allocate to
+        both VTI and SPY merely because VTI reached an old artificial
+        equal-split ticker target. Only VTI may receive broad-index cash;
+        SPY must receive zero regardless of the cash amount deployed."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        candidates = result["next_buy_candidates"]
+        broad_candidates = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        broad_tickers = [c["ticker"] for c in broad_candidates]
+
+        assert broad_tickers == ["VTI"], (
+            f"Expected VTI as the only broad_index_etf candidate; got {broad_tickers}"
+        )
+        assert "SPY" not in [c["ticker"] for c in candidates], (
+            "SPY must not receive any new cash in the same plan as VTI"
+        )
+
+        cash_plan = result["cash_plan"]
+        assert cash_plan["allocated_cash"] <= 2737.50
+        assert cash_plan["unallocated_cash"] >= 0.0
+        assert cash_plan["allocated_cash"] + cash_plan["unallocated_cash"] == pytest.approx(2737.50, abs=0.02)
 
     @pytest.mark.asyncio
     async def test_no_overspend_with_2737_50(self):
@@ -2636,3 +2746,203 @@ class TestStockSleevePolicyGuardrail:
         cp = result["cash_plan"]
         assert cp["allocated_cash"] <= cp["cash_to_deploy"]
         assert cp["unallocated_cash"] >= 0
+
+
+# ── Cash-aware reconciliation (PR #489 patch) ──────────────────────────────────
+#
+# portfolio_snapshots.total_equity includes cash on top of invested positions
+# and must never be compared directly against a positions-only market value.
+# snapshot_invested_value = total_equity - cash_balance is derived and
+# reconciled against position-derived market value instead.
+
+class TestCashAwareReconciliation:
+    """Required regressions A-H for cash-aware Deploy Cash reconciliation."""
+
+    @pytest.mark.asyncio
+    async def test_a_cash_aware_reconciliation_passes_and_plan_stays_trusted(self):
+        """total_equity=102737.50, cash_balance=2737.50, positions=$100,000:
+        invested_value (100,000.00) matches position-derived value exactly,
+        so reconciliation passes and Deploy Cash can remain ready/trusted."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=102737.50, cash_balance=2737.50,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["reconciliation_status"] == "pass"
+        assert truth["snapshot_portfolio_value"] == 102737.50
+        assert truth["snapshot_cash_balance"] == 2737.50
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert result["verdict"]["policy_status"] == "ready"
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_b_zero_cash_balance_unchanged_behavior(self):
+        """cash_balance=0.0 (explicit): invested_value == total_equity, same
+        as the pre-cash-aware comparison — existing behavior is unchanged."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=0.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["reconciliation_status"] == "pass"
+        assert truth["snapshot_invested_value"] == 100000.0
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_c_negative_finite_cash_stays_arithmetic(self):
+        """A negative finite cash_balance is real arithmetic data, never
+        coerced to zero: invested_value = total_equity - (negative cash) =
+        total_equity + |cash|, computed and reconciled normally."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=99500.0, cash_balance=-500.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] == -500.0
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert truth["reconciliation_status"] == "pass"
+
+    @pytest.mark.asyncio
+    async def test_d_missing_cash_balance_fails_closed_to_unavailable(self):
+        """cash_balance missing entirely (None): snapshot_invested_value
+        cannot be derived, so reconciliation is unavailable and the numeric
+        plan is not trusted — total_equity alone is never substituted in."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=None,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] is None
+        assert truth["snapshot_cash_balance"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert "snapshot_cash_balance_missing_or_non_finite" in result["generated_policy"]["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_e_non_finite_total_equity_fails_closed(self):
+        """NaN total_equity fails closed to an unavailable reconciliation
+        rather than propagating NaN arithmetic downstream."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=float("nan"), cash_balance=0.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_portfolio_value"] is None
+        assert truth["snapshot_invested_value"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_e_infinite_cash_balance_fails_closed(self):
+        """+infinity cash_balance fails closed to an unavailable
+        reconciliation rather than producing an infinite/NaN invested value."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=100000.0, cash_balance=float("inf"),
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] is None
+        assert truth["snapshot_invested_value"] is None
+        assert truth["reconciliation_status"] == "unavailable"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_f_large_cash_pile_alone_does_not_create_false_blocker(self):
+        """cash_balance is 900% of invested value, but invested_value still
+        matches position-derived market value exactly — a large cash pile on
+        its own must never trip the reconciliation blocker (the old bug:
+        comparing raw total_equity, which includes that cash, directly
+        against a positions-only sum)."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=1_000_000.0, cash_balance=900_000.0,
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] == pytest.approx(100000.0)
+        assert truth["reconciliation_status"] == "pass"
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_g_genuine_invested_value_divergence_still_blocks(self):
+        """After removing cash, the remaining invested value still genuinely
+        diverges from position-derived market value beyond the existing
+        (unweakened) 5% degraded tolerance — reconciliation still blocks."""
+        positions = [_pos("AAPL", shares=1000)]
+        prices = {"AAPL": [_price("AAPL", close=100.0)]}  # positions = $100,000
+        db = _make_db(
+            positions=positions, prices_by_ticker=prices,
+            snapshot_value=250000.0, cash_balance=100000.0,  # invested = $150,000
+        )
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_invested_value"] == pytest.approx(150000.0)
+        assert truth["reconciliation_status"] == "blocked"
+        assert result["verdict"]["policy_status"] == "blocked"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_h_production_fixture_unaffected_by_cash_aware_reconciliation(self):
+        """Required regression H: the existing $2,737.50 production-shaped
+        ETF-waterfall fixture (VTI and SPY both held) still never allocates
+        to both VTI and SPY, and cash conservation stays exact, even with a
+        real non-zero cash balance now correctly excluded from the invested
+        value used for reconciliation."""
+        fixture = TestStage12CRegressionFixture()
+        db = fixture._make_db(cash_balance=1500.0, extra_cash=1500.0)
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        truth = result["truth_dependency"]
+        assert truth["snapshot_cash_balance"] == 1500.0
+        assert truth["snapshot_invested_value"] == pytest.approx(fixture._TOTAL_MV)
+        assert truth["reconciliation_status"] == "pass"
+
+        candidates = result["next_buy_candidates"]
+        broad_tickers = [c["ticker"] for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad_tickers == ["VTI"], (
+            f"Expected VTI as the only broad_index_etf candidate; got {broad_tickers}"
+        )
+        assert "SPY" not in [c["ticker"] for c in candidates]
+
+        cash_plan = result["cash_plan"]
+        assert cash_plan["allocated_cash"] <= 2737.50
+        assert cash_plan["unallocated_cash"] >= 0.0
+        assert cash_plan["allocated_cash"] + cash_plan["unallocated_cash"] == pytest.approx(2737.50, abs=0.02)

@@ -62,14 +62,16 @@ export type PaycheckPlanPreviewResponse = {
 
 // ── Reason code → plain-English UI copy ───────────────────────────────────────
 // Deliberately does not reuse the backend's semicolon-joined `reason` string —
-// that copy is written for diagnostics, not the product surface. VTI/SPY
-// wording is chosen so SPY never reads as more preferred than VTI.
+// that copy is written for diagnostics, not the product surface. Copy never
+// names a specific ticker as "preferred" generically — the exclusive core-ETF
+// waterfall names the actual selected ticker dynamically in the backend's own
+// per-candidate reason text, not here.
 
 const REASON_CODE_COPY: Record<string, string> = {
   etf_floor_not_met: "ETF allocation is below the conservative policy floor.",
-  broad_index_etf_group_underweight: "Broad-market ETFs are underweight versus policy.",
-  core_etf_preference: "Core ETF preference applied.",
-  preferred_vti_over_spy: "VTI is prioritized ahead of SPY by policy.",
+  broad_index_group_underweight: "Broad-market ETFs are underweight versus policy.",
+  preferred_core_etf: "This is the preferred core ETF under the policy's preference order.",
+  selected_over_lower_preference_core_etfs: "Chosen ahead of other held core ETFs by policy.",
 };
 
 const MAX_REASON_BULLETS = 2;

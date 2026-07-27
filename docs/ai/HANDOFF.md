@@ -22,9 +22,14 @@ new cash only. Reason codes renamed for the selected candidate:
 `preferred_vti_over_spy`, `broad_index_etf_group_underweight`) —
 `paycheck_plan_preview.py`'s reason-text/bucket/role mappings updated to
 match, including a new `core_etf_preference_blocked` not-selected bucket
-that surfaces the dynamic per-ticker reason. No new page/control/model/
-provider; no SQL/env changes. Net production diff is small (two existing
-files: `allocation_policy_v1.py`, `paycheck_plan_preview.py`). Full backend
+that surfaces the dynamic per-ticker reason. `policy-authority-reviewer`
+also caught a dead frontend reason-code copy map
+(`paycheck-plan-helpers.ts`, unused by any rendered component today) still
+holding the old code strings — synced to the renamed codes in a follow-up
+commit so it can't silently show wrong copy if wired in later. No new
+page/control/model/provider; no SQL/env changes. Net production diff is
+small (three existing files: `allocation_policy_v1.py`,
+`paycheck_plan_preview.py`, `paycheck-plan-helpers.ts`). Full backend
 suite (8793 tests) and full frontend suite (676 tests) pass; TypeScript
 and production build (`next build`, real env vars) both clean. See PR body
 for the full regression-letter (A–J) to test mapping.)

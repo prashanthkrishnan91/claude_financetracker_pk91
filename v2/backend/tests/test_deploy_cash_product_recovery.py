@@ -466,8 +466,8 @@ class TestCashToDeployContract:
         assert preview["status"] == "degraded"
         assert preview["planned_buys"] == [{
             "ticker": "VTI", "amount": 500.0,
-            "reason": "This asset group is underweight versus its target; Preferred as a core broad-market ETF",
-            "reason_codes": ["broad_index_etf_group_underweight", "core_etf_preference"],
+            "reason": "This asset group is underweight versus its target; Preferred as the top core broad-market ETF",
+            "reason_codes": ["broad_index_group_underweight", "preferred_core_etf"],
         }]
 
     @pytest.mark.asyncio

@@ -1,6 +1,35 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-25 (Run Intel operational-reliability PR #488 — item 4
+Last updated: 2026-07-27 (Deploy Cash core-ETF exclusive waterfall, branch
+`claude/deploy-cash-etf-waterfall-a0wzam`, OPEN, not yet merged — from
+main after PR #488. Fixes `allocation_policy_v1._compute_gaps`: the
+broad_index_etf group target was previously split equally across every
+held broad ETF, so the VTI>VOO>SPY>QQQ preference order only reordered an
+otherwise-cosmetic per-ticker allocation — VTI filled its 1/N artificial
+share and the allocator then moved on to fund SPY/VOO/QQQ too. Now, when
+the broad_index_etf group is underweight, the FULL group-level dollar gap
+goes to the single highest-preference held ticker with a current,
+non-stale price (`selected_core_etf_ticker` in `_compute_gaps`); every
+other held broad ETF gets a zero gap in the same plan (new
+`policy_ineligibility_reason="broad_index_core_etf_not_selected_this_plan"`
+plus a dynamic `core_etf_not_selected_reason` string naming the actual
+selected ticker). A lower-preference ticker is only reachable when every
+higher-preference held ticker is missing-priced, stale, or absent. This
+never sells/consolidates/advises against existing lower-preference ETFs —
+new cash only. Reason codes renamed for the selected candidate:
+`preferred_core_etf`, `selected_over_lower_preference_core_etfs`,
+`broad_index_group_underweight` (was `core_etf_preference`,
+`preferred_vti_over_spy`, `broad_index_etf_group_underweight`) —
+`paycheck_plan_preview.py`'s reason-text/bucket/role mappings updated to
+match, including a new `core_etf_preference_blocked` not-selected bucket
+that surfaces the dynamic per-ticker reason. No new page/control/model/
+provider; no SQL/env changes. Net production diff is small (two existing
+files: `allocation_policy_v1.py`, `paycheck_plan_preview.py`). Full backend
+suite (8793 tests) and full frontend suite (676 tests) pass; TypeScript
+and production build (`next build`, real env vars) both clean. See PR body
+for the full regression-letter (A–J) to test mapping.)
+
+Previously (2026-07-25, Run Intel operational-reliability PR #488 — item 4
 of the Run Intel trust-recovery sequence, OPEN, not yet merged, patched a
 THIRD round to close four remaining release blockers: (1) portfolio
 reconciliation is now cash-aware — the snapshot's `total_equity` includes

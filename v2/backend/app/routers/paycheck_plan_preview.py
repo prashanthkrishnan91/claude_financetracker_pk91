@@ -32,8 +32,8 @@ _ADVICE_CAVEAT = (
 # Plain-English text for known reason codes. Group-underweight codes are
 # dynamic (f"{group}_group_underweight") and handled separately.
 _REASON_CODE_TEXT: dict[str, str] = {
-    "core_etf_preference": "Preferred as a core broad-market ETF",
-    "preferred_vti_over_spy": "Chosen ahead of SPY under the core ETF preference order",
+    "preferred_core_etf": "Preferred as the top core broad-market ETF",
+    "selected_over_lower_preference_core_etfs": "Chosen ahead of other held core ETFs under the preference order",
     "etf_floor_not_met": "Overall ETF allocation floor is not yet met",
     "positive_gap": "Below its target allocation weight",
     "evidence_fresh_and_constructive": "Passed evidence freshness, confidence, and concentration checks",
@@ -146,6 +146,8 @@ def _policy_block_text(code: str) -> str:
         return "No trusted current price is available for this ticker."
     if code == "stale_price_not_eligible_for_new_cash":
         return "This ticker's price is stale, so it cannot receive new cash right now."
+    if code == "broad_index_core_etf_not_selected_this_plan":
+        return "A higher-preference core ETF is receiving this plan's broad-index cash instead."
     return code.replace("_", " ").capitalize()
 
 
@@ -154,6 +156,8 @@ def _policy_block_bucket(code: str) -> str:
         return "missing_truth_blocked"
     if code == "stale_price_not_eligible_for_new_cash":
         return "stale_price_blocked"
+    if code == "broad_index_core_etf_not_selected_this_plan":
+        return "core_etf_preference_blocked"
     if code.startswith("at_or_above_") and "group" not in code:
         return "concentration_blocked"
     return "group_cap_blocked"
@@ -182,7 +186,7 @@ def _evidence_summary_for_candidate(candidate: dict) -> dict | None:
 def _policy_role_for_etf(reason_codes: list[str]) -> str | None:
     if "etf_floor_not_met" in reason_codes:
         return "Fills the 40% ETF allocation floor"
-    if "core_etf_preference" in reason_codes:
+    if "preferred_core_etf" in reason_codes:
         return "Core broad-market ETF under the preference order"
     for code in reason_codes:
         if code.endswith("_group_underweight"):
@@ -269,10 +273,18 @@ def build_plan_explanations(diagnostic: dict[str, Any]) -> dict[str, Any]:
             # they are the authoritative source for these two codes.
             continue
         if policy_code:
+            # The core-ETF waterfall's "not selected" text names the actual
+            # selected ticker dynamically (e.g. "...because VTI is the
+            # preferred eligible core ETF") — allocation_policy_v1 already
+            # built that exact string, since only it knows which ticker won.
+            core_etf_reason = tg.get("core_etf_not_selected_reason")
+            plain_english = f"{ticker} {core_etf_reason}" if core_etf_reason else (
+                f"{ticker}: {_policy_block_text(policy_code)}"
+            )
             not_selected.append({
                 "ticker": ticker,
                 "bucket": _policy_block_bucket(policy_code),
-                "plain_english": f"{ticker}: {_policy_block_text(policy_code)}",
+                "plain_english": plain_english,
                 "raw_codes": [policy_code],
             })
             continue

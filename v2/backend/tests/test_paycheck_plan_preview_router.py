@@ -34,23 +34,27 @@ def _ready_diagnostic(vti_first: bool = True) -> dict:
         "classification": "broad_index_etf",
         "conviction": "neutral",
         "confidence": "policy_only",
-        "reason_codes": ["etf_floor_not_met", "core_etf_preference", "preferred_vti_over_spy"],
+        "reason_codes": ["etf_floor_not_met", "preferred_core_etf", "selected_over_lower_preference_core_etfs"],
         "is_unknown_ticker": False,
     }
-    spy_candidate = {
-        "ticker": "SPY",
+    # A second candidate from a DIFFERENT group (dividend_etf), not a
+    # lower-preference broad ETF — the exclusive core-ETF waterfall means a
+    # real diagnostic never allocates to two broad_index_etf tickers (e.g.
+    # VTI and SPY) in the same plan.
+    vym_candidate = {
+        "ticker": "VYM",
         "dollar_amount": 1000.0,
-        "current_weight_pct": 20.0,
-        "target_or_cap_weight_pct": 25.0,
+        "current_weight_pct": 5.0,
+        "target_or_cap_weight_pct": 10.0,
         "gap_pct": 5.0,
         "gap_dollars": 1000.0,
-        "classification": "broad_index_etf",
+        "classification": "dividend_etf",
         "conviction": "neutral",
         "confidence": "policy_only",
-        "reason_codes": ["broad_index_etf_group_underweight"],
+        "reason_codes": ["dividend_etf_group_underweight"],
         "is_unknown_ticker": False,
     }
-    candidates = [vti_candidate, spy_candidate] if vti_first else [spy_candidate, vti_candidate]
+    candidates = [vti_candidate, vym_candidate] if vti_first else [vym_candidate, vti_candidate]
 
     return {
         "diagnostic_version": "allocation_policy_v1",
@@ -70,7 +74,7 @@ def _ready_diagnostic(vti_first: bool = True) -> dict:
         "current_portfolio": {
             "total_market_value": 10000.0,
             "open_position_count": 3,
-            "per_ticker": [{"ticker": t, "market_value": 1000.0} for t in ("VTI", "SPY", "QQQ")],
+            "per_ticker": [{"ticker": t, "market_value": 1000.0} for t in ("VTI", "VYM", "QQQ")],
             "group_weights": {},
             "etf_total_weight_pct": 75.0,
         },
@@ -119,7 +123,7 @@ def _blocked_diagnostic() -> dict:
 
 def _degraded_diagnostic() -> dict:
     """Degraded but calculable: QQQ (held, per_ticker, but not a candidate)
-    carries the stale price — VTI/SPY (the actual candidates) are fresh, so
+    carries the stale price — VTI/VYM (the actual candidates) are fresh, so
     this fixture must never trip the stale-selected-candidate invariant."""
     diag = _ready_diagnostic()
     diag["truth_dependency"] = {
@@ -188,7 +192,7 @@ def test_degraded_but_calculable_preserves_the_computed_plan():
     # numeric_plan_trusted False must never yield a "ready" status
     assert degraded["status"] != "ready"
     assert degraded["trusted"] is False
-    assert [b["ticker"] for b in degraded["planned_buys"]] == ["VTI", "SPY"]
+    assert [b["ticker"] for b in degraded["planned_buys"]] == ["VTI", "VYM"]
 
 
 def test_planned_buys_output_is_concise_no_raw_diagnostic_payload():
@@ -210,14 +214,14 @@ def test_reason_codes_preserved_with_plain_english_reason():
 
     preview = build_paycheck_plan_preview(_ready_diagnostic())
     vti_buy = next(b for b in preview["planned_buys"] if b["ticker"] == "VTI")
-    assert "core_etf_preference" in vti_buy["reason_codes"]
-    assert "preferred_vti_over_spy" in vti_buy["reason_codes"]
+    assert "preferred_core_etf" in vti_buy["reason_codes"]
+    assert "selected_over_lower_preference_core_etfs" in vti_buy["reason_codes"]
     assert "etf_floor_not_met" in vti_buy["reason_codes"]
     assert "ETF" in vti_buy["reason"] or "core" in vti_buy["reason"].lower()
 
-    spy_buy = next(b for b in preview["planned_buys"] if b["ticker"] == "SPY")
-    assert "broad_index_etf_group_underweight" in spy_buy["reason_codes"]
-    assert "underweight" in spy_buy["reason"].lower()
+    vym_buy = next(b for b in preview["planned_buys"] if b["ticker"] == "VYM")
+    assert "dividend_etf_group_underweight" in vym_buy["reason_codes"]
+    assert "underweight" in vym_buy["reason"].lower()
 
 
 def test_cash_invariant_fields_pass_through():
@@ -369,12 +373,12 @@ def test_selected_entries_carry_amount_percent_reasons_and_role():
 
     preview = build_paycheck_plan_preview(_ready_diagnostic())
     sel = preview["explanations"]["selected"]
-    assert [e["ticker"] for e in sel] == ["VTI", "SPY"]
+    assert [e["ticker"] for e in sel] == ["VTI", "VYM"]
     vti = sel[0]
     assert vti["amount"] == 1737.5
     assert vti["percent_of_deployable_cash"] == round(100 * 1737.5 / 2737.5, 2)
     assert vti["policy_role"] == "Fills the 40% ETF allocation floor"
-    assert vti["raw_codes"] == ["etf_floor_not_met", "core_etf_preference", "preferred_vti_over_spy"]
+    assert vti["raw_codes"] == ["etf_floor_not_met", "preferred_core_etf", "selected_over_lower_preference_core_etfs"]
     assert all(isinstance(r, str) and "_" not in r[:1] for r in vti["reasons"])
 
 
@@ -459,10 +463,10 @@ def test_stale_and_missing_price_buckets():
     buckets = {e["ticker"]: e["bucket"] for e in preview["explanations"]["not_selected"]}
     # QQQ is stale-priced (a held ticker, not a candidate) and KLAR is
     # missing — neither is one of the diagnostic's own next_buy_candidates
-    # (VTI/SPY), so the plan is preserved and both blockers are documented.
+    # (VTI/VYM), so the plan is preserved and both blockers are documented.
     assert buckets.get("KLAR") == "missing_truth_blocked"
     assert buckets.get("QQQ") == "stale_price_blocked"
-    assert [e["ticker"] for e in preview["explanations"]["selected"]] == ["VTI", "SPY"]
+    assert [e["ticker"] for e in preview["explanations"]["selected"]] == ["VTI", "VYM"]
 
 
 def test_max_positions_reached_bucket():

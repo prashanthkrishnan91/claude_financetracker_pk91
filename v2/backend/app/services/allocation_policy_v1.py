@@ -11,7 +11,15 @@ without it using neutral defaults.
 
 Stage 12C adds a deterministic core ETF preference policy for broad_index_etf
 candidates: VTI > VOO > SPY > QQQ. Preference order governs over raw gap size
-so SPY's larger gap cannot displace an eligible underweight VTI.
+so SPY's larger gap cannot displace an eligible underweight VTI. The
+preference order is an *exclusive* new-cash waterfall, not an equal split of
+the group target across every held broad ETF: when the broad_index_etf group
+is underweight, the entire group-level dollar gap is assigned to the single
+highest-preference held ticker with a current, non-stale price. Every other
+held broad ETF gets a zero gap in the same plan — the preference order would
+otherwise be cosmetic (VTI filling only its artificial per-ticker share
+before the allocator moved on to SPY). This never sells, consolidates, or
+advises against existing lower-preference ETFs; it only governs new cash.
 
 Stage 13A extends this same policy (no new model, no new endpoint) with
 evidence-aware gating for individual-stock candidates. A stock only becomes
@@ -425,6 +433,30 @@ def _compute_gaps(
             "status": status,
         }
 
+    # ── Exclusive core-ETF new-cash waterfall for GROUP_BROAD_ETF ────────────
+    # The broad-index group target is no longer split equally among every
+    # held broad ETF — that made the VTI>VOO>SPY>QQQ preference cosmetic:
+    # VTI filled only its artificial per-ticker share and the allocator then
+    # moved on to SPY. When the group is underweight, the entire group-level
+    # dollar gap goes to the single highest-preference held ticker with a
+    # current, non-stale price. Lower-preference broad ETFs get a zero gap
+    # in this plan — they are never sold, consolidated, or advised against.
+    broad_group_gap = group_gaps.get(GROUP_BROAD_ETF, {})
+    broad_group_gap_pct = broad_group_gap.get("gap_pct", 0.0)
+    broad_group_underweight = broad_group_gap.get("status") == "under"
+    selected_core_etf_ticker: str | None = None
+    if broad_group_underweight:
+        for pref_ticker in BROAD_INDEX_CORE_PREFERENCE_ORDER:
+            candidate_holding = holdings.get(pref_ticker)
+            if candidate_holding is None:
+                continue  # not held in this portfolio
+            if candidate_holding["market_value"] is None:
+                continue  # missing price
+            if pref_ticker in stale_ticker_set:
+                continue  # stale price
+            selected_core_etf_ticker = pref_ticker
+            break
+
     ticker_gaps: dict[str, dict] = {}
     for ticker, h in holdings.items():
         group = h["group"]
@@ -448,6 +480,7 @@ def _compute_gaps(
         # stocks, a policy blocker here must never short-circuit evaluation
         # of the evidence gate (Stage 13C fix — see evidence_gate_passed).
         policy_ineligibility_reason: str | None = None
+        core_etf_not_selected_reason: str | None = None
         if h["market_value"] is None:
             policy_ineligibility_reason = "no_price_available"
         elif ticker in stale_ticker_set:
@@ -463,6 +496,19 @@ def _compute_gaps(
             group_gap_status = group_gaps.get(group, {}).get("status", "within")
             if group_gap_status == "over":
                 policy_ineligibility_reason = f"etf_group_{group}_already_above_target"
+            elif (
+                group == GROUP_BROAD_ETF
+                and selected_core_etf_ticker is not None
+                and ticker != selected_core_etf_ticker
+            ):
+                # Exclusive core-ETF waterfall: a lower-preference broad ETF
+                # gets zero new cash in this plan while a higher-preference
+                # held ticker is eligible to receive the group's gap.
+                policy_ineligibility_reason = "broad_index_core_etf_not_selected_this_plan"
+                core_etf_not_selected_reason = (
+                    f"Not selected for new cash because {selected_core_etf_ticker} is "
+                    "the preferred eligible core ETF."
+                )
 
         # For crypto: check group total
         elif group == GROUP_CRYPTO:
@@ -522,11 +568,22 @@ def _compute_gaps(
             ineligibility_reason = policy_ineligibility_reason
             eligible = ineligibility_reason is None
 
-        # Target weight for this ticker (group target / tickers in group)
-        tickers_in_group = [t for t, hh in holdings.items() if hh["group"] == group]
-        n_in_group = len(tickers_in_group) or 1
-        group_target = group_targets.get(group, 0.0)
-        ticker_target_pct = min(per_ticker_cap, group_target / n_in_group)
+        # Target weight for this ticker. GROUP_BROAD_ETF is an exclusive
+        # new-cash waterfall (see selected_core_etf_ticker above), not an
+        # equal split across every held broad ETF: the selected ticker's
+        # target absorbs the whole group-level gap, everyone else in the
+        # group gets a zero gap this plan. Other ETF/asset groups keep the
+        # existing equal-split-per-ticker target.
+        if group == GROUP_BROAD_ETF:
+            if ticker == selected_core_etf_ticker:
+                ticker_target_pct = min(per_ticker_cap, current_pct + broad_group_gap_pct)
+            else:
+                ticker_target_pct = current_pct
+        else:
+            tickers_in_group = [t for t, hh in holdings.items() if hh["group"] == group]
+            n_in_group = len(tickers_in_group) or 1
+            group_target = group_targets.get(group, 0.0)
+            ticker_target_pct = min(per_ticker_cap, group_target / n_in_group)
 
         ticker_gaps[ticker] = {
             "ticker": ticker,
@@ -541,6 +598,7 @@ def _compute_gaps(
             "evidence_gate_passed": evidence_gate_passed,
             "is_unknown_ticker": h["is_unknown"],
             "evidence_gate_codes": evidence_gate_codes,
+            "core_etf_not_selected_reason": core_etf_not_selected_reason,
         }
 
     return group_gaps, ticker_gaps
@@ -749,19 +807,13 @@ def _rank_buy_candidates(
     """Build ranked list of buy candidates.
 
     Primary: ETF/diversification priority when ETF floor is not met.
-    Secondary (broad_index_etf): core ETF preference order (VTI>VOO>SPY>QQQ).
+    Secondary (broad_index_etf): core ETF preference order (VTI>VOO>SPY>QQQ)
+    is an exclusive new-cash waterfall — `_compute_gaps` already zeroes the
+    gap for every held broad ETF except the single highest-preference
+    eligible one, so at most one broad_index_etf candidate can appear here.
     Tertiary: Intel v3 conviction if available.
     Quaternary: positive gap size.
-
-    For broad_index_etf, preference order governs within the group — a larger
-    SPY gap does not displace an eligible underweight VTI.
     """
-    # Pre-compute eligible broad_index_etf candidate tickers for reason code context.
-    eligible_broad_tickers: set[str] = {
-        t for t, tg in ticker_gaps.items()
-        if tg["eligible_for_buy"] and tg["gap_pct"] > 0 and tg["group"] == GROUP_BROAD_ETF
-    }
-
     candidates = []
     for ticker, tg in ticker_gaps.items():
         if not tg["eligible_for_buy"]:
@@ -796,22 +848,29 @@ def _rank_buy_candidates(
             preference_rank = pref_rank if pref_rank > 0 else None
 
             if pref_rank > 0:
-                preference_reason = "preferred_core_broad_market_etf"
-                extra_reason_codes.append("core_etf_preference")
+                preference_reason = "preferred_core_etf"
+                extra_reason_codes.append("preferred_core_etf")
 
-                # Tickers with higher preference that are held but NOT eligible candidates
-                for higher_ticker, higher_rank in _CORE_ETF_PREFERENCE_RANK.items():
-                    if higher_rank <= pref_rank:
-                        continue
-                    if higher_ticker not in ticker_gaps:
-                        continue  # not held in this portfolio
-                    htg = ticker_gaps[higher_ticker]
-                    if not htg["eligible_for_buy"] or htg["gap_pct"] <= 0:
-                        skipped_higher_preference_tickers.append(higher_ticker)
-
-                # Specific code when VTI is selected and SPY is also an eligible candidate
-                if ticker == "VTI" and "SPY" in eligible_broad_tickers:
-                    extra_reason_codes.append("preferred_vti_over_spy")
+                # Every other broad ETF ticker held in this portfolio has a
+                # zero gap this plan (see _compute_gaps) — either because it
+                # ranks higher but is missing/stale/absent (this candidate
+                # was only reachable because every higher-preference held
+                # ticker was ineligible), or because it ranks lower and was
+                # displaced by this exclusive waterfall selection.
+                held_other_broad_tickers = [
+                    t for t in BROAD_INDEX_CORE_PREFERENCE_ORDER
+                    if t != ticker and t in ticker_gaps
+                ]
+                skipped_higher_preference_tickers = [
+                    t for t in held_other_broad_tickers
+                    if _CORE_ETF_PREFERENCE_RANK.get(t, 0) > pref_rank
+                ]
+                lower_preference_held = [
+                    t for t in held_other_broad_tickers
+                    if _CORE_ETF_PREFERENCE_RANK.get(t, 0) < pref_rank
+                ]
+                if lower_preference_held:
+                    extra_reason_codes.append("selected_over_lower_preference_core_etfs")
         # ─────────────────────────────────────────────────────────────────────
 
         # ── Stage 13A: evidence-aware transparency fields for individual stocks ──
@@ -873,7 +932,11 @@ def _build_reason_codes(
         codes.append("etf_floor_not_met")
     gg = group_gaps.get(group, {})
     if gg.get("status") == "under":
-        codes.append(f"{group}_group_underweight")
+        # broad_index_etf reports the bounded "broad_index_group_underweight"
+        # code (not "broad_index_etf_group_underweight") — see the exclusive
+        # core-ETF waterfall transparency contract.
+        group_label = "broad_index" if group == GROUP_BROAD_ETF else group
+        codes.append(f"{group_label}_group_underweight")
     return codes or ["positive_gap"]
 
 
